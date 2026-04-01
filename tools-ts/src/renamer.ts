@@ -15,6 +15,7 @@ import ts from "typescript";
 import * as fs from "fs";
 import * as path from "path";
 import type { RenameDB } from "./rename-db-types";
+import { constraintMatch } from "./constraint-renamer";
 
 export interface RenameEntry {
   minified: string;
@@ -476,8 +477,10 @@ export function buildModuleRenames(
 }
 
 /**
- * Find positions of top-level declaration identifiers in a file.
- * Returns map of name → character offset.
+ * Find positions of declaration identifiers at any depth in the AST.
+ * Searches recursively — handles declarations inside IIFE wrappers,
+ * E()/R() blocks, and other nested scopes.
+ * Returns map of name → character offset (first occurrence wins).
  */
 function findDeclPositions(code: string, fileName: string): Map<string, number> {
   const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
@@ -485,7 +488,9 @@ function findDeclPositions(code: string, fileName: string): Map<string, number> 
 
   function extractBindingPositions(name: ts.BindingName) {
     if (ts.isIdentifier(name)) {
-      positions.set(name.text, name.getStart(sf));
+      if (!positions.has(name.text)) {
+        positions.set(name.text, name.getStart(sf));
+      }
     } else if (ts.isObjectBindingPattern(name)) {
       for (const el of name.elements) extractBindingPositions(el.name);
     } else if (ts.isArrayBindingPattern(name)) {
@@ -495,18 +500,24 @@ function findDeclPositions(code: string, fileName: string): Map<string, number> 
     }
   }
 
-  for (const stmt of sf.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-      positions.set(stmt.name.text, stmt.name.getStart(sf));
-    } else if (ts.isClassDeclaration(stmt) && stmt.name) {
-      positions.set(stmt.name.text, stmt.name.getStart(sf));
-    } else if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
+  function visit(node: ts.Node) {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      if (!positions.has(node.name.text)) {
+        positions.set(node.name.text, node.name.getStart(sf));
+      }
+    } else if (ts.isClassDeclaration(node) && node.name) {
+      if (!positions.has(node.name.text)) {
+        positions.set(node.name.text, node.name.getStart(sf));
+      }
+    } else if (ts.isVariableStatement(node)) {
+      for (const decl of node.declarationList.declarations) {
         extractBindingPositions(decl.name);
       }
     }
+    ts.forEachChild(node, visit);
   }
 
+  visit(sf);
   return positions;
 }
 
@@ -515,10 +526,13 @@ function findDeclPositions(code: string, fileName: string): Map<string, number> 
  * Returns the raw code suitable for concatenation into a single file.
  */
 function stripImportExport(code: string): string {
+  // Only strip imports from relative paths (added by module-reconstruct),
+  // NOT original code imports from "process", "fs", "crypto", etc.
   code = code.replace(
-    /^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"];?\s*\n?/gm,
+    /^import\s+\{[^}]*\}\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*\n?/gm,
     "",
   );
+  // Strip export lines added by module-reconstruct
   code = code.replace(/^export\s+\{[^}]*\};?\s*\n?/gm, "");
   return code;
 }
@@ -560,6 +574,10 @@ function renameWithLanguageService(
 
     let code = fs.readFileSync(fullPath, "utf-8");
     code = stripImportExport(code);
+    // Strip hashbang (v2.1.70+ uses #!/usr/bin/env node instead of IIFE)
+    if (code.startsWith("#!")) {
+      code = code.replace(/^#![^\n]*\n?/, "");
+    }
 
     const idx = sections.length;
     sections.push({
@@ -729,18 +747,24 @@ function renameWithLanguageService(
 }
 
 /**
- * Find the byte offset where stripped code begins within the original code.
- * The original has import lines prepended and export lines appended.
- * Returns the offset of the first non-import line in the original.
+ * Calculate the byte offset between the stripped code and the original file.
+ * The stripped code starts with the first non-import/non-blank line.
+ * Returns the offset to add to stripped positions to get original positions.
  */
 function findCodeOffset(original: string, stripped: string): number {
-  // The stripped code is the original minus import/export lines.
-  // Find where the first line of stripped code appears in the original.
-  const firstLine = stripped.slice(0, Math.min(80, stripped.indexOf("\n") >>> 0 || 80));
-  if (!firstLine.trim()) return 0;
+  // Find where the stripped content starts in the original
+  // Use a reliable substring match on the first meaningful content
+  const trimmed = stripped.replace(/^\s+/, "");
+  const needle = trimmed.slice(0, Math.min(60, trimmed.indexOf("\n") >>> 0 || 60));
+  if (!needle) return 0;
 
-  const idx = original.indexOf(firstLine);
-  return idx >= 0 ? idx : 0;
+  const idx = original.indexOf(needle);
+  if (idx < 0) return 0;
+
+  // The offset is: (position in original) - (position in stripped)
+  // stripped might have leading whitespace that we trimmed
+  const strippedLeading = stripped.length - trimmed.length;
+  return idx - strippedLeading;
 }
 
 /**
@@ -766,7 +790,7 @@ export function renameProject(
     db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
   }
 
-  // Pass 1: Discover all renames from matched modules
+  // Pass 1: Discover renames via constraint matching + export maps
   const renameTasks: Array<{
     minified: string;
     original: string;
@@ -785,18 +809,31 @@ export function renameProject(
     const deobCode = fs.readFileSync(deobPath, "utf-8");
     const sourceCode = fs.readFileSync(sourcePath, "utf-8");
 
-    let renames = buildModuleRenames(deobCode, sourceCode, section.matched_source);
-    if (renames.size === 0) continue;
+    // Primary: constraint matching (inside-out, version-agnostic)
+    const { matches: constraintMatches } = constraintMatch(
+      deobCode, sourceCode, section.matched_source,
+    );
+
+    // Fallback: export map + signature matching
+    let legacyRenames = buildModuleRenames(deobCode, sourceCode, section.matched_source);
 
     if (db) {
-      renames = applyDBFilters(renames, section.matched_source, db);
+      legacyRenames = applyDBFilters(legacyRenames, section.matched_source, db);
     }
 
-    for (const [minified, original] of renames) {
-      // Skip if same minified already mapped to a different original
-      const existing = seen.get(minified);
-      if (existing && existing !== original) continue;
+    // Merge: constraint matches take priority, then legacy
+    for (const m of constraintMatches) {
+      if (seen.has(m.minified)) continue;
+      seen.set(m.minified, m.original);
+      renameTasks.push({
+        minified: m.minified,
+        original: m.original,
+        declFile: section.output_path,
+      });
+    }
 
+    for (const [minified, original] of legacyRenames) {
+      if (seen.has(minified)) continue;
       seen.set(minified, original);
       renameTasks.push({
         minified,
