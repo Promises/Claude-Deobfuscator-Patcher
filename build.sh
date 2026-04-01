@@ -67,16 +67,19 @@ cd "$SCRIPT_DIR"
 echo ""
 echo "=== Step 3: Apply patches ==="
 if [ -d "$SCRIPT_DIR/patches.d" ]; then
+    # Init git so git apply works
+    cd "$SCRIPT_DIR/deobfuscated"
+    git init -q && git add -A && git commit -q -m "baseline" 2>/dev/null
+
     for patch in "$SCRIPT_DIR/patches.d"/*.patch; do
         [ -f "$patch" ] || continue
         echo "  Applying $(basename "$patch")..."
-        cd "$SCRIPT_DIR/deobfuscated"
-        git apply --allow-empty "$patch" 2>&1 || {
-            echo "  WARNING: Patch failed, trying with fuzz..."
-            git apply --allow-empty -C0 "$patch" 2>&1 || echo "  FAILED: $(basename "$patch")"
+        git apply "$patch" 2>&1 || {
+            echo "  WARNING: Exact match failed, trying with fuzz..."
+            git apply -C0 "$patch" 2>&1 || echo "  FAILED: $(basename "$patch")"
         }
-        cd "$SCRIPT_DIR"
     done
+    cd "$SCRIPT_DIR"
 else
     echo "  No patches.d/ directory — skipping"
 fi

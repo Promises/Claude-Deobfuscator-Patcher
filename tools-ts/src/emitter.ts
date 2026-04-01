@@ -131,6 +131,40 @@ export function emitProject(
     JSON.stringify(mapping, null, 2)
   );
 
+  // Inject custom modules from patches.d/modules/ if present
+  const customModulesDir = path.join(path.dirname(outputDir), "patches.d", "modules");
+  if (fs.existsSync(customModulesDir)) {
+    const customFiles = fs.readdirSync(customModulesDir).filter((f) => f.endsWith(".js")).sort();
+    for (const file of customFiles) {
+      const src = path.join(customModulesDir, file);
+      const dest = path.join(outputDir, "_custom", file);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+
+      // Add to mapping — insert right after preamble so custom code
+      // is available to all other modules at runtime
+      const entry: MappingSection = {
+        index: -1,
+        original_filename: `_custom/${file}`,
+        output_path: `_custom/${file}`,
+        type: "section",
+        module_name: `_custom_${file.replace(".js", "")}`,
+      };
+      const firstSectionIdx = mapping.sections.findIndex((s) => s.type === "section");
+      if (firstSectionIdx >= 0) {
+        mapping.sections.splice(firstSectionIdx, 0, entry);
+      } else {
+        mapping.sections.splice(1, 0, entry);
+      }
+    }
+    console.log(`  Custom modules: ${customFiles.length} (from patches.d/modules/)`);
+  }
+
+  fs.writeFileSync(
+    path.join(outputDir, "_mapping.json"),
+    JSON.stringify(mapping, null, 2)
+  );
+
   console.log(`Emitted to ${outputDir}/`);
   console.log(`  Matched: ${matched}`);
   console.log(`  Vendor: ${vendor}`);
