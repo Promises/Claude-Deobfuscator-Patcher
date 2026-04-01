@@ -6,6 +6,7 @@ Recovers original function/class/variable names from the compiled Claude Code bi
 
 - **bun** (v1.3+) — runs all TypeScript tools
 - **python3** — bundle splitter (esbuild format parser)
+- **prettier** — installed as dev dep in `tools-ts/` (`bun install`)
 - **Source reference** — `../claude-code` directory with original TypeScript source. Only needed for pattern generation/matching — not needed if using a pre-built `patterns-db.json` (future).
 
 Binary auto-detected from `$HOME/.local/share/claude/versions/` (macOS).
@@ -13,7 +14,7 @@ Binary auto-detected from `$HOME/.local/share/claude/versions/` (macOS).
 ## Pipeline Overview
 
 ```
-Binary → Extract → Split → Match → Emit → Module Reconstruct → Rename → Patch → Reassemble → Compile
+Binary → Extract → Split → Match → Emit → Module Reconstruct → Rename → Prettify → Patch → Reassemble → Compile
 ```
 
 | Step | Command | Input | Output |
@@ -22,6 +23,7 @@ Binary → Extract → Split → Match → Emit → Module Reconstruct → Renam
 | 2. Deobfuscate | `entrypoint.sh deob` | `source.js` + source ref | `deobfuscated/` (4600+ split files) |
 | 2.5. Module Reconstruct | `entrypoint.sh modrecon` | `deobfuscated/` | Same files + `import`/`export` added |
 | 2.6. Rename | `entrypoint.sh rename` | `deobfuscated/` + source ref | Same files with identifiers renamed |
+| 2.7. Prettify | `entrypoint.sh prettify` | `deobfuscated/` | Same files formatted with prettier |
 | 3. Patch | `entrypoint.sh patch` | `deobfuscated/` + `patches.d/` | Patched files, git baseline tagged |
 | 4. Reassemble | `entrypoint.sh reassemble` | `deobfuscated/` | `cli-runnable.js` (single file) |
 | 5. Compile | `entrypoint.sh compile` | `cli-runnable.js` | `claude` (standalone binary) |
@@ -115,6 +117,31 @@ var dH = function() { ... };           // global — RENAMED to isEnvTruthy
 function foo(dH) { return dH + 1; }   // parameter — NOT renamed (different binding)
 ```
 
+### Prettify (Step 2.7)
+
+`tools-ts/src/prettify.ts`
+
+After renaming, all files are formatted with prettier (`printWidth: 100`). This breaks long single-line functions into readable multi-line format, giving patches small, stable context windows.
+
+Before prettier:
+```javascript
+function getLogoDisplayData() { let H = process.env.DEMO_VERSION ?? { VERSION: "2.1.89", ... }.VERSION, _ = getDirectConnectServerUrl(), $ = isClaudeAISubscriber() ? getSubscriptionName() : "API Usage Billing"; return { version: H, billingType: $ }; }
+```
+
+After prettier:
+```javascript
+function getLogoDisplayData() {
+  let H = process.env.DEMO_VERSION ?? { VERSION: "2.1.89", ... }.VERSION,
+    _ = getDirectConnectServerUrl(),
+    $ = isClaudeAISubscriber() ? getSubscriptionName() : "API Usage Billing";
+  return { version: H, billingType: $ };
+}
+```
+
+A patch targeting `getSubscriptionName()` now only needs one context line — version strings and URLs are on separate lines and won't cause false mismatches across versions.
+
+The git baseline is tagged AFTER prettify, so patches are always written against the formatted output.
+
 ## Testing on the Installed Version
 
 ```bash
@@ -152,6 +179,7 @@ cp versionref/2.1.70-cli.js source.js
 bun run tools-ts/src/deob.ts source.js ../claude-code deobfuscated
 bun run tools-ts/src/module-reconstruct.ts deobfuscated
 bun run tools-ts/src/renamer.ts deobfuscated ../claude-code deobfuscated/_mapping.json
+bun run tools-ts/src/prettify.ts deobfuscated
 
 # Validate
 grep -c "^function [a-z][a-zA-Z]*[A-Z]" deobfuscated/bootstrap/state.js
@@ -162,6 +190,28 @@ grep "class CharPool" deobfuscated/ink/screen.js
 ```
 
 Available archived versions: `2.1.70` through `2.1.87` in `versionref/`.
+
+## Testing from a Binary
+
+If you have a Claude binary (not the extracted JS), copy it to the versions directory:
+
+```bash
+# Copy binary
+cp /path/to/claude-binary ~/.local/share/claude/versions/X.X.XX
+
+# Extract JS from binary for versionref archive (optional)
+# The entrypoint.sh extract step does this automatically
+
+# Build
+./entrypoint.sh clean
+./entrypoint.sh build
+```
+
+Binaries from `~/.local/share/claude/versions/` are auto-detected by version number (latest wins).
+
+**Supported binary formats:**
+- v2.1.70+: esbuild bundle with hashbang (`#!/usr/bin/env node`) or IIFE wrapper
+- v2.1.22-2.1.39: older `@bun @bytecode` format — not yet supported by the splitter
 
 ## Testing a New Binary Version
 
@@ -187,11 +237,21 @@ If matching quality drops, the source reference may be stale. Update `../claude-
 
 | Version | Bundle format | Wrapper functions | Notes |
 |---------|--------------|-------------------|-------|
+| 2.1.22-2.1.39 | `@bun @bytecode` double IIFE | N/A | Not yet supported — 64K bytecode preamble |
 | 2.1.70 | Hashbang script (`#!/usr/bin/env node`) | `E()` (ESM), `S()` (CJS) | No IIFE wrapper |
 | 2.1.77 | Hashbang script | `E()`, `S()` | Same as 2.1.70 |
-| 2.1.89 | IIFE-wrapped | `R()` (ESM), `d()` (CJS) | Wrapper function names changed |
+| 2.1.80-2.1.87 | IIFE-wrapped | `R()` (ESM), `d()` (CJS) | Standard format |
+| 2.1.89 | IIFE-wrapped | `R()` (ESM), `d()` (CJS) | Same as 2.1.80 |
 
 The splitter auto-detects wrapper function names from the preamble. The renamer strips hashbangs from the assembled file to avoid TS parse errors.
+
+## Tested Versions
+
+| Version | Renames | Locations | state.js named | Runtime |
+|---------|---------|-----------|---------------|---------|
+| 2.1.70 | 3,750 | 21,544 | 97% | working |
+| 2.1.87 | 4,992 | 25,493 | ~97% | working |
+| 2.1.89 | 5,002 | 28,225 | 99% | working |
 
 ## Key Files
 
@@ -203,9 +263,10 @@ The splitter auto-detects wrapper function names from the preamble. The renamer 
 | `tools-ts/src/constraint-renamer.ts` | Inside-out structural pattern matching |
 | `tools-ts/src/renamer.ts` | Rename discovery + TS LS scope-aware application |
 | `tools-ts/src/module-reconstruct.ts` | Adds import/export for TS LS scope analysis |
+| `tools-ts/src/prettify.ts` | Formats all files with prettier for patch stability |
 | `tools-ts/src/reassembler.ts` | Strips module syntax, restores IIFE, concatenates |
 | `tools-ts/rename-db.json` | Collision suppression database (version-specific) |
-| `patches.d/*.patch` | Git patches applied after renaming |
+| `patches.d/*.patch` | Git patches applied after prettification |
 | `patches.d/modules/*.js` | Custom modules injected into the bundle |
 | `.build-state.json` | Step completion tracking (gitignored) |
 
