@@ -756,12 +756,10 @@ function renameWithLanguageService(
     renameMap.set(task.minified, task.original);
   }
   // Also scan edits to find what was renamed — covers TS LS cascading renames
-  for (const [_file, edits] of allEdits) {
-    for (const edit of edits) {
-      const oldText = assembled.slice(edit.start, edit.end);
-      if (oldText !== edit.newText && oldText.match(/^[a-zA-Z_$]/) && !renameMap.has(oldText)) {
-        renameMap.set(oldText, edit.newText);
-      }
+  for (const edit of allEdits) {
+    const oldText = assembled.slice(edit.start, edit.end);
+    if (oldText !== edit.newText && oldText.match(/^[a-zA-Z_$]/) && !renameMap.has(oldText)) {
+      renameMap.set(oldText, edit.newText);
     }
   }
   for (const sec of sections) {
