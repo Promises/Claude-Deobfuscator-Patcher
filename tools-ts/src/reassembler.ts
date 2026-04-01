@@ -16,8 +16,9 @@ import type { Mapping } from "./emitter";
  * - Restore IIFE wrapper for preamble/tail if needed
  */
 function stripModuleSyntax(code: string): string {
-  // Remove import lines (single-line only — our generator always writes single-line imports)
-  code = code.replace(/^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"];?\s*\n?/gm, "");
+  // Only remove imports from relative paths (added by module-reconstruct).
+  // Keep original code imports from bare specifiers ("crypto", "fs", "process", etc.)
+  code = code.replace(/^import\s+\{[^}]*\}\s+from\s+['"]\.\.?\/[^'"]+['"];?\s*\n?/gm, "");
 
   // Remove export lines: `export { name1, name2, ... };`
   code = code.replace(/^export\s+\{[^}]*\};?\s*\n?/gm, "");

@@ -747,9 +747,22 @@ function renameWithLanguageService(
   // The TS LS works on the assembled file (no imports/exports), so these
   // lines weren't touched. Update them so IDE intellisense works on split files.
   console.log("  Updating import/export specifiers...");
+
+  // Build rename map from tasks + detect import alias renames from the TS LS edits.
+  // The TS LS may rename import aliases (e.g., `import { randomUUID as xAA }`)
+  // that weren't in the original task list.
   const renameMap = new Map<string, string>();
   for (const task of renameTasks) {
     renameMap.set(task.minified, task.original);
+  }
+  // Also scan edits to find what was renamed — covers TS LS cascading renames
+  for (const [_file, edits] of allEdits) {
+    for (const edit of edits) {
+      const oldText = assembled.slice(edit.start, edit.end);
+      if (oldText !== edit.newText && oldText.match(/^[a-zA-Z_$]/) && !renameMap.has(oldText)) {
+        renameMap.set(oldText, edit.newText);
+      }
+    }
   }
   for (const sec of sections) {
     const fullPath = path.join(projectDir, sec.outputPath);
@@ -774,16 +787,25 @@ function renameWithLanguageService(
     );
 
     // Update import { minified } from './...' → import { original }
+    // AND import { x as minified } from "pkg" → import { x as original }
     code = code.replace(
-      /^(import\s+\{)([^}]+)(\}\s+from\s+['"]\.\.?\/[^'"]+['"];?)$/gm,
+      /^(import\s+\{)([^}]+)(\}\s+from\s+['"][^'"]+['"];?)$/gm,
       (_match, prefix, names, suffix) => {
+        const isRelative = suffix.match(/from\s+['"]\.\.?\//);
         const updated = names.replace(
-          /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
-          (name: string) => {
-            if (JS_RESERVED.has(name)) return name;
+          // For relative imports: rename all identifiers
+          // For bare imports (crypto, fs): only rename the "as ALIAS" part
+          isRelative
+            ? /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g
+            : /\bas\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
+          (match: string, name: string) => {
+            if (JS_RESERVED.has(name)) return match;
             const orig = renameMap.get(name);
-            if (orig) { changed = true; return orig; }
-            return name;
+            if (orig) {
+              changed = true;
+              return isRelative ? orig : `as ${orig}`;
+            }
+            return match;
           },
         );
         return prefix + updated + suffix;
