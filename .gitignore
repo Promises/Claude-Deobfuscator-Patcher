@@ -1,0 +1,16 @@
+# Build artifacts
+claude
+cli-runnable.js
+source.js
+deobfuscated/
+.deob_cache/
+
+# TS build
+tools-ts/node_modules/
+
+# Version reference (large binary files, download separately)
+versionref/
+
+# TS lock
+tools-ts/bun.lock
+.DS_Store
