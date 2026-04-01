@@ -763,6 +763,7 @@ function renameWithLanguageService(
         const updated = names.replace(
           /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
           (name: string) => {
+            if (JS_RESERVED.has(name)) return name;
             const orig = renameMap.get(name);
             if (orig) { changed = true; return orig; }
             return name;
@@ -779,6 +780,7 @@ function renameWithLanguageService(
         const updated = names.replace(
           /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
           (name: string) => {
+            if (JS_RESERVED.has(name)) return name;
             const orig = renameMap.get(name);
             if (orig) { changed = true; return orig; }
             return name;
@@ -870,8 +872,9 @@ export function renameProject(
     }
 
     // Merge: constraint matches take priority, then legacy
+    // Filter out JS reserved words as rename targets
     for (const m of constraintMatches) {
-      if (seen.has(m.minified)) continue;
+      if (seen.has(m.minified) || JS_RESERVED.has(m.original)) continue;
       seen.set(m.minified, m.original);
       renameTasks.push({
         minified: m.minified,
@@ -881,7 +884,7 @@ export function renameProject(
     }
 
     for (const [minified, original] of legacyRenames) {
-      if (seen.has(minified)) continue;
+      if (seen.has(minified) || JS_RESERVED.has(original)) continue;
       seen.set(minified, original);
       renameTasks.push({
         minified,
@@ -891,10 +894,29 @@ export function renameProject(
     }
   }
 
-  console.log(`  Discovered ${seen.size} unique renames (${renameTasks.length} tasks)`);
+  // Filter cross-file collisions: if two different minified names from different
+  // files map to the same original, both are ambiguous — drop them.
+  const originalToMinified = new Map<string, { minified: string; declFile: string }[]>();
+  for (const task of renameTasks) {
+    if (!originalToMinified.has(task.original)) originalToMinified.set(task.original, []);
+    originalToMinified.get(task.original)!.push(task);
+  }
+  const collisions = new Set<string>();
+  for (const [original, tasks] of originalToMinified) {
+    const uniqueFiles = new Set(tasks.map(t => t.declFile));
+    if (uniqueFiles.size > 1) {
+      collisions.add(original);
+    }
+  }
+  const filteredTasks = renameTasks.filter(t => !collisions.has(t.original));
+  if (collisions.size > 0) {
+    console.log(`  Filtered ${collisions.size} cross-file collisions`);
+  }
+
+  console.log(`  Discovered ${seen.size} unique renames → ${filteredTasks.length} after collision filter`);
 
   // Pass 2: Scope-aware renaming via TS Language Service
-  return renameWithLanguageService(projectDir, mapping, renameTasks);
+  return renameWithLanguageService(projectDir, mapping, filteredTasks);
 }
 
 /**

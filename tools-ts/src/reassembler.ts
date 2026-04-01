@@ -43,11 +43,15 @@ export function reassemble(projectDir: string, outputPath: string): void {
     let code = fs.readFileSync(fullPath, "utf-8");
     code = stripModuleSyntax(code);
 
-    // Restore IIFE wrapper
-    if (section.type === "preamble") {
+    // Restore IIFE wrapper (only if original had one — v2.1.70+ uses hashbang instead)
+    if (section.type === "preamble" && !code.startsWith("#!")) {
       code = "(function(exports, require, module, __filename, __dirname) {" + code;
-    } else if (section.type === "tail") {
-      code = code + "})({}, require, module, __filename, __dirname)";
+    } else if (section.type === "tail" && !code.includes("})({},")) {
+      // Only add IIFE closing if preamble had IIFE opening
+      // Check: does the assembled output start with IIFE?
+      if (parts.length > 0 && parts[0].startsWith("(function(")) {
+        code = code + "})({}, require, module, __filename, __dirname)";
+      }
     }
 
     parts.push(code);
