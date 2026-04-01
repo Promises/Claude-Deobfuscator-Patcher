@@ -1,10 +1,29 @@
 /**
  * Reassemble a deobfuscated project back into a single JS file.
+ *
+ * If files have import/export from module-reconstruct.ts, these are stripped
+ * before concatenation (the original bundle has everything at global scope).
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import type { Mapping } from "./emitter";
+
+/**
+ * Strip import/export statements added by module-reconstruct.ts.
+ * - Remove `import { ... } from '...';` lines
+ * - Remove `export { ... };` lines
+ * - Restore IIFE wrapper for preamble/tail if needed
+ */
+function stripModuleSyntax(code: string): string {
+  // Remove import lines (single-line only — our generator always writes single-line imports)
+  code = code.replace(/^import\s+\{[^}]*\}\s+from\s+['"][^'"]+['"];?\s*\n?/gm, "");
+
+  // Remove export lines: `export { name1, name2, ... };`
+  code = code.replace(/^export\s+\{[^}]*\};?\s*\n?/gm, "");
+
+  return code;
+}
 
 export function reassemble(projectDir: string, outputPath: string): void {
   const mappingPath = path.join(projectDir, "_mapping.json");
@@ -20,7 +39,18 @@ export function reassemble(projectDir: string, outputPath: string): void {
       missing++;
       continue;
     }
-    parts.push(fs.readFileSync(fullPath, "utf-8"));
+
+    let code = fs.readFileSync(fullPath, "utf-8");
+    code = stripModuleSyntax(code);
+
+    // Restore IIFE wrapper
+    if (section.type === "preamble") {
+      code = "(function(exports, require, module, __filename, __dirname) {" + code;
+    } else if (section.type === "tail") {
+      code = code + "})({}, require, module, __filename, __dirname)";
+    }
+
+    parts.push(code);
   }
 
   const result = parts.join("");

@@ -4,6 +4,7 @@ cli-runnable.js
 source.js
 deobfuscated/
 .deob_cache/
+.build-state.json
 
 # TS build
 tools-ts/node_modules/

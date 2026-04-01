@@ -58,9 +58,28 @@ PYEOF
 # Step 2: Deobfuscate
 echo ""
 echo "=== Step 2: Deobfuscate (Python split + TS AST match) ==="
-rm -rf "$SCRIPT_DIR/.deob_cache"
+rm -rf "$SCRIPT_DIR/.deob_cache" "$SCRIPT_DIR/deobfuscated"
 cd "$TOOLS_TS"
 bun run src/deob.ts "$SCRIPT_DIR/source.js" "$SOURCE_REF" "$SCRIPT_DIR/deobfuscated"
+cd "$SCRIPT_DIR"
+
+# Step 2.5: Module reconstruction (add import/export for scope-aware renaming)
+echo ""
+echo "=== Step 2.5: Module reconstruction ==="
+cd "$TOOLS_TS"
+bun run src/module-reconstruct.ts "$SCRIPT_DIR/deobfuscated"
+cd "$SCRIPT_DIR"
+
+# Step 2.6: Rename minified identifiers (scope-aware via TS Language Service)
+echo ""
+echo "=== Step 2.6: Rename identifiers ==="
+cd "$TOOLS_TS"
+RENAME_DB="$TOOLS_TS/rename-db.json"
+if [ -f "$RENAME_DB" ]; then
+    bun run src/renamer.ts "$SCRIPT_DIR/deobfuscated" "$SOURCE_REF" "$SCRIPT_DIR/deobfuscated/_mapping.json" "$RENAME_DB"
+else
+    bun run src/renamer.ts "$SCRIPT_DIR/deobfuscated" "$SOURCE_REF" "$SCRIPT_DIR/deobfuscated/_mapping.json"
+fi
 cd "$SCRIPT_DIR"
 
 # Step 3: Apply git patches
