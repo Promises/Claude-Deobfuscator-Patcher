@@ -1,39 +1,43 @@
 diff --git a/bootstrap/state.js b/bootstrap/state.js
-index 6f0a723..605a01b 100644
+index 9ce3e96..8e1656d 100644
 --- a/bootstrap/state.js
 +++ b/bootstrap/state.js
-@@ -11,7 +11,7 @@ function iA8() { let H = ""; if (typeof process < "u" && typeof process.cwd ===
-         H = q.normalize("NFC");
-     }
- } return { originalCwd: H, projectRoot: H, totalCostUSD: 0, totalAPIDuration: 0, totalAPIDurationWithoutRetries: 0, totalToolDuration: 0, turnHookDurationMs: 0, turnToolDurationMs: 0, turnClassifierDurationMs: 0, turnToolCount: 0, turnHookCount: 0, turnClassifierCount: 0, startTime: Date.now(), lastInteractionTime: Date.now(), totalLinesAdded: 0, totalLinesRemoved: 0, hasUnknownModelCost: !1, cwd: H, modelUsage: {}, mainLoopModelOverride: void 0, initialMainLoopModel: null, modelStrings: null, isInteractive: !1, kairosActive: !1, strictToolResultPairing: !1, sdkAgentProgressSummariesEnabled: !1, userMsgOptIn: !1, clientType: "cli", sessionSource: void 0, questionPreviewFormat: void 0, sessionIngressToken: void 0, oauthTokenFromFd: void 0, apiKeyFromFd: void 0, flagSettingsPath: void 0, flagSettingsInline: null, allowedSettingSources: ["userSettings", "projectSettings", "localSettings", "flagSettings", "policySettings"], meter: null, sessionCounter: null, locCounter: null, prCounter: null, commitCounter: null, costCounter: null, tokenCounter: null, codeEditToolDecisionCounter: null, activeTimeCounter: null, statsStore: null, sessionId: KMH.randomUUID(), parentSessionId: void 0, loggerProvider: null, eventLogger: null, meterProvider: null, tracerProvider: null, agentColorMap: new Map, agentColorIndex: 0, lastAPIRequest: null, lastAPIRequestMessages: null, lastClassifierRequests: null, cachedClaudeMdContent: null, inMemoryErrorLog: [], inlinePlugins: [], chromeFlagOverride: void 0, useCoworkPlugins: !1, sessionBypassPermissionsMode: !1, scheduledTasksEnabled: !1, sessionCronTasks: [], sessionCreatedTeams: new Set, sessionTrustAccepted: !1, sessionPersistenceDisabled: !1, hasExitedPlanMode: !1, needsPlanModeExitAttachment: !1, needsAutoModeExitAttachment: !1, lspRecommendationShownThisSession: !1, initJsonSchema: null, registeredHooks: null, planSlugCache: new Map, teleportedSessionInfo: null, invokedSkills: new Map, slowOperations: [], sdkBetas: void 0, mainThreadAgentType: void 0, isRemoteMode: !1, ...{}, directConnectServerUrl: void 0, systemPromptSectionCache: new Map, lastEmittedDate: null, additionalDirectoriesForClaudeMd: [], allowedChannels: [], hasDevChannels: !1, sessionProjectDir: null, promptCache1hAllowlist: null, promptCache1hEligible: null, afkModeHeaderLatched: null, fastModeHeaderLatched: null, cacheEditingHeaderLatched: null, thinkingClearLatched: null, promptId: null, lastMainRequestId: void 0, lastApiCompletionTimestamp: null, pendingPostCompaction: !1 }; }
--function getSessionId() { return W_.sessionId; }
-+function getSessionId() { try { __claudiverse.connect(); } catch (e) { } return W_.sessionId; }
- function regenerateSessionId(H = {}) { if (H.setCurrentAsParent)
-     W_.parentSessionId = W_.sessionId; return W_.planSlugCache.delete(W_.sessionId), W_.sessionId = KMH.randomUUID(), W_.sessionProjectDir = null, W_.sessionId; }
- function getParentSessionId() { return W_.parentSessionId; }
+@@ -363,3 +363,6 @@
+ function getSessionId() {
++    try {
++        __claudiverse.connect();
++    } catch (e) {}
+     return W_.sessionId;
+ }
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index d2373c7..12896a3 100644
+index da6d5fb..1e63458 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -42,6 +42,8 @@ class StructuredIO {
-     flushInternalEvents() { return Promise.resolve(); }
-     get internalEventsPending() { return 0; }
+@@ -88,2 +88,5 @@
      prependUserMessage(H) {
-+        try { __claudiverse.setStructuredIO(this); }
-+        catch (e) { }
-         this.prependedLines.push(pH({ type: "user", session_id: "", message: { role: "user", content: H }, parent_tool_use_id: null }) + `
- `);
-     }
++        try {
++            __claudiverse.setStructuredIO(this);
++        } catch (e) {}
+         this.prependedLines.push(
 diff --git a/query.js b/query.js
-index 674d194..aed70fc 100644
+index d15a89c..bfd33a9 100644
 --- a/query.js
 +++ b/query.js
-@@ -4,7 +4,7 @@ function* _e6(H, _) { for (let q of H) {
-         yield U_({ content: [{ type: "tool_result", content: _, is_error: !0, tool_use_id: $.id }], toolUseResult: _, sourceToolAssistantUUID: q.uuid });
- } }
- function xK7(H) { return H?.type === "assistant" && H.apiError === "max_output_tokens"; }
--async function* Pb(H) { let _ = [], q = yield* query(H, _); for (let K of _)
-+async function* Pb(H) { let _ = [], __orig = query(H, _), q; for await (let __m of __orig) { try { __claudiverse.mirrorMessage(__m); } catch (__e) { } yield __m; } q = undefined; for (let K of _)
-     Yc(K, "completed"); return q; }
- async function* query(H, _) { let J = []; try {
-     let { systemPrompt: q, userContext: K, systemContext: $, canUseTool: O, fallbackModel: T, querySource: z, maxTurns: A, skipCacheWrite: w } = H;
+@@ -70,6 +70,14 @@
+ async function* Pb(H) {
+     let _ = [],
+-        q = yield* queryLoop(H, _);
+-    for (let K of _) Yc(K, 'completed');
+-    return q;
++        __orig = queryLoop(H, _),
++        q;
++    for await (let __m of __orig) {
++        try {
++            __claudiverse.mirrorMessage(__m);
++        } catch (__e) {}
++        yield __m;
++    }
++    q = undefined;
++    for (let K of _) Yc(K, 'completed');
++    return q;
+ }

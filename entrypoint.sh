@@ -523,14 +523,15 @@ cmd_clean() {
 cmd_help() {
   cat << 'EOF'
 
-  Usage: entrypoint.sh [command] [--force]
+  Usage: entrypoint.sh [command|step...] [--force]
 
-  Pipeline steps:
+  Pipeline steps (can pass multiple to run in sequence):
     build         Run all steps (skip completed)
     extract       Step 1: Extract JS from binary
     deob          Step 2: Split + match modules
     modrecon      Step 2.5: Add import/export
     rename        Step 2.6: Scope-aware renaming
+    prettify      Step 2.7: Format source
     patch         Step 3: Apply patches
     reassemble    Step 4: Concatenate to single JS
     compile       Step 5: Compile binary
@@ -617,6 +618,13 @@ cmd_tui() {
 
 # ── CLI Dispatch ──────────────────────────────────────────────────────────────
 
+is_pipeline_step() {
+  case "$1" in
+    extract|deob|modrecon|rename|prettify|patch|reassemble|compile) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 main() {
   local cmd="${1:-}"
   shift || true
@@ -631,10 +639,20 @@ main() {
     esac
   done
 
+  # Multi-step: ./entrypoint.sh extract deob modrecon rename prettify
+  if [[ -n "$cmd" ]] && is_pipeline_step "$cmd" && [[ ${#args[@]} -gt 0 ]]; then
+    local steps=("$cmd" "${args[@]}")
+    for s in "${steps[@]}"; do
+      is_pipeline_step "$s" || err "Not a pipeline step: $s"
+      run_step "$s"
+    done
+    return
+  fi
+
   case "$cmd" in
     "")           cmd_tui ;;
     build)        cmd_build ;;
-    extract|deob|modrecon|rename|patch|reassemble|compile)
+    extract|deob|modrecon|rename|prettify|patch|reassemble|compile)
                   run_step "$cmd" ;;
     genpatch)     cmd_genpatch "${args[@]}" ;;
     status)       cmd_status ;;
