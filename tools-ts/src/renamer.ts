@@ -743,6 +743,54 @@ function renameWithLanguageService(
     totalRenames += edits.length;
   }
 
+  // Post-pass: update import/export specifiers to match renamed identifiers.
+  // The TS LS works on the assembled file (no imports/exports), so these
+  // lines weren't touched. Update them so IDE intellisense works on split files.
+  console.log("  Updating import/export specifiers...");
+  const renameMap = new Map<string, string>();
+  for (const task of renameTasks) {
+    renameMap.set(task.minified, task.original);
+  }
+  for (const sec of sections) {
+    const fullPath = path.join(projectDir, sec.outputPath);
+    let code = fs.readFileSync(fullPath, "utf-8");
+    let changed = false;
+
+    // Update export { minified1, minified2 } → export { original1, original2 }
+    code = code.replace(
+      /^(export\s+\{)([^}]+)(\};?)$/gm,
+      (_match, prefix, names, suffix) => {
+        const updated = names.replace(
+          /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
+          (name: string) => {
+            const orig = renameMap.get(name);
+            if (orig) { changed = true; return orig; }
+            return name;
+          },
+        );
+        return prefix + updated + suffix;
+      },
+    );
+
+    // Update import { minified } from './...' → import { original }
+    code = code.replace(
+      /^(import\s+\{)([^}]+)(\}\s+from\s+['"]\.\.?\/[^'"]+['"];?)$/gm,
+      (_match, prefix, names, suffix) => {
+        const updated = names.replace(
+          /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
+          (name: string) => {
+            const orig = renameMap.get(name);
+            if (orig) { changed = true; return orig; }
+            return name;
+          },
+        );
+        return prefix + updated + suffix;
+      },
+    );
+
+    if (changed) fs.writeFileSync(fullPath, code);
+  }
+
   return { totalRenames, fileRenames };
 }
 
