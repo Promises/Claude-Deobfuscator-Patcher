@@ -11,6 +11,9 @@ tools-ts/node_modules/
 # Version reference (large binary files, download separately)
 versionref/
 
+# Handoff (contains local tokens/paths)
+HANDOFF.md
+
 # TS lock
 tools-ts/bun.lock
 .DS_Store

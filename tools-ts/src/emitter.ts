@@ -5,6 +5,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { MatchOutput } from "./matcher";
+import { beautify } from "./beautify";
 
 export interface MappingSection {
   index: number;
@@ -103,6 +104,18 @@ export function emitProject(
 
     const fullOut = path.join(outputDir, outPath);
     fs.mkdirSync(path.dirname(fullOut), { recursive: true });
+
+    // Beautify matched files for readability
+    const match = secType === "section" ? matchLookup.get(section.module_name || section.moduleName) : null;
+    const shouldBeautify = match && (match.confidence === "high" || match.confidence === "medium");
+    if (shouldBeautify) {
+      try {
+        code = beautify(code, outPath);
+      } catch {
+        // If beautification fails (parse error), keep original
+      }
+    }
+
     fs.writeFileSync(fullOut, code);
 
     const entry: MappingSection = {
