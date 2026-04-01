@@ -82,6 +82,13 @@ else
 fi
 cd "$SCRIPT_DIR"
 
+# Step 2.7: Prettify
+echo ""
+echo "=== Step 2.7: Prettify ==="
+cd "$TOOLS_TS"
+bun run src/prettify.ts "$SCRIPT_DIR/deobfuscated"
+cd "$SCRIPT_DIR"
+
 # Step 3: Apply git patches
 echo ""
 echo "=== Step 3: Apply patches ==="

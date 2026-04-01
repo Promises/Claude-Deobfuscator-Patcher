@@ -14,7 +14,7 @@ DEOB_DIR="$SCRIPT_DIR/deobfuscated"
 PATCHES_DIR="$SCRIPT_DIR/patches.d"
 FORCE=0
 
-STEPS=(extract deob modrecon rename patch reassemble compile)
+STEPS=(extract deob modrecon rename prettify patch reassemble compile)
 
 # ── Color & Formatting ───────────────────────────────────────────────────────
 if [[ -t 1 ]]; then
@@ -202,20 +202,28 @@ step_rename() {
     bun run src/renamer.ts "$DEOB_DIR" "$SOURCE_REF" "$DEOB_DIR/_mapping.json"
   fi
   cd "$SCRIPT_DIR"
+}
 
-  # Create git baseline for patch generation
+step_prettify() {
+  require_step "rename"
+  header "Step 2.7: Prettify"
+  cd "$TOOLS_TS"
+  bun run src/prettify.ts "$DEOB_DIR"
+  cd "$SCRIPT_DIR"
+
+  # Create git baseline AFTER prettify so patches target formatted code
   cd "$DEOB_DIR"
   rm -rf .git
   git init -q
   git add -A
-  git commit -q -m "baseline: after rename (v$(detect_version))"
+  git commit -q -m "baseline: after rename+prettify (v$(detect_version))"
   git tag -f baseline
   cd "$SCRIPT_DIR"
   ok "Git baseline tagged in deobfuscated/"
 }
 
 step_patch() {
-  require_step "rename"
+  require_step "prettify"
   header "Step 3: Apply patches"
   if [[ ! -d "$PATCHES_DIR" ]]; then
     warn "No patches.d/ directory — skipping"
