@@ -16,6 +16,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { RenameDB } from "./rename-db-types";
 import { constraintMatch } from "./constraint-renamer";
+import { applyAnchorRules } from "./anchor-rules";
 
 export interface RenameEntry {
   minified: string;
@@ -860,6 +861,10 @@ export function renameProject(
     db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
   }
 
+  // Layer 0: User-defined anchor rules (highest priority)
+  const anchorRulesPath = path.join(import.meta.dir, "../anchor-rules.json");
+  const anchorMatches = applyAnchorRules(projectDir, anchorRulesPath);
+
   // Pass 1: Discover renames via constraint matching + export maps
   const renameTasks: Array<{
     minified: string;
@@ -867,6 +872,14 @@ export function renameProject(
     declFile: string;
   }> = [];
   const seen = new Map<string, string>(); // minified → original (dedup)
+
+  // Seed seen with anchor results — they take priority over everything
+  for (const m of anchorMatches) {
+    if (seen.has(m.minified)) continue;
+    seen.set(m.minified, m.original);
+    // declFile unknown for anchor rules — use a sentinel so collision filter treats them as global
+    renameTasks.push({ minified: m.minified, original: m.original, declFile: "__anchor__" });
+  }
 
   for (const section of mapping.sections) {
     if (!section.matched_source || section.confidence === "low") continue;
@@ -934,6 +947,18 @@ export function renameProject(
   }
 
   console.log(`  Discovered ${seen.size} unique renames → ${filteredTasks.length} after collision filter`);
+
+  // Write _renames.json — minified → original per file, for patch authoring
+  const renamesByFile: Record<string, Record<string, string>> = {};
+  for (const task of filteredTasks) {
+    const f = task.declFile === "__anchor__" ? "__anchor__" : task.declFile;
+    if (!renamesByFile[f]) renamesByFile[f] = {};
+    renamesByFile[f][task.minified] = task.original;
+  }
+  fs.writeFileSync(
+    path.join(projectDir, "_renames.json"),
+    JSON.stringify({ version: mapping.version ?? "unknown", files: renamesByFile }, null, 2),
+  );
 
   // Pass 2: Scope-aware renaming via TS Language Service
   return renameWithLanguageService(projectDir, mapping, filteredTasks);

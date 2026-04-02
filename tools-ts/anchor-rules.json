@@ -1,0 +1,41 @@
+[
+    {
+        "id": "query",
+        "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
+        "file": "query.js",
+        "find": { "text": ", 'completed'" },
+        "scope": "async_generator",
+        "rename": "query"
+    },
+    {
+        "from": "query",
+        "walk": "param:0",
+        "rename": "params",
+        "description": "first param of query"
+    },
+    {
+        "from": "query",
+        "walk": "local:array_init",
+        "rename": "consumedCommandUuids",
+        "description": "empty array accumulator in query"
+    },
+    {
+        "from": "query",
+        "walk": "local:for_of_binding",
+        "rename": "uuid",
+        "description": "for-of loop variable in query"
+    },
+    {
+        "from": "query",
+        "walk": "yield_star_callee",
+        "rename": "queryLoop",
+        "description": "queryLoop — called via yield* from query",
+        "id": "queryLoop"
+    },
+    {
+        "from": "query",
+        "walk": "call_string_arg:completed:callee",
+        "rename": "notifyCommandLifecycle",
+        "description": "notifyCommandLifecycle — called with 'completed' in query"
+    }
+]

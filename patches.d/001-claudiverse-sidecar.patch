@@ -1,34 +1,40 @@
 diff --git a/bootstrap/state.js b/bootstrap/state.js
-index 9ce3e96..8e1656d 100644
+index 4ba6b78..a0aaa5e 100644
 --- a/bootstrap/state.js
 +++ b/bootstrap/state.js
-@@ -363,3 +363,6 @@
+@@ -362,6 +362,9 @@ function getInitialState() {
+ }
+
  function getSessionId() {
 +    try {
 +        __claudiverse.connect();
 +    } catch (e) {}
-     return W_.sessionId;
+     return R_.sessionId;
  }
+
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index da6d5fb..1e63458 100644
+index 9534b26..82ff919 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -88,2 +88,5 @@
+@@ -86,6 +86,9 @@ class StructuredIO {
+         return 0;
+     }
      prependUserMessage(H) {
 +        try {
 +            __claudiverse.setStructuredIO(this);
 +        } catch (e) {}
          this.prependedLines.push(
+             jsonStringify({
+                 type: 'user',
 diff --git a/query.js b/query.js
-index d15a89c..bfd33a9 100644
+index 2359e6b..8bd926d 100644
 --- a/query.js
 +++ b/query.js
-@@ -70,6 +70,14 @@
- async function* Pb(H) {
+@@ -79,7 +79,15 @@ function isWithheldMaxOutputTokens(H) {
+
+ async function* Vb(H) {
      let _ = [],
 -        q = yield* queryLoop(H, _);
--    for (let K of _) Yc(K, 'completed');
--    return q;
 +        __orig = queryLoop(H, _),
 +        q;
 +    for await (let __m of __orig) {
@@ -38,6 +44,6 @@ index d15a89c..bfd33a9 100644
 +        yield __m;
 +    }
 +    q = undefined;
-+    for (let K of _) Yc(K, 'completed');
-+    return q;
+     for (let K of _) yc(K, 'completed');
+     return q;
  }

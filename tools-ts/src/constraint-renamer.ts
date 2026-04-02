@@ -92,6 +92,10 @@ function extractFunctionFingerprints(
       if (ts.isCallExpression(n) && ts.isIdentifier(n.expression)) {
         calledFunctions.push(n.expression.text);
       }
+      // yield* f() — treat as a call for propagation purposes
+      if (ts.isYieldExpression(n) && n.asteriskToken && n.expression && ts.isCallExpression(n.expression) && ts.isIdentifier(n.expression.expression)) {
+        calledFunctions.push(n.expression.expression.text);
+      }
       ts.forEachChild(n, walk);
     }
 
