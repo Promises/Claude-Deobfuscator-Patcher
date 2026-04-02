@@ -3,7 +3,7 @@
         "id": "query",
         "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
         "file": "query.js",
-        "find": { "text": ", 'completed'" },
+        "find": { "string_literal": "completed" },
         "scope": "async_generator",
         "rename": "query"
     },

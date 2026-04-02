@@ -13,7 +13,7 @@ index 4ba6b78..a0aaa5e 100644
  }
 
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index 9534b26..82ff919 100644
+index 77fd6e6..ae75221 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
 @@ -86,6 +86,9 @@ class StructuredIO {
@@ -27,12 +27,12 @@ index 9534b26..82ff919 100644
              jsonStringify({
                  type: 'user',
 diff --git a/query.js b/query.js
-index 2359e6b..8bd926d 100644
+index ac84eb1..3511156 100644
 --- a/query.js
 +++ b/query.js
 @@ -79,7 +79,15 @@ function isWithheldMaxOutputTokens(H) {
 
- async function* Vb(H) {
+ async function* query(H) {
      let _ = [],
 -        q = yield* queryLoop(H, _);
 +        __orig = queryLoop(H, _),
@@ -44,6 +44,6 @@ index 2359e6b..8bd926d 100644
 +        yield __m;
 +    }
 +    q = undefined;
-     for (let K of _) yc(K, 'completed');
+     for (let K of _) notifyCommandLifecycle(K, 'completed');
      return q;
  }
