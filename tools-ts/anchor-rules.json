@@ -34,8 +34,28 @@
     },
     {
         "from": "query",
+        "walk": "local:yield_star_result",
+        "rename": "terminal",
+        "description": "return value of yield* queryLoop in query"
+    },
+    {
+        "from": "query",
         "walk": "call_string_arg:completed:callee",
         "rename": "notifyCommandLifecycle",
         "description": "notifyCommandLifecycle — called with 'completed' in query"
-    }
+    },
+
+    {
+        "id": "yieldMissingToolResultBlocks",
+        "description": "generator that yields tool_result error messages for unmatched tool uses",
+        "file": "query.js",
+        "find": { "property_assignment": { "key": "type", "value": "tool_result" } },
+        "scope": "generator",
+        "rename": "yieldMissingToolResultBlocks"
+    },
+    { "from": "yieldMissingToolResultBlocks", "walk": "param:0", "rename": "assistantMessages" },
+    { "from": "yieldMissingToolResultBlocks", "walk": "param:1", "rename": "errorMessage" },
+    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding", "rename": "assistantMessage" },
+    { "from": "yieldMissingToolResultBlocks", "walk": "local:call_result", "rename": "toolUseBlocks" },
+    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding:1", "rename": "toolUse" }
 ]

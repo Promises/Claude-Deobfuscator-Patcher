@@ -4,14 +4,14 @@ index 4ba6b78..a0aaa5e 100644
 +++ b/bootstrap/state.js
 @@ -362,6 +362,9 @@ function getInitialState() {
  }
-
+ 
  function getSessionId() {
 +    try {
 +        __claudiverse.connect();
 +    } catch (e) {}
      return R_.sessionId;
  }
-
+ 
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
 index 77fd6e6..ae75221 100644
 --- a/cli/structuredIO.js
@@ -27,23 +27,23 @@ index 77fd6e6..ae75221 100644
              jsonStringify({
                  type: 'user',
 diff --git a/query.js b/query.js
-index ac84eb1..3511156 100644
+index de58360..c787351 100644
 --- a/query.js
 +++ b/query.js
 @@ -79,7 +79,15 @@ function isWithheldMaxOutputTokens(H) {
-
- async function* query(H) {
-     let _ = [],
--        q = yield* queryLoop(H, _);
-+        __orig = queryLoop(H, _),
-+        q;
+ 
+ async function* query(params) {
+     let consumedCommandUuids = [],
+-        terminal = yield* queryLoop(params, consumedCommandUuids);
++        __orig = queryLoop(params, consumedCommandUuids),
++        terminal;
 +    for await (let __m of __orig) {
 +        try {
 +            __claudiverse.mirrorMessage(__m);
 +        } catch (__e) {}
 +        yield __m;
 +    }
-+    q = undefined;
-     for (let K of _) notifyCommandLifecycle(K, 'completed');
-     return q;
++    terminal = undefined;
+     for (let uuid of consumedCommandUuids) notifyCommandLifecycle(uuid, 'completed');
+     return terminal;
  }

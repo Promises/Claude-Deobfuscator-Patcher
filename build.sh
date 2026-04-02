@@ -89,6 +89,13 @@ cd "$TOOLS_TS"
 bun run src/prettify.ts "$SCRIPT_DIR/deobfuscated"
 cd "$SCRIPT_DIR"
 
+# Step 2.8: Scoped param/local renames (runs after prettify, uses renamed function names)
+echo ""
+echo "=== Step 2.8: Scoped renames ==="
+cd "$TOOLS_TS"
+bun run src/apply-scoped-renames.ts "$SCRIPT_DIR/deobfuscated" "$TOOLS_TS/anchor-rules.json"
+cd "$SCRIPT_DIR"
+
 # Step 3: Apply git patches
 echo ""
 echo "=== Step 3: Apply patches ==="

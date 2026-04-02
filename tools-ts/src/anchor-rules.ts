@@ -25,7 +25,8 @@ type FindCriteria =
     | { text: string }
     | { regex: string }
     | { string_literal: string }
-    | { number: number; op?: string };
+    | { number: number; op?: string }
+    | { property_assignment: { key: string; value: string } };
 
 type Scope =
     | "function"
@@ -104,6 +105,26 @@ function findPatternPos(code: string, find: FindCriteria | string, sf: ts.Source
                 } else {
                     pos = node.getStart(sf);
                 }
+            }
+            ts.forEachChild(node, visit);
+        }
+        visit(sf);
+        return pos;
+    }
+
+    if ("property_assignment" in find) {
+        const { key, value } = (find as { property_assignment: { key: string; value: string } }).property_assignment;
+        let pos = -1;
+        function visit(node: ts.Node) {
+            if (pos !== -1) return;
+            if (
+                ts.isPropertyAssignment(node) &&
+                ts.isIdentifier(node.name) &&
+                node.name.text === key &&
+                ts.isStringLiteral(node.initializer) &&
+                node.initializer.text === value
+            ) {
+                pos = node.getStart(sf);
             }
             ts.forEachChild(node, visit);
         }
@@ -202,7 +223,7 @@ function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): strin
         }
 
         case "local": {
-            return walkLocal(fn, parts[1] ?? "");
+            return walkLocal(fn, parts.slice(1).join(":"));
         }
 
         case "yield_star_callee": {
@@ -303,18 +324,40 @@ function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | 
             }
         }
 
-        if (localType === "for_of_binding" && ts.isForOfStatement(node)) {
-            const init = node.initializer;
-            if (ts.isVariableDeclarationList(init) && init.declarations[0]) {
-                const decl = init.declarations[0];
-                if (ts.isIdentifier(decl.name)) result = decl.name.text;
+        if (localType.startsWith("for_of_binding") && ts.isForOfStatement(node)) {
+            const colonIdx = localType.indexOf(":");
+            const targetIdx = colonIdx !== -1 ? parseInt(localType.slice(colonIdx + 1)) : 0;
+            const thisIdx = forOfCount++;
+            if (thisIdx === targetIdx) {
+                const init = node.initializer;
+                if (ts.isVariableDeclarationList(init) && init.declarations[0]) {
+                    const decl = init.declarations[0];
+                    if (ts.isIdentifier(decl.name)) result = decl.name.text;
+                }
+                return;
             }
+            // not our target — recurse into its body to find nested for-ofs
+            ts.forEachChild(node, visit);
             return;
+        }
+
+        if (localType === "call_result" && ts.isVariableStatement(node)) {
+            for (const decl of node.declarationList.declarations) {
+                if (
+                    ts.isIdentifier(decl.name) &&
+                    decl.initializer &&
+                    ts.isCallExpression(decl.initializer)
+                ) {
+                    result = decl.name.text;
+                    return;
+                }
+            }
         }
 
         ts.forEachChild(node, visit);
     }
 
+    let forOfCount = 0;
     visit(fn.body);
     return result;
 }
@@ -434,4 +477,128 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
         console.log(`  Anchor rules: ${results.length} renames from ${rules.length} rules`);
 
     return results;
+}
+
+// ── Scoped Param/Local Rename ─────────────────────────────────────────────────
+// Runs AFTER prettify against the already-renamed deobfuscated files.
+// For param:N and local:* walk rules, finds the (renamed) function and
+// replaces all references to the current param/local name within its body,
+// stopping at nested functions that re-declare the same name.
+
+function collectIdentifierRefs(
+    node: ts.Node,
+    name: string,
+    sf: ts.SourceFile,
+    out: Array<{ start: number; end: number }>,
+): void {
+    // Stop descending into nested function-likes that shadow this name in their params
+    if (ts.isFunctionLike(node)) {
+        const fn = node as ts.FunctionLikeDeclaration;
+        const shadows = fn.parameters?.some(
+            (p) => ts.isIdentifier(p.name) && p.name.text === name,
+        );
+        if (shadows) return;
+    }
+    if (ts.isIdentifier(node) && node.text === name) {
+        out.push({ start: node.getStart(sf), end: node.end });
+    }
+    ts.forEachChild(node, (child) => collectIdentifierRefs(child, name, sf, out));
+}
+
+function applyScopedRenameToFn(
+    code: string,
+    sf: ts.SourceFile,
+    fn: ts.FunctionLikeDeclaration,
+    oldName: string,
+    newName: string,
+): string {
+    const positions: Array<{ start: number; end: number }> = [];
+
+    // Rename the param declaration itself
+    for (const param of fn.parameters ?? []) {
+        if (ts.isIdentifier(param.name) && param.name.text === oldName) {
+            positions.push({ start: param.name.getStart(sf), end: param.name.end });
+        }
+    }
+
+    // All references within the body
+    if (fn.body) collectIdentifierRefs(fn.body, oldName, sf, positions);
+
+    if (positions.length === 0) return code;
+
+    positions.sort((a, b) => b.start - a.start);
+    let result = code;
+    for (const { start, end } of positions) {
+        result = result.slice(0, start) + newName + result.slice(end);
+    }
+    return result;
+}
+
+const SCOPED_WALK_PREFIXES = ["param:", "local:"];
+
+function isScopedWalk(walk: string): boolean {
+    return SCOPED_WALK_PREFIXES.some((p) => walk.startsWith(p));
+}
+
+export function applyAnchorScopedRenamesInDir(deobDir: string, rulesPath: string): number {
+    if (!fs.existsSync(rulesPath)) return 0;
+
+    const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
+    const rootRules = rules.filter((r) => !isWalkRule(r)) as RootRule[];
+    const walkRules = (rules.filter(isWalkRule) as WalkRule[]).filter((r) => isScopedWalk(r.walk));
+    if (walkRules.length === 0) return 0;
+
+    // Root rule id → { file, renamedName } (the post-rename function name in the prettified file)
+    const anchors = new Map<string, { file: string; renamedName: string }>();
+    for (const rule of rootRules) {
+        anchors.set(rule.id ?? rule.rename, { file: rule.file, renamedName: rule.rename });
+    }
+
+    // Group scoped renames by file
+    const byFile = new Map<string, Array<{ fnName: string; walk: string; rename: string }>>();
+    for (const rule of walkRules) {
+        const parent = anchors.get(rule.from);
+        if (!parent) continue;
+        if (!byFile.has(parent.file)) byFile.set(parent.file, []);
+        byFile.get(parent.file)!.push({ fnName: parent.renamedName, walk: rule.walk, rename: rule.rename });
+    }
+
+    const verbose = !!process.env.ANCHOR_VERBOSE;
+    let totalRenames = 0;
+
+    for (const [file, scopedRules] of byFile) {
+        const filePath = path.join(deobDir, file);
+        if (!fs.existsSync(filePath)) continue;
+
+        let code = fs.readFileSync(filePath, "utf-8");
+        const original = code;
+
+        for (const { fnName, walk, rename } of scopedRules) {
+            let sf = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+            const fnNode = findNodeByName(sf, fnName) as ts.FunctionLikeDeclaration | null;
+            if (!fnNode) {
+                if (verbose) console.warn(`  scoped rename skip: function "${fnName}" not found`);
+                continue;
+            }
+
+            const currentName = walkFromNode(fnNode, walk, sf);
+            if (!currentName) {
+                if (verbose) console.warn(`  scoped rename skip: walk "${walk}" failed in ${fnName}`);
+                continue;
+            }
+            if (currentName === rename) continue; // already correct
+
+            const newCode = applyScopedRenameToFn(code, sf, fnNode, currentName, rename);
+            if (newCode !== code) {
+                if (verbose) console.log(`  scoped rename: ${fnName} — ${currentName} → ${rename}`);
+                code = newCode;
+                totalRenames++;
+            }
+        }
+
+        if (code !== original) fs.writeFileSync(filePath, code, "utf-8");
+    }
+
+    if (totalRenames > 0) console.log(`  Scoped renames: ${totalRenames} applied`);
+    return totalRenames;
 }
