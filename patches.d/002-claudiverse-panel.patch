@@ -1,0 +1,9 @@
+diff --git a/components/LogoV2/LogoV2.js b/components/LogoV2/LogoV2.js
+index 0000000..0000000 100644
+--- a/components/LogoV2/LogoV2.js
++++ b/components/LogoV2/LogoV2.js
+@@ -445,3 +445,3 @@
+             qH === 'horizontal' &&
+-            W8.createElement($P7, {
++            __claudiversePanel.render(W8, $P7, {
+                 feeds: O
