@@ -26,7 +26,8 @@ type FindCriteria =
     | { regex: string }
     | { string_literal: string }
     | { number: number; op?: string }
-    | { property_assignment: { key: string; value: string } };
+    | { property_assignment: { key: string; value: string } }
+    | { function_name: string };
 
 type Scope =
     | "function"
@@ -43,7 +44,8 @@ interface RootRule {
     file: string;
     find: FindCriteria | string;
     scope: Scope;
-    rename: string;
+    rename?: string;
+    anchor_only?: boolean; // resolve anchor but emit no rename
     class?: string; // also rename enclosing class (scope=method)
 }
 
@@ -66,6 +68,9 @@ interface Resolved {
     id: string;
     file: string;
     minifiedName: string;
+    // For intermediate anchors that resolve to an AST region rather than a named node
+    nodeStart?: number;
+    nodeEnd?: number;
 }
 
 // ── Pattern Search ───────────────────────────────────────────────────────────
@@ -124,6 +129,20 @@ function findPatternPos(code: string, find: FindCriteria | string, sf: ts.Source
                 ts.isStringLiteral(node.initializer) &&
                 node.initializer.text === value
             ) {
+                pos = node.getStart(sf);
+            }
+            ts.forEachChild(node, visit);
+        }
+        visit(sf);
+        return pos;
+    }
+
+    if ("function_name" in find) {
+        const name = (find as { function_name: string }).function_name;
+        let pos = -1;
+        function visit(node: ts.Node) {
+            if (pos !== -1) return;
+            if (getNodeName(node) === name) {
                 pos = node.getStart(sf);
             }
             ts.forEachChild(node, visit);
@@ -195,6 +214,23 @@ function findContainingScope(sf: ts.SourceFile, pos: number, scope: Scope): ts.N
 
 // ── Walk Execution ───────────────────────────────────────────────────────────
 
+function findNodeAtPosition(sf: ts.SourceFile, start: number, end: number): ts.Node | null {
+    let best: ts.Node | null = null;
+    function visit(node: ts.Node) {
+        const ns = node.getStart(sf);
+        const ne = node.end;
+        if (ns === start && ne === end) {
+            best = node;
+            return;
+        }
+        if (ns <= start && end <= ne) {
+            ts.forEachChild(node, visit);
+        }
+    }
+    visit(sf);
+    return best;
+}
+
 function findNodeByName(sf: ts.SourceFile, name: string): ts.Node | null {
     let found: ts.Node | null = null;
     function visit(node: ts.Node) {
@@ -209,7 +245,19 @@ function findNodeByName(sf: ts.SourceFile, name: string): ts.Node | null {
     return found;
 }
 
-function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): string | null {
+interface WalkResult {
+    name: string | null;
+    // For intermediate walks that resolve to an AST region
+    nodeStart?: number;
+    nodeEnd?: number;
+}
+
+function walkFromNode(
+    node: ts.Node,
+    walkExpr: string,
+    sf: ts.SourceFile,
+    resolvedById?: Map<string, Resolved>,
+): WalkResult {
     const parts = walkExpr.split(":");
     const op = parts[0];
 
@@ -219,15 +267,15 @@ function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): strin
         case "param": {
             const idx = parseInt(parts[1] ?? "0");
             const param = fn.parameters?.[idx];
-            return param && ts.isIdentifier(param.name) ? param.name.text : null;
+            return { name: param && ts.isIdentifier(param.name) ? param.name.text : null };
         }
 
         case "local": {
-            return walkLocal(fn, parts.slice(1).join(":"));
+            return { name: walkLocal(fn, parts.slice(1).join(":")) };
         }
 
         case "yield_star_callee": {
-            if (!fn.body) return null;
+            if (!fn.body) return { name: null };
             let result: string | null = null;
             function find(n: ts.Node) {
                 if (result) return;
@@ -242,13 +290,13 @@ function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): strin
                 ts.forEachChild(n, find);
             }
             find(fn.body);
-            return result;
+            return { name: result };
         }
 
         case "call_string_arg": {
             // call_string_arg:VALUE:callee
             const value = parts[1];
-            if (!fn.body || !value) return null;
+            if (!fn.body || !value) return { name: null };
             let result: string | null = null;
             function find(n: ts.Node) {
                 if (result) return;
@@ -259,14 +307,14 @@ function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): strin
                 ts.forEachChild(n, find);
             }
             find(fn.body);
-            return result;
+            return { name: result };
         }
 
         case "enclosing_class": {
             const cls = node.parent;
             if (cls && (ts.isClassDeclaration(cls) || ts.isClassExpression(cls)) && cls.name)
-                return cls.name.text;
-            return null;
+                return { name: cls.name.text };
+            return { name: null };
         }
 
         case "method": {
@@ -277,16 +325,283 @@ function walkFromNode(node: ts.Node, walkExpr: string, sf: ts.SourceFile): strin
                 for (const member of cls.members ?? []) {
                     if (ts.isMethodDeclaration(member) && ts.isIdentifier(member.name) && member.body) {
                         const bodyText = member.body.getText(sf);
-                        if (bodyText.includes(needle)) return member.name.text;
+                        if (bodyText.includes(needle)) return { name: member.name.text };
                     }
                 }
             }
-            return null;
+            return { name: null };
+        }
+
+        // return:comma:N — find a return statement with an N-part comma expression.
+        // Resolves to the comma expression node (positional anchor, no name).
+        case "return": {
+            if (parts[1] === "comma" && parts[2]) {
+                const expectedLength = parseInt(parts[2]);
+                const body = fn.body ?? node;
+                const found = findReturnComma(body, expectedLength, sf);
+                if (found) return { name: `__pos_${found.getStart(sf)}`, nodeStart: found.getStart(sf), nodeEnd: found.end };
+            }
+            if (parts[1] === "postfix_increment_operand") {
+                return walkReturnPostfixIncrementOperand(node, sf);
+            }
+            return { name: null };
+        }
+
+        // contains:TEXT:assign_target[:N] — within a node region, find the sub-expression
+        // containing TEXT, then return the assignment target identifier.
+        // contains:TEXT:member_access_target — find the identifier accessed with .TEXT
+        // contains:TEXT:assign_target_at:N — Nth (0-indexed) assign target in the comma expr
+        case "contains": {
+            const text = parts[1];
+            const what = parts[2];
+            if (!text) return { name: null };
+            if (what === "assign_target") {
+                const idx = parts[3] !== undefined ? parseInt(parts[3]) : undefined;
+                return { name: findAssignTargetContaining(node, text, sf, idx) };
+            }
+            if (what === "member_access_target") {
+                return { name: findMemberAccessTarget(node, text, sf) };
+            }
+            return { name: null };
+        }
+
+        // if:condition_refs:ANCHOR_ID — find an if statement whose condition references
+        // the minified name of a previously resolved anchor. Resolves to the if body.
+        case "if": {
+            if (parts[1] === "condition_refs" && parts[2] && resolvedById) {
+                const anchorId = parts[2];
+                const resolved = resolvedById.get(anchorId);
+                if (!resolved) return { name: null };
+                const body = fn.body ?? node;
+                const found = findIfConditionRefs(body, resolved.minifiedName, sf);
+                if (found) return { name: `__pos_${found.getStart(sf)}`, nodeStart: found.getStart(sf), nodeEnd: found.end };
+            }
+            return { name: null };
+        }
+
+        // postfix_increment_operand — find the first postfix ++ operand in the node region
+        case "postfix_increment_operand": {
+            return walkReturnPostfixIncrementOperand(node, sf);
+        }
+
+        // method_arg_callee:METHOD — find a call to .METHOD(X()), return the callee X
+        case "method_arg_callee": {
+            const method = parts[1];
+            if (!method) return { name: null };
+            const body = fn.body ?? node;
+            return { name: findMethodArgCallee(body, method, sf) };
+        }
+
+        // standalone_increment — find a free-standing expression statement that is X++
+        case "standalone_increment": {
+            const body = fn.body ?? node;
+            return { name: findStandaloneIncrement(body, sf) };
         }
 
         default:
-            return null;
+            return { name: null };
     }
+}
+
+// ── New Walk Helpers ────────────────────────────────────────────────────────
+
+/** Find a return statement containing a comma expression with exactly N parts */
+function findReturnComma(body: ts.Node, n: number, sf: ts.SourceFile): ts.Node | null {
+    let found: ts.Node | null = null;
+    function visit(node: ts.Node) {
+        if (found) return;
+        if (ts.isReturnStatement(node) && node.expression) {
+            const parts = collectCommaOperands(node.expression);
+            if (parts.length === n) {
+                found = node.expression;
+                return;
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(body);
+    return found;
+}
+
+/** Flatten a comma expression (BinaryExpression with CommaToken) into its operands */
+function collectCommaOperands(expr: ts.Expression): ts.Expression[] {
+    // Unwrap parentheses
+    while (ts.isParenthesizedExpression(expr)) expr = expr.expression;
+
+    if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+        return [...collectCommaOperands(expr.left), ...collectCommaOperands(expr.right)];
+    }
+    return [expr];
+}
+
+/** Within a node, find a sub-expression containing `text` that is an assignment, return LHS name.
+ *  If `idx` is provided, return the Nth (0-indexed) assignment target in the comma expression. */
+function findAssignTargetContaining(node: ts.Node, text: string, sf: ts.SourceFile, idx?: number): string | null {
+    // If this is a positional node (comma expr), iterate its operands
+    const operands = ts.isBinaryExpression(node) ? collectCommaOperands(node as ts.Expression) : null;
+    const candidates = operands ?? [node];
+
+    let matchCount = 0;
+    for (const candidate of candidates) {
+        const candidateText = candidate.getText(sf);
+        if (!candidateText.includes(text)) continue;
+
+        // Look for assignment expression
+        let result: string | null = null;
+        function findAssign(n: ts.Node) {
+            if (result) return;
+            if (
+                ts.isBinaryExpression(n) &&
+                n.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+                ts.isIdentifier(n.left) &&
+                n.getText(sf).includes(text)
+            ) {
+                result = n.left.text;
+                return;
+            }
+            ts.forEachChild(n, findAssign);
+        }
+        findAssign(candidate);
+        if (result) {
+            if (idx === undefined || matchCount === idx) return result;
+            matchCount++;
+        }
+    }
+    return null;
+}
+
+/** Within a node, find an identifier that has `.propertyName` accessed on it */
+function findMemberAccessTarget(node: ts.Node, propertyName: string, sf: ts.SourceFile): string | null {
+    // Search across comma operands if applicable
+    const operands = ts.isBinaryExpression(node) ? collectCommaOperands(node as ts.Expression) : null;
+    const roots = operands ?? [node];
+
+    for (const root of roots) {
+        let result: string | null = null;
+        function find(n: ts.Node) {
+            if (result) return;
+            if (
+                ts.isPropertyAccessExpression(n) &&
+                n.name.text === propertyName &&
+                ts.isIdentifier(n.expression)
+            ) {
+                result = n.expression.text;
+                return;
+            }
+            ts.forEachChild(n, find);
+        }
+        find(root);
+        if (result) return result;
+    }
+    return null;
+}
+
+/** Find an if statement whose condition references `name`, return its then-body */
+function findIfConditionRefs(body: ts.Node, name: string, sf: ts.SourceFile): ts.Node | null {
+    let found: ts.Node | null = null;
+    function visit(node: ts.Node) {
+        if (found) return;
+        if (ts.isIfStatement(node)) {
+            const condText = node.expression.getText(sf);
+            if (refsIdentifier(node.expression, name)) {
+                found = node.thenStatement;
+                return;
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(body);
+    return found;
+}
+
+/** Check if an expression tree references a specific identifier */
+function refsIdentifier(node: ts.Node, name: string): boolean {
+    if (ts.isIdentifier(node) && node.text === name) return true;
+    let found = false;
+    ts.forEachChild(node, (child) => {
+        if (!found) found = refsIdentifier(child, name);
+    });
+    return found;
+}
+
+/** Find a postfix increment operand within a node (searches return statements first) */
+function walkReturnPostfixIncrementOperand(node: ts.Node, sf: ts.SourceFile): WalkResult {
+    let result: string | null = null;
+    function find(n: ts.Node) {
+        if (result) return;
+        if (
+            ts.isPostfixUnaryExpression(n) &&
+            n.operator === ts.SyntaxKind.PlusPlusToken &&
+            ts.isIdentifier(n.operand)
+        ) {
+            result = n.operand.text;
+            return;
+        }
+        if (
+            ts.isPrefixUnaryExpression(n) &&
+            n.operator === ts.SyntaxKind.PlusPlusToken &&
+            ts.isIdentifier(n.operand)
+        ) {
+            result = n.operand.text;
+            return;
+        }
+        ts.forEachChild(n, find);
+    }
+    find(node);
+    return { name: result };
+}
+
+/** Find a call to .method(X()), return the callee X of the first arg */
+function findMethodArgCallee(body: ts.Node, method: string, sf: ts.SourceFile): string | null {
+    let result: string | null = null;
+    function visit(node: ts.Node) {
+        if (result) return;
+        if (
+            ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === method &&
+            node.arguments.length >= 1
+        ) {
+            const arg = node.arguments[0];
+            if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression)) {
+                result = arg.expression.text;
+                return;
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(body);
+    return result;
+}
+
+/** Find a standalone expression statement that is X++ or ++X */
+function findStandaloneIncrement(body: ts.Node, sf: ts.SourceFile): string | null {
+    let result: string | null = null;
+    function visit(node: ts.Node) {
+        if (result) return;
+        if (ts.isExpressionStatement(node)) {
+            const expr = node.expression;
+            if (
+                ts.isPostfixUnaryExpression(expr) &&
+                expr.operator === ts.SyntaxKind.PlusPlusToken &&
+                ts.isIdentifier(expr.operand)
+            ) {
+                result = expr.operand.text;
+                return;
+            }
+            if (
+                ts.isPrefixUnaryExpression(expr) &&
+                expr.operator === ts.SyntaxKind.PlusPlusToken &&
+                ts.isIdentifier(expr.operand)
+            ) {
+                result = expr.operand.text;
+                return;
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(body);
+    return result;
 }
 
 function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | null {
@@ -354,6 +669,20 @@ function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | 
             }
         }
 
+        if (localType === "call_result_callee" && ts.isVariableStatement(node)) {
+            for (const decl of node.declarationList.declarations) {
+                if (
+                    ts.isIdentifier(decl.name) &&
+                    decl.initializer &&
+                    ts.isCallExpression(decl.initializer) &&
+                    ts.isIdentifier(decl.initializer.expression)
+                ) {
+                    result = decl.initializer.expression.text;
+                    return;
+                }
+            }
+        }
+
         ts.forEachChild(node, visit);
     }
 
@@ -402,15 +731,17 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
         const minifiedName = getNodeName(node);
         if (!minifiedName) continue;
 
-        const id = rule.id ?? rule.rename;
+        const id = rule.id ?? rule.rename ?? minifiedName;
         resolvedById.set(id, { id, file: rule.file, minifiedName });
 
-        results.push({
-            minified: minifiedName,
-            original: rule.rename,
-            confidence: 100,
-            reason: `anchor: ${rule.description ?? rule.rename}`,
-        });
+        if (!rule.anchor_only && rule.rename) {
+            results.push({
+                minified: minifiedName,
+                original: rule.rename,
+                confidence: 100,
+                reason: `anchor: ${rule.description ?? rule.rename}`,
+            });
+        }
 
         // Optionally rename the enclosing class (scope=method)
         if (rule.class && ts.isMethodDeclaration(node)) {
@@ -446,27 +777,43 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
             const code = fs.readFileSync(filePath, "utf-8");
             const sf = ts.createSourceFile(parent.file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
 
-            const node = findNodeByName(sf, parent.minifiedName);
+            // Find the parent node — either by name or by position for intermediate anchors
+            let node: ts.Node | null;
+            if (parent.nodeStart !== undefined && parent.nodeEnd !== undefined) {
+                node = findNodeAtPosition(sf, parent.nodeStart, parent.nodeEnd);
+            } else {
+                node = findNodeByName(sf, parent.minifiedName);
+            }
             if (!node) {
                 if (verbose) console.warn(`  anchor walk skip: node "${parent.minifiedName}" not found — ${rule.description ?? rule.rename}`);
                 continue;
             }
 
-            const minifiedName = walkFromNode(node, rule.walk, sf);
-            if (!minifiedName) {
+            const walkResult = walkFromNode(node, rule.walk, sf, resolvedById);
+            if (!walkResult.name) {
                 if (verbose) console.warn(`  anchor walk skip: walk "${rule.walk}" failed — ${rule.description ?? rule.rename}`);
                 continue;
             }
 
             const id = rule.id ?? rule.rename;
-            resolvedById.set(id, { id, file: parent.file, minifiedName });
+            const resolved: Resolved = {
+                id,
+                file: parent.file,
+                minifiedName: walkResult.name,
+                nodeStart: walkResult.nodeStart,
+                nodeEnd: walkResult.nodeEnd,
+            };
+            resolvedById.set(id, resolved);
 
-            results.push({
-                minified: minifiedName,
-                original: rule.rename,
-                confidence: 95,
-                reason: `anchor walk (${rule.from} → ${rule.walk})`,
-            });
+            // Only emit a rename if this walk has a rename target (not an intermediate anchor)
+            if (rule.rename && !walkResult.name.startsWith("__pos_")) {
+                results.push({
+                    minified: walkResult.name,
+                    original: rule.rename,
+                    confidence: 95,
+                    reason: `anchor walk (${rule.from} → ${rule.walk})`,
+                });
+            }
         }
 
         if (unresolved.length === pending.length) break;
@@ -534,7 +881,7 @@ function applyScopedRenameToFn(
     return result;
 }
 
-const SCOPED_WALK_PREFIXES = ["param:", "local:"];
+const SCOPED_WALK_PREFIXES = ["param:", "local:", "contains:"];
 
 function isScopedWalk(walk: string): boolean {
     return SCOPED_WALK_PREFIXES.some((p) => walk.startsWith(p));
@@ -544,14 +891,34 @@ export function applyAnchorScopedRenamesInDir(deobDir: string, rulesPath: string
     if (!fs.existsSync(rulesPath)) return 0;
 
     const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
-    const rootRules = rules.filter((r) => !isWalkRule(r)) as RootRule[];
     const walkRules = (rules.filter(isWalkRule) as WalkRule[]).filter((r) => isScopedWalk(r.walk));
     if (walkRules.length === 0) return 0;
 
-    // Root rule id → { file, renamedName } (the post-rename function name in the prettified file)
+    // Run full anchor resolution to build the complete anchors map
+    // (including walk-derived anchors like getGlobalConfig from getCustomApiKeyStatus)
+    const allResults = applyAnchorRules(deobDir, rulesPath);
+
+    // Build anchors from all resolved rules — root AND walk-derived.
+    // Use the renamed name (original) as the function name since renames have been applied.
     const anchors = new Map<string, { file: string; renamedName: string }>();
-    for (const rule of rootRules) {
-        anchors.set(rule.id ?? rule.rename, { file: rule.file, renamedName: rule.rename });
+
+    // Root rules
+    for (const rule of rules.filter((r) => !isWalkRule(r)) as RootRule[]) {
+        if (rule.rename) anchors.set(rule.id ?? rule.rename, { file: rule.file, renamedName: rule.rename });
+    }
+
+    // Walk rules that resolved (they produce anchors too)
+    for (const rule of rules.filter(isWalkRule) as WalkRule[]) {
+        const ruleId = rule.id ?? rule.rename;
+        // Find the matching result to get the file
+        const match = allResults.find(r => r.original === rule.rename);
+        if (match && rule.rename) {
+            // Walk-derived anchors inherit the file from their parent
+            const parent = anchors.get(rule.from);
+            if (parent) {
+                anchors.set(ruleId, { file: parent.file, renamedName: rule.rename });
+            }
+        }
     }
 
     // Group scoped renames by file
@@ -581,16 +948,16 @@ export function applyAnchorScopedRenamesInDir(deobDir: string, rulesPath: string
                 continue;
             }
 
-            const currentName = walkFromNode(fnNode, walk, sf);
-            if (!currentName) {
+            const walkResult = walkFromNode(fnNode, walk, sf);
+            if (!walkResult.name) {
                 if (verbose) console.warn(`  scoped rename skip: walk "${walk}" failed in ${fnName}`);
                 continue;
             }
-            if (currentName === rename) continue; // already correct
+            if (walkResult.name === rename) continue; // already correct
 
-            const newCode = applyScopedRenameToFn(code, sf, fnNode, currentName, rename);
+            const newCode = applyScopedRenameToFn(code, sf, fnNode, walkResult.name, rename);
             if (newCode !== code) {
-                if (verbose) console.log(`  scoped rename: ${fnName} — ${currentName} → ${rename}`);
+                if (verbose) console.log(`  scoped rename: ${fnName} — ${walkResult.name} → ${rename}`);
                 code = newCode;
                 totalRenames++;
             }

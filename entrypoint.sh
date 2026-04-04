@@ -209,6 +209,10 @@ step_prettify() {
   header "Step 2.7: Prettify"
   cd "$TOOLS_TS"
   bun run src/prettify.ts "$DEOB_DIR"
+
+  # Apply scoped param/local renames from anchor rules (post-prettify)
+  bun run src/apply-scoped-renames.ts "$DEOB_DIR" "$TOOLS_TS/anchor-rules.json"
+
   cd "$SCRIPT_DIR"
 
   # Create git baseline AFTER prettify so patches target formatted code

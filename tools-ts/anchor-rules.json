@@ -57,5 +57,98 @@
     { "from": "yieldMissingToolResultBlocks", "walk": "param:1", "rename": "errorMessage" },
     { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding", "rename": "assistantMessage" },
     { "from": "yieldMissingToolResultBlocks", "walk": "local:call_result", "rename": "toolUseBlocks" },
-    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding:1", "rename": "toolUse" }
+    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding:1", "rename": "toolUse" },
+
+    {
+        "id": "getCustomApiKeyStatus",
+        "description": "getCustomApiKeyStatus — returns 'approved', 'rejected', or 'new'",
+        "file": "utils/config.js",
+        "find": { "string_literal": "approved" },
+        "scope": "function",
+        "rename": "getCustomApiKeyStatus"
+    },
+    {
+        "from": "getCustomApiKeyStatus",
+        "walk": "param:0",
+        "rename": "truncatedApiKey",
+        "description": "truncatedApiKey — the API key to check status for"
+    },
+    {
+        "from": "getCustomApiKeyStatus",
+        "walk": "local:call_result",
+        "rename": "config",
+        "description": "config — local var set to getGlobalConfig()"
+    },
+    {
+        "from": "getCustomApiKeyStatus",
+        "walk": "local:call_result_callee",
+        "id": "getGlobalConfig",
+        "rename": "getGlobalConfig",
+        "description": "getGlobalConfig — the callee that provides config in getCustomApiKeyStatus"
+    },
+    {
+        "from": "getGlobalConfig",
+        "walk": "return:comma:4",
+        "id": "getGlobalConfig_returnExpr",
+        "description": "4-part comma return in getGlobalConfig"
+    },
+    {
+        "from": "getGlobalConfig_returnExpr",
+        "walk": "contains:Date.now():assign_target",
+        "rename": "globalConfigCache",
+        "id": "globalConfigCache",
+        "description": "globalConfigCache — the config cache object assigned with mtime defaulting to Date.now()"
+    },
+    {
+        "from": "getGlobalConfig",
+        "walk": "contains:mtimeMs:member_access_target",
+        "rename": "stats",
+        "description": "stats — local assigned from statSync, referenced as stats?.mtimeMs"
+    },
+    {
+        "from": "getGlobalConfig_returnExpr",
+        "walk": "contains:size:assign_target",
+        "rename": "lastReadFileStats",
+        "id": "lastReadFileStats",
+        "description": "lastReadFileStats — assigned { mtime, size } or null"
+    },
+    {
+        "from": "getGlobalConfig",
+        "walk": "method_arg_callee:statSync",
+        "rename": "getGlobalClaudeFile",
+        "description": "getGlobalClaudeFile — path function passed to statSync()"
+    },
+    {
+        "from": "getGlobalConfig",
+        "walk": "if:condition_refs:globalConfigCache",
+        "id": "getGlobalConfig_cacheHitBranch",
+        "description": "if-branch checking globalConfigCache.config (cache hit path)"
+    },
+    {
+        "from": "getGlobalConfig_cacheHitBranch",
+        "walk": "postfix_increment_operand",
+        "rename": "configCacheHits",
+        "description": "configCacheHits — incremented on cache hit"
+    },
+    {
+        "from": "getGlobalConfig",
+        "walk": "standalone_increment",
+        "rename": "configCacheMisses",
+        "description": "configCacheMisses — incremented at start of cache miss path"
+    },
+
+    {
+        "id": "getTotalCacheReadInputTokens",
+        "description": "getTotalCacheReadInputTokens — sumBy on STATE.modelUsage",
+        "file": "bootstrap/state.js",
+        "find": { "string_literal": "cacheReadInputTokens" },
+        "scope": "function",
+        "rename": "getTotalCacheReadInputTokens"
+    },
+    {
+        "from": "getTotalCacheReadInputTokens",
+        "walk": "contains:modelUsage:member_access_target",
+        "rename": "STATE",
+        "description": "STATE — the global state object"
+    }
 ]

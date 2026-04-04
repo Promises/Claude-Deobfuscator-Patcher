@@ -652,6 +652,7 @@ function renameWithLanguageService(
 
     const pos = assembledPositions.get(minified);
     if (pos === undefined) {
+      if (process.env.RENAME_VERBOSE) console.warn(`    skip (no decl): ${minified} → ${original}`);
       renamesSkipped++;
       continue;
     }
@@ -663,6 +664,7 @@ function renameWithLanguageService(
       false,
     );
     if (!locations || locations.length === 0) {
+      if (process.env.RENAME_VERBOSE) console.warn(`    skip (no locs): ${minified} → ${original} at pos ${pos}`);
       renamesSkipped++;
       continue;
     }
@@ -861,10 +863,6 @@ export function renameProject(
     db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
   }
 
-  // Layer 0: User-defined anchor rules (highest priority)
-  const anchorRulesPath = path.join(import.meta.dir, "../anchor-rules.json");
-  const anchorMatches = applyAnchorRules(projectDir, anchorRulesPath);
-
   // Pass 1: Discover renames via constraint matching + export maps
   const renameTasks: Array<{
     minified: string;
@@ -872,14 +870,6 @@ export function renameProject(
     declFile: string;
   }> = [];
   const seen = new Map<string, string>(); // minified → original (dedup)
-
-  // Seed seen with anchor results — they take priority over everything
-  for (const m of anchorMatches) {
-    if (seen.has(m.minified)) continue;
-    seen.set(m.minified, m.original);
-    // declFile unknown for anchor rules — use a sentinel so collision filter treats them as global
-    renameTasks.push({ minified: m.minified, original: m.original, declFile: "__anchor__" });
-  }
 
   for (const section of mapping.sections) {
     if (!section.matched_source || section.confidence === "low") continue;
@@ -892,39 +882,53 @@ export function renameProject(
     const deobCode = fs.readFileSync(deobPath, "utf-8");
     const sourceCode = fs.readFileSync(sourcePath, "utf-8");
 
-    // Primary: constraint matching (inside-out, version-agnostic)
-    const { matches: constraintMatches } = constraintMatch(
-      deobCode, sourceCode, section.matched_source,
-    );
+    if (!process.env.ANCHOR_ONLY) {
+      // Primary: constraint matching (inside-out, version-agnostic)
+      const { matches: constraintMatches } = constraintMatch(
+        deobCode, sourceCode, section.matched_source,
+      );
 
-    // Fallback: export map + signature matching
-    let legacyRenames = buildModuleRenames(deobCode, sourceCode, section.matched_source);
+      // Fallback: export map + signature matching
+      let legacyRenames = buildModuleRenames(deobCode, sourceCode, section.matched_source);
 
-    if (db) {
-      legacyRenames = applyDBFilters(legacyRenames, section.matched_source, db);
+      if (db) {
+        legacyRenames = applyDBFilters(legacyRenames, section.matched_source, db);
+      }
+
+      // Merge: constraint matches take priority, then legacy
+      // Filter out JS reserved words as rename targets
+      for (const m of constraintMatches) {
+        if (seen.has(m.minified) || JS_RESERVED.has(m.original)) continue;
+        seen.set(m.minified, m.original);
+        renameTasks.push({
+          minified: m.minified,
+          original: m.original,
+          declFile: section.output_path,
+        });
+      }
+
+      for (const [minified, original] of legacyRenames) {
+        if (seen.has(minified) || JS_RESERVED.has(original)) continue;
+        seen.set(minified, original);
+        renameTasks.push({
+          minified,
+          original,
+          declFile: section.output_path,
+        });
+      }
     }
+  }
 
-    // Merge: constraint matches take priority, then legacy
-    // Filter out JS reserved words as rename targets
-    for (const m of constraintMatches) {
-      if (seen.has(m.minified) || JS_RESERVED.has(m.original)) continue;
-      seen.set(m.minified, m.original);
-      renameTasks.push({
-        minified: m.minified,
-        original: m.original,
-        declFile: section.output_path,
-      });
+  // Layer 0: User-defined anchor rules (highest priority)
+  const anchorRulesPath = path.join(import.meta.dir, "../anchor-rules.json");
+  const anchorMatches = applyAnchorRules(projectDir, anchorRulesPath);
+  for (const m of anchorMatches) {
+    if (seen.has(m.minified)) {
+      if (process.env.RENAME_VERBOSE) console.warn(`    anchor skip (already seen): ${m.minified} → ${m.original} (existing: ${seen.get(m.minified)})`);
+      continue;
     }
-
-    for (const [minified, original] of legacyRenames) {
-      if (seen.has(minified) || JS_RESERVED.has(original)) continue;
-      seen.set(minified, original);
-      renameTasks.push({
-        minified,
-        original,
-        declFile: section.output_path,
-      });
-    }
+    seen.set(m.minified, m.original);
+    renameTasks.push({ minified: m.minified, original: m.original, declFile: "__anchor__" });
   }
 
   // Filter cross-file collisions: if two different minified names from different
@@ -938,7 +942,20 @@ export function renameProject(
   for (const [original, tasks] of originalToMinified) {
     const uniqueFiles = new Set(tasks.map(t => t.declFile));
     if (uniqueFiles.size > 1) {
-      collisions.add(original);
+      const uniqueMinified = new Set(tasks.map(t => t.minified));
+      if (uniqueMinified.size > 1) {
+        // If an anchor claims this name, trust the anchor and drop conflicting entries
+        const anchorTask = tasks.find(t => t.declFile === "__anchor__");
+        if (anchorTask) {
+          for (let i = renameTasks.length - 1; i >= 0; i--) {
+            if (renameTasks[i].original === original && renameTasks[i].declFile !== "__anchor__") {
+              renameTasks.splice(i, 1);
+            }
+          }
+        } else {
+          collisions.add(original);
+        }
+      }
     }
   }
   const filteredTasks = renameTasks.filter(t => !collisions.has(t.original));
