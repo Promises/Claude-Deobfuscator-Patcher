@@ -25,6 +25,9 @@ type FindCriteria =
     | { text: string }
     | { regex: string }
     | { string_literal: string }
+    | { string_startswith: string }
+    | { string_endswith: string }
+    | { string_contains: string }
     | { number: number; op?: string }
     | { property_assignment: { key: string; value: string } }
     | { function_name: string };
@@ -55,6 +58,7 @@ interface WalkRule {
     from: string; // references another rule's id or rename
     walk: string; // walk expression
     rename: string;
+    find?: FindCriteria | string; // optional: locate position within parent before walking
 }
 
 type AnchorRule = RootRule | WalkRule;
@@ -97,6 +101,42 @@ function findPatternPos(code: string, find: FindCriteria | string, sf: ts.Source
         return pos;
     }
 
+    if ("string_startswith" in find) {
+        const prefix = (find as { string_startswith: string }).string_startswith;
+        let pos = -1;
+        function visit(node: ts.Node) {
+            if (pos !== -1) return;
+            if (ts.isStringLiteral(node) && node.text.startsWith(prefix)) pos = node.getStart(sf);
+            ts.forEachChild(node, visit);
+        }
+        visit(sf);
+        return pos;
+    }
+
+    if ("string_endswith" in find) {
+        const suffix = (find as { string_endswith: string }).string_endswith;
+        let pos = -1;
+        function visit(node: ts.Node) {
+            if (pos !== -1) return;
+            if (ts.isStringLiteral(node) && node.text.endsWith(suffix)) pos = node.getStart(sf);
+            ts.forEachChild(node, visit);
+        }
+        visit(sf);
+        return pos;
+    }
+
+    if ("string_contains" in find) {
+        const needle = (find as { string_contains: string }).string_contains;
+        let pos = -1;
+        function visit(node: ts.Node) {
+            if (pos !== -1) return;
+            if (ts.isStringLiteral(node) && node.text.includes(needle)) pos = node.getStart(sf);
+            ts.forEachChild(node, visit);
+        }
+        visit(sf);
+        return pos;
+    }
+
     if ("number" in find) {
         const target = find as { number: number; op?: string };
         let pos = -1;
@@ -118,18 +158,15 @@ function findPatternPos(code: string, find: FindCriteria | string, sf: ts.Source
     }
 
     if ("property_assignment" in find) {
-        const { key, value } = (find as { property_assignment: { key: string; value: string } }).property_assignment;
+        const { key, value } = (find as { property_assignment: { key?: string; value?: string } }).property_assignment;
+        if (!key && !value) return -1;
         let pos = -1;
         function visit(node: ts.Node) {
             if (pos !== -1) return;
-            if (
-                ts.isPropertyAssignment(node) &&
-                ts.isIdentifier(node.name) &&
-                node.name.text === key &&
-                ts.isStringLiteral(node.initializer) &&
-                node.initializer.text === value
-            ) {
-                pos = node.getStart(sf);
+            if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
+                const keyMatch = !key || node.name.text === key;
+                const valueMatch = !value || (ts.isStringLiteral(node.initializer) && node.initializer.text === value);
+                if (keyMatch && valueMatch) pos = node.getStart(sf);
             }
             ts.forEachChild(node, visit);
         }
@@ -266,8 +303,15 @@ function walkFromNode(
     switch (op) {
         case "param": {
             const idx = parseInt(parts[1] ?? "0");
+            // Function declaration/expression: return parameter name
             const param = fn.parameters?.[idx];
-            return { name: param && ts.isIdentifier(param.name) ? param.name.text : null };
+            if (param && ts.isIdentifier(param.name)) return { name: param.name.text };
+            // Call expression: return argument identifier
+            if (ts.isCallExpression(node) && idx < node.arguments.length) {
+                const arg = node.arguments[idx];
+                if (ts.isIdentifier(arg)) return { name: arg.text };
+            }
+            return { name: null };
         }
 
         case "local": {
@@ -293,15 +337,50 @@ function walkFromNode(
             return { name: result };
         }
 
+        // only_bare_call — returns the callee name only if there's exactly one call in the body,
+        // it has zero arguments, and the callee is a plain identifier.
+        // Matches patterns like: function f() { if (cond) g(); }
+        case "only_bare_call": {
+            const body = fn.body ?? node;
+            const found: string[] = [];
+            function findBareCalls(n: ts.Node) {
+                if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.arguments.length === 0) {
+                    found.push(n.expression.text);
+                }
+                ts.forEachChild(n, findBareCalls);
+            }
+            findBareCalls(body);
+            return { name: found.length === 1 ? found[0] : null };
+        }
+
         case "call_string_arg": {
-            // call_string_arg:VALUE:callee
-            const value = parts[1];
-            if (!fn.body || !value) return { name: null };
+            // call_string_arg:VALUE:callee — VALUE is rejoined to handle colons
+            const value = parts.slice(1, -1).join(":");
+            const action = parts[parts.length - 1];
+            if (!fn.body || !value || action !== "callee") return { name: null };
             let result: string | null = null;
             function find(n: ts.Node) {
                 if (result) return;
                 if (ts.isCallExpression(n)) {
                     const hasArg = n.arguments.some((a) => ts.isStringLiteral(a) && a.text === value);
+                    if (hasArg && ts.isIdentifier(n.expression)) result = n.expression.text;
+                }
+                ts.forEachChild(n, find);
+            }
+            find(fn.body);
+            return { name: result };
+        }
+
+        // call_string_contains:SUBSTR:callee — like call_string_arg but partial match
+        case "call_string_contains": {
+            const substr = parts.slice(1, -1).join(":");
+            const action = parts[parts.length - 1];
+            if (!fn.body || !substr || action !== "callee") return { name: null };
+            let result: string | null = null;
+            function find(n: ts.Node) {
+                if (result) return;
+                if (ts.isCallExpression(n)) {
+                    const hasArg = n.arguments.some((a) => ts.isStringLiteral(a) && a.text.includes(substr));
                     if (hasArg && ts.isIdentifier(n.expression)) result = n.expression.text;
                 }
                 ts.forEachChild(n, find);
@@ -396,6 +475,82 @@ function walkFromNode(
         case "standalone_increment": {
             const body = fn.body ?? node;
             return { name: findStandaloneIncrement(body, sf) };
+        }
+
+        // export_map — search the entire file for an object literal containing
+        // `someKey: () => MINIFIED_NAME` where MINIFIED_NAME is the anchor's minified name.
+        // Returns the object literal as a positional anchor.
+        case "export_map": {
+            const anchorName = getNodeName(node);
+            if (!anchorName) return { name: null };
+            const obj = findExportMapObject(sf, anchorName);
+            if (obj) return { name: `__pos_${obj.getStart(sf)}`, nodeStart: obj.getStart(sf), nodeEnd: obj.end };
+            return { name: null };
+        }
+
+        // closest_parent:if|while|for|call — from a positional anchor, walk up the AST
+        // to the nearest matching parent node. Returns it as a positional anchor.
+        case "closest_parent": {
+            const target = parts[1];
+            if (!target) return { name: null };
+            // node is already positioned (from find or previous walk)
+            let cur: ts.Node | undefined = node;
+            while (cur) {
+                const match =
+                    (target === "if" && ts.isIfStatement(cur)) ||
+                    (target === "while" && ts.isWhileStatement(cur)) ||
+                    (target === "for" && (ts.isForStatement(cur) || ts.isForOfStatement(cur) || ts.isForInStatement(cur))) ||
+                    (target === "call" && ts.isCallExpression(cur)) ||
+                    (target === "return" && ts.isReturnStatement(cur)) ||
+                    (target === "expression_statement" && ts.isExpressionStatement(cur));
+                if (match) return { name: `__pos_${cur.getStart(sf)}`, nodeStart: cur.getStart(sf), nodeEnd: cur.end };
+                cur = cur.parent;
+            }
+            return { name: null };
+        }
+
+        // condition_callee — from an if/while node, return the callee of the condition.
+        // Matches: if (fn(x)) or while (fn(x))
+        // When used with an id (no rename), also stores the call node position for further walks (e.g. param:0)
+        case "condition_callee": {
+            let cond: ts.Expression | undefined;
+            if (ts.isIfStatement(node)) cond = node.expression;
+            else if (ts.isWhileStatement(node)) cond = node.expression;
+            if (!cond) return { name: null };
+            let call: ts.CallExpression | undefined;
+            if (ts.isCallExpression(cond)) call = cond;
+            if (ts.isPrefixUnaryExpression(cond) && ts.isCallExpression(cond.operand)) call = cond.operand;
+            if (call && ts.isIdentifier(call.expression))
+                return { name: call.expression.text, nodeStart: call.getStart(sf), nodeEnd: call.end };
+            return { name: null };
+        }
+
+        // callee — from a call expression node, return the callee identifier
+        case "callee": {
+            if (ts.isCallExpression(node) && ts.isIdentifier(node.expression))
+                return { name: node.expression.text };
+            // If node is an expression statement wrapping a call
+            if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && ts.isIdentifier(node.expression.expression))
+                return { name: node.expression.expression.text };
+            return { name: null };
+        }
+
+        // binary_other_operand — from a node positioned inside a binary expression
+        // (typically via find), walk up to the containing BinaryExpression and return
+        // the identifier on the other side. Works for ===, !==, ==, !=, <, >, etc.
+        case "binary_other_operand": {
+            let cur: ts.Node | undefined = node;
+            while (cur && !ts.isBinaryExpression(cur)) cur = cur.parent;
+            if (!cur || !ts.isBinaryExpression(cur)) return { name: null };
+            const bin = cur;
+            // Determine which side the find landed on, return the other
+            const nodeStart = node.getStart(sf);
+            const nodeEnd = node.end;
+            const leftStart = bin.left.getStart(sf);
+            const leftEnd = bin.left.end;
+            const other = (nodeStart >= leftStart && nodeEnd <= leftEnd) ? bin.right : bin.left;
+            if (ts.isIdentifier(other)) return { name: other.text };
+            return { name: null };
         }
 
         default:
@@ -691,6 +846,56 @@ function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | 
     return result;
 }
 
+/** Find an object literal that has a property `key: () => name` where name matches */
+function findExportMapObject(sf: ts.SourceFile, name: string): ts.ObjectLiteralExpression | null {
+    let found: ts.ObjectLiteralExpression | null = null;
+    function visit(node: ts.Node) {
+        if (found) return;
+        if (ts.isObjectLiteralExpression(node)) {
+            for (const prop of node.properties) {
+                if (
+                    ts.isPropertyAssignment(prop) &&
+                    ts.isArrowFunction(prop.initializer) &&
+                    ts.isIdentifier(prop.initializer.body as ts.Node) &&
+                    (prop.initializer.body as ts.Identifier).text === name
+                ) {
+                    found = node;
+                    return;
+                }
+            }
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    return found;
+}
+
+/** Extract all `key: () => identifier` pairs from an object literal */
+function extractExportMapRenames(node: ts.Node, sf: ts.SourceFile): MatchResult[] {
+    if (!ts.isObjectLiteralExpression(node)) return [];
+    const results: MatchResult[] = [];
+    for (const prop of node.properties) {
+        if (
+            ts.isPropertyAssignment(prop) &&
+            ts.isIdentifier(prop.name) &&
+            ts.isArrowFunction(prop.initializer) &&
+            ts.isIdentifier(prop.initializer.body as ts.Node)
+        ) {
+            const original = prop.name.text;
+            const minified = (prop.initializer.body as ts.Identifier).text;
+            if (original !== minified) {
+                results.push({
+                    minified,
+                    original,
+                    confidence: 90,
+                    reason: `anchor export_map`,
+                });
+            }
+        }
+    }
+    return results;
+}
+
 // ── Main Entry Point ─────────────────────────────────────────────────────────
 
 export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResult[] {
@@ -789,6 +994,29 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
                 continue;
             }
 
+            // If the walk rule has a `find`, narrow to the deepest node at the found position
+            if (rule.find) {
+                const nodeCode = node.getText(sf);
+                const nodeSf = ts.createSourceFile("__walk_find.js", nodeCode, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+                const localPos = findPatternPos(nodeCode, rule.find, nodeSf);
+                if (localPos === -1) {
+                    if (verbose) console.warn(`  anchor walk skip: find in walk failed — ${rule.description ?? rule.rename}`);
+                    continue;
+                }
+                // Map local position back to the real source file position
+                const realPos = node.getStart(sf) + localPos;
+                // Find deepest node at that position in the real source file
+                let deepest: ts.Node = node;
+                function descend(n: ts.Node) {
+                    if (n.getStart(sf) <= realPos && realPos < n.end) {
+                        deepest = n;
+                        ts.forEachChild(n, descend);
+                    }
+                }
+                descend(node);
+                node = deepest;
+            }
+
             const walkResult = walkFromNode(node, rule.walk, sf, resolvedById);
             if (!walkResult.name) {
                 if (verbose) console.warn(`  anchor walk skip: walk "${rule.walk}" failed — ${rule.description ?? rule.rename}`);
@@ -804,6 +1032,22 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
                 nodeEnd: walkResult.nodeEnd,
             };
             resolvedById.set(id, resolved);
+
+            // __export_map: bulk-rename all `key: () => identifier` entries from the object
+            if (rule.rename === "__export_map" && walkResult.nodeStart !== undefined && walkResult.nodeEnd !== undefined) {
+                const mapNode = findNodeAtPosition(sf, walkResult.nodeStart, walkResult.nodeEnd);
+                if (mapNode) {
+                    const mapRenames = extractExportMapRenames(mapNode, sf);
+                    for (const r of mapRenames) {
+                        results.push(r);
+                        // Register each as a chainable anchor: <file>_fun_<originalName>
+                        const anchorId = `${parent.file}_fun_${r.original}`;
+                        resolvedById.set(anchorId, { id: anchorId, file: parent.file, minifiedName: r.minified });
+                    }
+                    if (verbose) console.log(`  export_map: ${mapRenames.length} renames from ${parent.file}`);
+                }
+                continue;
+            }
 
             // Only emit a rename if this walk has a rename target (not an intermediate anchor)
             if (rule.rename && !walkResult.name.startsWith("__pos_")) {

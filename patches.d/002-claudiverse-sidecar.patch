@@ -1,17 +1,9 @@
-diff --git a/bootstrap/state.js b/bootstrap/state.js
-index 4ba6b78..a0aaa5e 100644
---- a/bootstrap/state.js
-+++ b/bootstrap/state.js
-@@ -362,6 +362,9 @@ function getInitialState() {
- }
- 
- function getSessionId() {
-+    try {
-+        __claudiverse.connect();
-+    } catch (e) {}
-     return R_.sessionId;
- }
- 
+# patch: 002-claudiverse-sidecar
+# depends: 001
+# generated: 2026-04-07
+# description: Sidecar hooks for structuredIO and query mirroring.
+#              connect() is now registered via __sessionHooks in the module.
+
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
 index 77fd6e6..ae75221 100644
 --- a/cli/structuredIO.js
@@ -31,7 +23,7 @@ index de58360..c787351 100644
 --- a/query.js
 +++ b/query.js
 @@ -79,7 +79,15 @@ function isWithheldMaxOutputTokens(H) {
- 
+
  async function* query(params) {
      let consumedCommandUuids = [],
 -        terminal = yield* queryLoop(params, consumedCommandUuids);

@@ -1,0 +1,23 @@
+# patch: 001-session-hooks
+# depends: none
+# generated: 2026-04-07
+# description: Foundation patch — getSessionId() calls __sessionHooks.runAll()
+#              All other patches register callbacks via module .push() instead of
+#              patching getSessionId() directly.
+
+diff --git a/bootstrap/state.js b/bootstrap/state.js
+index 8825053..0000000 100644
+--- a/bootstrap/state.js
++++ b/bootstrap/state.js
+@@ -362,6 +362,11 @@ function getInitialState() {
+ }
+
+ function getSessionId() {
++    try {
++        if (typeof __sessionHooks !== 'undefined') {
++            __sessionHooks.runAll();
++        }
++    } catch (e) {}
+     return STATE.sessionId;
+ }
+

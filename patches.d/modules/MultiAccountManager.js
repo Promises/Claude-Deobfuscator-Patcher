@@ -1,8 +1,10 @@
 // Multi-Account Manager
 // Injected as a custom module — manages multiple Anthropic accounts with failover.
 //
-// Stores account registry in global config alongside existing oauthAccount.
+// Credential storage: config.accountCredentials in ~/.claude.json (disk).
+// The macOS keychain singleton is left untouched to avoid cross-account clobbering.
 // On 429 quota exhaustion, switches to next available account automatically.
+// On 401, clears in-memory cache and re-reads from disk (another process may have refreshed).
 //
 // Env vars:
 //   CLAUDE_MULTI_ACCOUNT_DEBUG — "1" for debug logging to /tmp/claude-multi-account.log
@@ -78,10 +80,7 @@ var __multiAccount = (function () {
 
   function loadRegistry() {
     if (registry) return registry;
-    if (!_getGlobalConfig) {
-      log("Config not bound, returning empty registry");
-      return null;
-    }
+    if (!_getGlobalConfig) return null;
     var config = _getGlobalConfig();
     if (config && config.accountRegistry) {
       registry = config.accountRegistry;
@@ -319,16 +318,18 @@ var __multiAccount = (function () {
   /**
    * Called from withRetry on 429. Returns true if failover happened.
    * @param {number|null} resetDelayMs — retry-after from response headers
+   * @param {boolean} isExtraUsage — true if "Extra usage is required for long context"
    * @returns {{ switched: boolean, account: object|null, message: string|null }}
    */
-  function handleRateLimitFailover(resetDelayMs) {
+  function handleRateLimitFailover(resetDelayMs, isExtraUsage) {
     var reg = loadRegistry();
     if (!reg || reg.accounts.length <= 1) {
       return { switched: false, account: null, message: null };
     }
 
-    // Don't switch for short waits
-    if (resetDelayMs !== null && resetDelayMs < FAILOVER_THRESHOLD_MS) {
+    // For extra-usage errors, always try to switch (no threshold)
+    // For rate limits, don't switch for short waits
+    if (!isExtraUsage && resetDelayMs !== null && resetDelayMs < FAILOVER_THRESHOLD_MS) {
       log(
         "Reset delay " +
           resetDelayMs +
@@ -345,27 +346,59 @@ var __multiAccount = (function () {
       return { switched: false, account: null, message: null };
     }
 
-    var cooldownMs = resetDelayMs || DEFAULT_COOLDOWN_MS;
+    var cooldownMs = isExtraUsage ? DEFAULT_COOLDOWN_MS : (resetDelayMs || DEFAULT_COOLDOWN_MS);
     markCoolingDown(current.id, Date.now() + cooldownMs);
     setActiveAccount(next.id);
 
-    var msg =
-      "⟳ Switched to account '" +
-      next.label +
-      "' (rate limited on '" +
-      current.label +
-      "')";
+    var reason = isExtraUsage
+      ? "extra usage required for 1M context on '" + current.label + "'"
+      : "rate limited on '" + current.label + "'";
+    var msg = "⚠ Switched to account '" + next.label + "' (" + reason + ")";
     log(msg);
+
+    // Write warning to stderr so user sees it
+    try {
+      process.stderr.write("\n" + msg + "\n\n");
+    } catch (e) {}
 
     return { switched: true, account: next, message: msg };
   }
 
   // ── Per-account credential management ──
 
+  /**
+   * Clear in-memory credential cache for a specific account or all accounts.
+   * Next getCredentials() call will re-read from disk (config.accountCredentials).
+   * This is critical for 401 recovery: another process may have refreshed tokens
+   * and written them to disk while our in-memory copy is stale.
+   * @param {string} [accountId] — if omitted, clears all cached credentials
+   */
+  function clearCredentialCache(accountId) {
+    if (accountId) {
+      delete credentialStore[accountId];
+      log("Cleared credential cache for " + accountId);
+    } else {
+      credentialStore = {};
+      log("Cleared all credential caches");
+    }
+  }
+
   function getCredentials(accountId) {
     // Check in-memory cache first
     if (credentialStore[accountId]) return credentialStore[accountId];
-    // Try secure storage
+    // Read from disk (config.accountCredentials — the source of truth)
+    if (_getGlobalConfig) {
+      try {
+        var config = _getGlobalConfig();
+        if (config && config.accountCredentials && config.accountCredentials[accountId]) {
+          credentialStore[accountId] = config.accountCredentials[accountId];
+          return credentialStore[accountId];
+        }
+      } catch (e) {
+        log("Error reading credentials from config: " + e.message);
+      }
+    }
+    // Try secure storage as fallback
     if (_secureStorageRead) {
       try {
         var data = _secureStorageRead();
@@ -374,7 +407,7 @@ var __multiAccount = (function () {
           return credentialStore[accountId];
         }
       } catch (e) {
-        log("Error reading credentials: " + e.message);
+        log("Error reading credentials from storage: " + e.message);
       }
     }
     return null;
@@ -413,6 +446,44 @@ var __multiAccount = (function () {
   }
 
   /**
+   * Called after OAuth token refresh to persist new tokens to disk and in-memory cache.
+   * This is the ONLY place refreshed tokens should be saved for multi-account — the
+   * keychain singleton (saveOAuthTokensIfNeeded) is suppressed to avoid cross-account
+   * clobbering.
+   * @param {object} tokenObj — the refreshed token object from FBH()
+   */
+  function saveRefreshedTokens(tokenObj) {
+    var account = getActiveAccount();
+    if (!account || account.type !== "oauth") return;
+
+    // Merge with existing credentials to preserve fields the refresh doesn't return
+    var existing = getCredentials(account.id) || {};
+    var updated = {
+      accessToken: tokenObj.accessToken,
+      refreshToken: "refreshToken" in tokenObj ? tokenObj.refreshToken : existing.refreshToken,
+      expiresAt: "expiresAt" in tokenObj ? tokenObj.expiresAt : existing.expiresAt,
+      scopes: tokenObj.scopes || existing.scopes || ["user:inference"],
+      subscriptionType: tokenObj.subscriptionType || existing.subscriptionType || null,
+      rateLimitTier: tokenObj.rateLimitTier || existing.rateLimitTier || null,
+    };
+    // Update in-memory cache
+    credentialStore[account.id] = updated;
+    // Persist to config.accountCredentials on disk (source of truth)
+    if (_saveGlobalConfig) {
+      try {
+        _saveGlobalConfig(function (config) {
+          var creds = config.accountCredentials || {};
+          creds[account.id] = updated;
+          return Object.assign({}, config, { accountCredentials: creds });
+        });
+        log("Saved refreshed tokens for " + account.label + " (expiresAt=" + updated.expiresAt + ")");
+      } catch (e) {
+        log("Error saving refreshed tokens: " + e.message);
+      }
+    }
+  }
+
+  /**
    * Returns the OAuth tokens or API key for the currently active account.
    * This is called by the patched auth.js to override the singleton credential.
    * @returns {{ type: 'oauth', accessToken: string, refreshToken: string|null, ... } | { type: 'api-key', apiKey: string } | null}
@@ -423,6 +494,7 @@ var __multiAccount = (function () {
     var creds = getCredentials(account.id);
     if (!creds) return null;
     if (account.type === "oauth" && creds.accessToken) {
+      log("Serving OAuth creds for: " + account.label + " (sub=" + (creds.subscriptionType || "?") + ")");
       return {
         type: "oauth",
         accessToken: creds.accessToken,
@@ -437,6 +509,64 @@ var __multiAccount = (function () {
       return { type: "api-key", apiKey: creds.apiKey };
     }
     return null;
+  }
+
+  /**
+   * Called after /login completes to capture fresh tokens into the active account.
+   * This is Option A: automatic post-login sync so the user doesn't need to
+   * re-run grab-creds.sh after re-authenticating.
+   * @param {object} tokens — the OAuthTokens object from installOAuthTokens
+   * @param {object} [accountInfo] — { accountUuid, emailAddress, organizationUuid }
+   */
+  function handlePostLogin(tokens, accountInfo) {
+    var reg = loadRegistry();
+    if (!reg || reg.accounts.length === 0) return;
+
+    var account = getActiveAccount();
+    if (!account) return;
+
+    // Update account info if provided (email, org may have changed)
+    if (accountInfo) {
+      for (var i = 0; i < reg.accounts.length; i++) {
+        if (reg.accounts[i].id === account.id) {
+          if (accountInfo.accountUuid) reg.accounts[i].accountUuid = accountInfo.accountUuid;
+          if (accountInfo.emailAddress) reg.accounts[i].emailAddress = accountInfo.emailAddress;
+          if (accountInfo.organizationUuid !== undefined) reg.accounts[i].organizationUuid = accountInfo.organizationUuid;
+          break;
+        }
+      }
+      saveRegistry();
+    }
+
+    // Save fresh credentials to disk
+    var updated = {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken || null,
+      expiresAt: tokens.expiresAt || null,
+      scopes: tokens.scopes || ["user:inference"],
+      subscriptionType: tokens.subscriptionType || null,
+      rateLimitTier: tokens.rateLimitTier || null,
+    };
+    credentialStore[account.id] = updated;
+    if (_saveGlobalConfig) {
+      try {
+        _saveGlobalConfig(function (config) {
+          var creds = config.accountCredentials || {};
+          creds[account.id] = updated;
+          return Object.assign({}, config, { accountCredentials: creds });
+        });
+        log("Post-login: saved fresh tokens for " + account.label + " (" + (accountInfo && accountInfo.emailAddress || "?") + ")");
+      } catch (e) {
+        log("Post-login: error saving tokens: " + e.message);
+      }
+    }
+
+    // Clear cooldown since we just got fresh auth
+    clearCooldown(account.id);
+
+    try {
+      process.stderr.write("\n✓ Multi-account: updated credentials for '" + account.label + "'\n\n");
+    } catch (e) {}
   }
 
   // ── Event listeners ──
@@ -515,6 +645,9 @@ var __multiAccount = (function () {
     saveCredentials: saveCredentials,
     deleteCredentials: deleteCredentials,
     getActiveCredentials: getActiveCredentials,
+    saveRefreshedTokens: saveRefreshedTokens,
+    clearCredentialCache: clearCredentialCache,
+    handlePostLogin: handlePostLogin,
 
     // Failover
     handleRateLimitFailover: handleRateLimitFailover,
@@ -534,3 +667,162 @@ var __multiAccount = (function () {
     DEFAULT_COOLDOWN_MS: DEFAULT_COOLDOWN_MS,
   };
 })();
+
+// Register with session hooks (runs on first getSessionId call)
+try {
+  __sessionHooks.push(function () {
+    __multiAccount.bindConfig(getGlobalConfig, saveGlobalConfig);
+    __multiAccount.bindSecureStorage(
+      function () { return U4().read(); },
+      function (updater) { return U4().update(updater); }
+    );
+    // Sync oauthAccount in config to active account so direct config readers see correct data
+    if (__multiAccount.isMultiAccountEnabled()) {
+      var __active = __multiAccount.getActiveAccount();
+      if (__active) {
+        saveGlobalConfig(function (config) {
+          var __prev = config.oauthAccount || {};
+          // Only update if the active account differs from what's in config
+          if (__prev.accountUuid === __active.accountUuid) return config;
+          return Object.assign({}, config, {
+            oauthAccount: {
+              accountUuid: __active.accountUuid,
+              emailAddress: __active.emailAddress,
+              organizationUuid: __active.organizationUuid,
+            },
+          });
+        });
+      }
+    }
+  });
+} catch (e) {}
+
+// Register /accounts command
+try {
+  __commandHooks.register({
+    name: "accounts",
+    description: "Show and manage multi-account configuration",
+    call: async function (args) {
+      var status = __multiAccount.getStatus();
+      if (!status.enabled && status.accounts.length === 0) {
+        return {
+          type: "text",
+          value: "No accounts configured. Use the account-tool.js script to add accounts.",
+        };
+      }
+      var lines = [];
+      lines.push("Accounts (" + status.accounts.length + "):\n");
+      for (var i = 0; i < status.accounts.length; i++) {
+        var a = status.accounts[i];
+        var flags = [];
+        if (a.isPrimary) flags.push("PRIMARY");
+        if (a.isActive) flags.push("ACTIVE");
+        if (a.onCooldown) flags.push("COOLDOWN until " + new Date(a.cooldownUntil).toLocaleTimeString());
+        var flagStr = flags.length > 0 ? " [" + flags.join(", ") + "]" : "";
+        var email = a.email ? " (" + a.email + ")" : "";
+        lines.push("  " + a.label + flagStr + " \u2014 " + a.type + email);
+      }
+
+      // Parse subcommands from args
+      var parts = (args || "").trim().split(/\s+/);
+      var subcmd = parts[0] || "";
+      var target = parts[1] || "";
+
+      if (subcmd === "switch" && target) {
+        var ok = __multiAccount.setActiveAccount(target);
+        if (ok) {
+          // Clear OAuth token cache to force re-read
+          try {
+            if (typeof getClaudeAIOAuthTokens !== "undefined" &&
+                getClaudeAIOAuthTokens.cache &&
+                getClaudeAIOAuthTokens.cache.clear) {
+              getClaudeAIOAuthTokens.cache.clear();
+            }
+          } catch (e) {}
+          lines.push("\n\u2713 Switched active account to '" + target + "'");
+        } else {
+          lines.push("\n\u2717 Account '" + target + "' not found");
+        }
+      } else if (subcmd === "primary" && target) {
+        var ok2 = __multiAccount.setPrimary(target);
+        if (ok2) {
+          lines.push("\n\u2713 Set '" + target + "' as primary");
+        } else {
+          lines.push("\n\u2717 Account '" + target + "' not found");
+        }
+      } else if (subcmd === "reset") {
+        __multiAccount.resetToDefault();
+        try {
+          if (typeof getClaudeAIOAuthTokens !== "undefined" &&
+              getClaudeAIOAuthTokens.cache &&
+              getClaudeAIOAuthTokens.cache.clear) {
+            getClaudeAIOAuthTokens.cache.clear();
+          }
+        } catch (e) {}
+        lines.push("\n\u2713 Reset to primary account");
+      } else if (subcmd && subcmd !== "") {
+        lines.push("\nSubcommands:");
+        lines.push("  /accounts                  Show all accounts");
+        lines.push("  /accounts switch <label>   Switch active account");
+        lines.push("  /accounts primary <label>  Set primary account");
+        lines.push("  /accounts reset            Reset to primary");
+      }
+
+      return { type: "text", value: lines.join("\n") };
+    },
+  });
+} catch (e) {}
+
+// Register /account-reauth command (Option C: manual credential refresh from keychain)
+try {
+  __commandHooks.register({
+    name: "account-reauth",
+    description: "Re-read current keychain tokens into the active multi-account",
+    call: async function () {
+      var account = __multiAccount.getActiveAccount();
+      if (!account) {
+        return { type: "text", value: "No active account." };
+      }
+
+      // Read fresh tokens from the keychain (what /login just wrote)
+      var keychainTokens = null;
+      try {
+        var storageData = U4().read();
+        keychainTokens = storageData && storageData.claudeAiOauth;
+      } catch (e) {
+        return { type: "text", value: "Error reading keychain: " + e.message };
+      }
+
+      if (!keychainTokens || !keychainTokens.accessToken) {
+        return { type: "text", value: "No OAuth tokens found in keychain. Run /login first." };
+      }
+
+      // Also grab the oauthAccount info from config
+      var config = getGlobalConfig();
+      var accountInfo = config && config.oauthAccount ? {
+        accountUuid: config.oauthAccount.accountUuid,
+        emailAddress: config.oauthAccount.emailAddress,
+        organizationUuid: config.oauthAccount.organizationUuid,
+      } : null;
+
+      __multiAccount.handlePostLogin(keychainTokens, accountInfo);
+
+      // Clear the memoize cache so next API call uses the fresh tokens
+      try {
+        if (typeof getClaudeAIOAuthTokens !== "undefined" &&
+            getClaudeAIOAuthTokens.cache &&
+            getClaudeAIOAuthTokens.cache.clear) {
+          getClaudeAIOAuthTokens.cache.clear();
+        }
+      } catch (e) {}
+
+      var email = accountInfo && accountInfo.emailAddress || "?";
+      return {
+        type: "text",
+        value: "Updated credentials for '" + account.label + "' (" + email + ")\n" +
+               "Token expires: " + (keychainTokens.expiresAt ? new Date(keychainTokens.expiresAt).toLocaleString() : "unknown") + "\n" +
+               "Has refresh token: " + (keychainTokens.refreshToken ? "yes" : "no"),
+      };
+    },
+  });
+} catch (e) {}

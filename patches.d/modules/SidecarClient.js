@@ -234,3 +234,6 @@ var __claudiverse = (function() {
     isConnected: isConnected
   };
 })();
+
+// Register with session hooks (runs on first getSessionId call)
+try { __sessionHooks.push(function() { __claudiverse.connect(); }); } catch(e) {}

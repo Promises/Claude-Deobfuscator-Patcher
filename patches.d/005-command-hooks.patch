@@ -1,0 +1,17 @@
+# patch: 005-command-hooks
+# depends: none
+# generated: 2026-04-07
+# description: Injects __commandHooks custom commands into the slash command list.
+
+diff --git a/commands.js b/commands.js
+index 54907c6..cf041b6 100644
+--- a/commands.js
++++ b/commands.js
+@@ -509,6 +509,7 @@ var bT = R(() => {
+             ...(Wy7 ? [Wy7] : []),
+             ...(Ly7 ? [Ly7] : []),
+             ...[],
++            ...(typeof __commandHooks !== 'undefined' ? __commandHooks.getCommands() : []),
+         ])),
+         (aF = z6(() => new Set(g48().flatMap((H) => [H.name, ...(H.aliases ?? [])])))));
+     Vy7 = z6(async (H) => {

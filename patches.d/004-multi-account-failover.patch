@@ -1,0 +1,158 @@
+# patch: 004-multi-account-failover
+# depends: 003
+# generated: 2026-04-17
+# description: Multi-account auth override with disk-based credential storage.
+#   - OAuth credentials served from config.accountCredentials (disk), not keychain
+#   - Token refresh writes to disk only (keychain singleton left untouched)
+#   - In-memory credential cache cleared on 401 so disk re-read picks up external refreshes
+#   - 429 rate-limit failover to next account
+#   - Post-login hook syncs fresh tokens to active multi-account
+
+diff --git a/cli/handlers/auth.js b/cli/handlers/auth.js
+index 94a218a..bd32717 100644
+--- a/cli/handlers/auth.js
++++ b/cli/handlers/auth.js
+@@ -57,6 +57,25 @@ async function VwH(H) {
+     let q = saveOAuthTokensIfNeeded(H);
+     if ((clearOAuthTokenCache(), q.warning))
+         logEvent('tengu_oauth_storage_warning', { warning: q.warning });
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            var __accountInfo = null;
++            if (typeof _ !== 'undefined' && _ && _.account) {
++                __accountInfo = {
++                    accountUuid: _.account.uuid,
++                    emailAddress: _.account.email,
++                    organizationUuid: _.organization ? _.organization.uuid : null,
++                };
++            } else if (H.tokenAccount) {
++                __accountInfo = {
++                    accountUuid: H.tokenAccount.uuid,
++                    emailAddress: H.tokenAccount.emailAddress,
++                    organizationUuid: H.tokenAccount.organizationUuid,
++                };
++            }
++            __multiAccount.handlePostLogin(H, __accountInfo);
++        }
++    } catch (__e) {}
+     if (
+         (await UD6(H.accessToken).catch((K) => logForDebugging(String(K), { level: 'error' })),
+         GE(H.scopes))
+diff --git a/services/api/withRetry.js b/services/api/withRetry.js
+index d613252..206eb90 100644
+--- a/services/api/withRetry.js
++++ b/services/api/withRetry.js
+@@ -137,6 +137,24 @@ async function* th_(H, _, q) {
+                         );
+                 }
+             }
++            try {
++                if (typeof __multiAccount !== 'undefined' && Y instanceof iq && Y.status === 429) {
++                    var __isExtraUsage = Y.message && Y.message.includes('Extra usage is required for long context');
++                    var __resetMs2 = __isExtraUsage ? null : WQ4(Y);
++                    var __failover2 = __multiAccount.handleRateLimitFailover(__resetMs2, __isExtraUsage);
++                    if (__failover2.switched) {
++                        O = null;
++                        if (
++                            typeof getClaudeAIOAuthTokens !== 'undefined' &&
++                            getClaudeAIOAuthTokens.cache &&
++                            getClaudeAIOAuthTokens.cache.clear
++                        ) {
++                            getClaudeAIOAuthTokens.cache.clear();
++                        }
++                        continue;
++                    }
++                }
++            } catch (__e) {}
+             let j = sh_() && F19(Y);
+             if (w > K && !j) throw new su(Y, $);
+             if (!(wQ4(Y) || YQ4(Y)) && (!(Y instanceof iq) || !jQ4(Y))) throw new su(Y, $);
+diff --git a/utils/auth.js b/utils/auth.js
+index a7c1b78..02bcbc2 100644
+--- a/utils/auth.js
++++ b/utils/auth.js
+@@ -671,6 +671,11 @@ function handleOAuth401Error(H) {
+ 
+ async function FJ4(H) {
+     clearOAuthTokenCache();
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            __multiAccount.clearCredentialCache();
++        }
++    } catch (__e) {}
+     let _ = await getClaudeAIOAuthTokensAsync();
+     if (!_?.refreshToken) return !1;
+     if (_.accessToken !== H) return (logEvent('tengu_oauth_401_recovered_from_keychain', {}), !0);
+@@ -680,6 +685,22 @@ async function FJ4(H) {
+ async function getClaudeAIOAuthTokensAsync() {
+     if (J1()) return null;
+     if (process.env.CLAUDE_CODE_OAUTH_TOKEN || RD_()) return getClaudeAIOAuthTokens();
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            var __creds = __multiAccount.getActiveCredentials();
++            if (__creds && __creds.type === 'oauth') {
++                return {
++                    accessToken: __creds.accessToken,
++                    refreshToken: __creds.refreshToken,
++                    expiresAt: __creds.expiresAt,
++                    scopes: __creds.scopes,
++                    subscriptionType: __creds.subscriptionType,
++                    rateLimitTier: __creds.rateLimitTier,
++                };
++            }
++            return null;
++        }
++    } catch (__e) {}
+     try {
+         let q = (await U4().readAsync())?.claudeAiOauth;
+         if (!q?.accessToken) return null;
+@@ -742,9 +763,26 @@ async function CL6(H, _) {
+             return (logEvent('tengu_oauth_token_refresh_race_resolved', {}), !1);
+         logEvent('tengu_oauth_token_refresh_starting', {});
+         let A = await FBH(z.refreshToken, { scopes: GE(z.scopes) ? void 0 : z.scopes });
+-        return (saveOAuthTokensIfNeeded(A), getClaudeAIOAuthTokens.cache?.clear?.(), Kv(), !0);
++        var __savedToMultiAccount = false;
++        try {
++            if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++                __multiAccount.saveRefreshedTokens(A);
++                __savedToMultiAccount = true;
++            }
++        } catch (__e) {}
++        if (!__savedToMultiAccount) {
++            saveOAuthTokensIfNeeded(A);
++        }
++        getClaudeAIOAuthTokens.cache?.clear?.();
++        Kv();
++        return !0;
+     } catch (z) {
+         (AH(z), getClaudeAIOAuthTokens.cache?.clear?.(), Kv());
++        try {
++            if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++                __multiAccount.clearCredentialCache();
++            }
++        } catch (__e) {}
+         let A = await getClaudeAIOAuthTokensAsync();
+         if (A && !SB(A.expiresAt))
+             return (logEvent('tengu_oauth_token_refresh_race_recovered', {}), !0);
+@@ -778,7 +816,20 @@ function is1PApiCustomer() {
+ }
+ 
+ function getOauthAccountInfo() {
+-    return isAnthropicAuthEnabled() ? getGlobalConfig().oauthAccount : void 0;
++    if (!isAnthropicAuthEnabled()) return void 0;
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            var __acc = __multiAccount.getActiveAccount();
++            if (__acc) {
++                return {
++                    accountUuid: __acc.accountUuid,
++                    emailAddress: __acc.emailAddress,
++                    organizationUuid: __acc.organizationUuid,
++                };
++            }
++        }
++    } catch (__e) {}
++    return getGlobalConfig().oauthAccount;
+ }
+ 
+ function isOverageProvisioningAllowed() {
