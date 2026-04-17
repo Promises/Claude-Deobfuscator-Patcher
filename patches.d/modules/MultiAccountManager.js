@@ -80,7 +80,33 @@ var __multiAccount = (function () {
 
   function loadRegistry() {
     if (registry) return registry;
-    if (!_getGlobalConfig) return null;
+    // If config isn't bound yet (session hooks haven't fired), read ~/.claude.json
+    // directly. This is needed because the header renders before session init.
+    if (!_getGlobalConfig) {
+      try {
+        var raw = fs.readFileSync(
+          require("path").join(require("os").homedir(), ".claude.json"), "utf8"
+        );
+        var directConfig = JSON.parse(raw);
+        if (directConfig && directConfig.accountRegistry) {
+          registry = directConfig.accountRegistry;
+          // Also grab credentials since getCredentials needs them
+          if (directConfig.accountCredentials) {
+            var ids = Object.keys(directConfig.accountCredentials);
+            for (var i = 0; i < ids.length; i++) {
+              if (!credentialStore[ids[i]]) {
+                credentialStore[ids[i]] = directConfig.accountCredentials[ids[i]];
+              }
+            }
+          }
+          log("Loaded registry directly from disk (pre-init): " + registry.accounts.length + " accounts");
+          return registry;
+        }
+      } catch (e) {
+        log("Direct config read failed: " + e.message);
+      }
+      return null;
+    }
     var config = _getGlobalConfig();
     if (config && config.accountRegistry) {
       registry = config.accountRegistry;
@@ -512,9 +538,9 @@ var __multiAccount = (function () {
   }
 
   /**
-   * Called after /login completes to capture fresh tokens into the active account.
-   * This is Option A: automatic post-login sync so the user doesn't need to
-   * re-run grab-creds.sh after re-authenticating.
+   * Called after /login completes to capture fresh tokens into the correct account.
+   * Matches by organizationUuid first (so logging into a different org goes to the
+   * right slot), then falls back to accountUuid, then active account.
    * @param {object} tokens — the OAuthTokens object from installOAuthTokens
    * @param {object} [accountInfo] — { accountUuid, emailAddress, organizationUuid }
    */
@@ -522,10 +548,38 @@ var __multiAccount = (function () {
     var reg = loadRegistry();
     if (!reg || reg.accounts.length === 0) return;
 
-    var account = getActiveAccount();
+    // Try to match the login to an existing account by orgUuid or accountUuid
+    var account = null;
+    if (accountInfo) {
+      for (var i = 0; i < reg.accounts.length; i++) {
+        var a = reg.accounts[i];
+        if (accountInfo.organizationUuid && a.organizationUuid &&
+            accountInfo.organizationUuid === a.organizationUuid) {
+          account = a;
+          log("Post-login: matched by orgUuid → " + a.label);
+          break;
+        }
+      }
+      if (!account) {
+        for (var i = 0; i < reg.accounts.length; i++) {
+          var a = reg.accounts[i];
+          if (accountInfo.accountUuid && a.accountUuid &&
+              accountInfo.accountUuid === a.accountUuid) {
+            account = a;
+            log("Post-login: matched by accountUuid → " + a.label);
+            break;
+          }
+        }
+      }
+    }
+    // Fall back to active account if no match
+    if (!account) {
+      account = getActiveAccount();
+      log("Post-login: no org/account match, falling back to active → " + (account ? account.label : "none"));
+    }
     if (!account) return;
 
-    // Update account info if provided (email, org may have changed)
+    // Update account info if provided
     if (accountInfo) {
       for (var i = 0; i < reg.accounts.length; i++) {
         if (reg.accounts[i].id === account.id) {
@@ -555,7 +609,7 @@ var __multiAccount = (function () {
           creds[account.id] = updated;
           return Object.assign({}, config, { accountCredentials: creds });
         });
-        log("Post-login: saved fresh tokens for " + account.label + " (" + (accountInfo && accountInfo.emailAddress || "?") + ")");
+        log("Post-login: saved fresh tokens for " + account.label);
       } catch (e) {
         log("Post-login: error saving tokens: " + e.message);
       }
@@ -668,7 +722,7 @@ var __multiAccount = (function () {
   };
 })();
 
-// Register with session hooks (runs on first getSessionId call)
+// Register with session hooks for late init (secure storage, oauthAccount sync)
 try {
   __sessionHooks.push(function () {
     __multiAccount.bindConfig(getGlobalConfig, saveGlobalConfig);

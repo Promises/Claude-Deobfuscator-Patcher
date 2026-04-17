@@ -1,22 +1,23 @@
 # patch: 006-account-banner
-# depends: none
-# generated: 2026-04-07
-# description: Shows active account label in the prompt input separator bar.
+# depends: 005
+# generated: 2026-04-17
+# description: Shows active account label in prompt separator bar, with * on failover.
 
 diff --git a/_tentative/4477_useSwarmBanner.js b/_tentative/4477_useSwarmBanner.js
-index 045bacf..77525c0 100644
+index 77525c0..4f589aa 100644
 --- a/_tentative/4477_useSwarmBanner.js
 +++ b/_tentative/4477_useSwarmBanner.js
-@@ -54,6 +54,12 @@ function Mp7() {
-         let Y = T.agentDefinitions.activeAgents.find((j) => j.agentType === q);
-         return { text: q, bgColor: Ma_(Y?.color, 'promptBorder') };
-     }
-+    try {
-+        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
-+            let __acc = __multiAccount.getActiveAccount();
-+            if (__acc) return { text: __acc.label, bgColor: 'promptBorder' };
-+        }
-+    } catch (__e) {}
+@@ -57,7 +57,12 @@ function Mp7() {
+     try {
+         if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
+             let __acc = __multiAccount.getActiveAccount();
+-            if (__acc) return { text: __acc.label, bgColor: 'promptBorder' };
++            if (__acc) {
++                let __status = __multiAccount.getStatus();
++                let __primary = __status.accounts.find(function(a) { return a.isPrimary; });
++                let __isFailover = __primary && !__primary.isActive;
++                return { text: __acc.label + (__isFailover ? '*' : ''), bgColor: 'promptBorder' };
++            }
+         }
+     } catch (__e) {}
      return null;
- }
- 

@@ -8,8 +8,47 @@
 #   - 429 rate-limit failover to next account
 #   - Post-login hook syncs fresh tokens to active multi-account
 
+diff --git a/_tail.js b/_tail.js
+index 926f13b..5721164 100644
+--- a/_tail.js
++++ b/_tail.js
+@@ -2428,7 +2428,7 @@ Usage: claude --remote "your task description"`,
+                 }
+             })
+             .version(
+-                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
++                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
+                 '-v, --version',
+                 'Output the version number',
+             ),
+@@ -3129,7 +3129,7 @@ async function mN5() {
+     let H = process.argv.slice(2);
+     if (H.length === 1 && (H[0] === '--version' || H[0] === '-v' || H[0] === '-V')) {
+         console.log(
+-            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
++            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
+         );
+         return;
+     }
+diff --git a/_tentative/4477_useSwarmBanner.js b/_tentative/4477_useSwarmBanner.js
+index 045bacf..77525c0 100644
+--- a/_tentative/4477_useSwarmBanner.js
++++ b/_tentative/4477_useSwarmBanner.js
+@@ -54,6 +54,12 @@ function Mp7() {
+         let Y = T.agentDefinitions.activeAgents.find((j) => j.agentType === q);
+         return { text: q, bgColor: Ma_(Y?.color, 'promptBorder') };
+     }
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            let __acc = __multiAccount.getActiveAccount();
++            if (__acc) return { text: __acc.label, bgColor: 'promptBorder' };
++        }
++    } catch (__e) {}
+     return null;
+ }
+ 
 diff --git a/cli/handlers/auth.js b/cli/handlers/auth.js
-index 94a218a..bd32717 100644
+index 04a5d86..c4a1370 100644
 --- a/cli/handlers/auth.js
 +++ b/cli/handlers/auth.js
 @@ -57,6 +57,25 @@ async function VwH(H) {
@@ -38,8 +77,20 @@ index 94a218a..bd32717 100644
      if (
          (await UD6(H.accessToken).catch((K) => logForDebugging(String(K), { level: 'error' })),
          GE(H.scopes))
+diff --git a/commands.js b/commands.js
+index 54907c6..cf041b6 100644
+--- a/commands.js
++++ b/commands.js
+@@ -509,6 +509,7 @@ var bT = R(() => {
+             ...(Wy7 ? [Wy7] : []),
+             ...(Ly7 ? [Ly7] : []),
+             ...[],
++            ...(typeof __commandHooks !== 'undefined' ? __commandHooks.getCommands() : []),
+         ])),
+         (aF = z6(() => new Set(g48().flatMap((H) => [H.name, ...(H.aliases ?? [])])))));
+     Vy7 = z6(async (H) => {
 diff --git a/services/api/withRetry.js b/services/api/withRetry.js
-index d613252..206eb90 100644
+index 9042101..79fe121 100644
 --- a/services/api/withRetry.js
 +++ b/services/api/withRetry.js
 @@ -137,6 +137,24 @@ async function* th_(H, _, q) {
@@ -68,10 +119,10 @@ index d613252..206eb90 100644
              if (w > K && !j) throw new su(Y, $);
              if (!(wQ4(Y) || YQ4(Y)) && (!(Y instanceof iq) || !jQ4(Y))) throw new su(Y, $);
 diff --git a/utils/auth.js b/utils/auth.js
-index a7c1b78..02bcbc2 100644
+index 447d6f9..34ea654 100644
 --- a/utils/auth.js
 +++ b/utils/auth.js
-@@ -671,6 +671,11 @@ function handleOAuth401Error(H) {
+@@ -663,6 +663,11 @@ function handleOAuth401Error(H) {
  
  async function FJ4(H) {
      clearOAuthTokenCache();
@@ -83,7 +134,7 @@ index a7c1b78..02bcbc2 100644
      let _ = await getClaudeAIOAuthTokensAsync();
      if (!_?.refreshToken) return !1;
      if (_.accessToken !== H) return (logEvent('tengu_oauth_401_recovered_from_keychain', {}), !0);
-@@ -680,6 +685,22 @@ async function FJ4(H) {
+@@ -672,6 +677,22 @@ async function FJ4(H) {
  async function getClaudeAIOAuthTokensAsync() {
      if (J1()) return null;
      if (process.env.CLAUDE_CODE_OAUTH_TOKEN || RD_()) return getClaudeAIOAuthTokens();
@@ -106,7 +157,7 @@ index a7c1b78..02bcbc2 100644
      try {
          let q = (await U4().readAsync())?.claudeAiOauth;
          if (!q?.accessToken) return null;
-@@ -742,9 +763,26 @@ async function CL6(H, _) {
+@@ -734,9 +755,26 @@ async function CL6(H, _) {
              return (logEvent('tengu_oauth_token_refresh_race_resolved', {}), !1);
          logEvent('tengu_oauth_token_refresh_starting', {});
          let A = await FBH(z.refreshToken, { scopes: GE(z.scopes) ? void 0 : z.scopes });
@@ -134,7 +185,7 @@ index a7c1b78..02bcbc2 100644
          let A = await getClaudeAIOAuthTokensAsync();
          if (A && !SB(A.expiresAt))
              return (logEvent('tengu_oauth_token_refresh_race_recovered', {}), !0);
-@@ -778,7 +816,20 @@ function is1PApiCustomer() {
+@@ -770,7 +808,20 @@ function is1PApiCustomer() {
  }
  
  function getOauthAccountInfo() {
@@ -156,3 +207,26 @@ index a7c1b78..02bcbc2 100644
  }
  
  function isOverageProvisioningAllowed() {
+@@ -1057,6 +1108,22 @@ var N8 = R(() => {
+     });
+     getClaudeAIOAuthTokens = z6(() => {
+         if (J1()) return null;
++        try {
++            if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++                var __creds = __multiAccount.getActiveCredentials();
++                if (__creds && __creds.type === 'oauth') {
++                    return {
++                        accessToken: __creds.accessToken,
++                        refreshToken: __creds.refreshToken,
++                        expiresAt: __creds.expiresAt,
++                        scopes: __creds.scopes,
++                        subscriptionType: __creds.subscriptionType,
++                        rateLimitTier: __creds.rateLimitTier,
++                    };
++                }
++                return null;
++            }
++        } catch (__e) {}
+         if (process.env.CLAUDE_CODE_OAUTH_TOKEN)
+             return {
+                 accessToken: process.env.CLAUDE_CODE_OAUTH_TOKEN,

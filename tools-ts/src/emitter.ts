@@ -148,6 +148,8 @@ export function emitProject(
   const customModulesDir = path.join(path.dirname(outputDir), "patches.d", "modules");
   if (fs.existsSync(customModulesDir)) {
     const customFiles = fs.readdirSync(customModulesDir).filter((f) => f.endsWith(".js")).sort();
+    let insertIdx = mapping.sections.findIndex((s) => s.type === "section");
+    if (insertIdx < 0) insertIdx = 1;
     for (const file of customFiles) {
       const src = path.join(customModulesDir, file);
       const dest = path.join(outputDir, "_custom", file);
@@ -155,7 +157,8 @@ export function emitProject(
       fs.copyFileSync(src, dest);
 
       // Add to mapping — insert right after preamble so custom code
-      // is available to all other modules at runtime
+      // is available to all other modules at runtime.
+      // Increment insertIdx to preserve alphabetical order.
       const entry: MappingSection = {
         index: -1,
         original_filename: `_custom/${file}`,
@@ -163,12 +166,8 @@ export function emitProject(
         type: "section",
         module_name: `_custom_${file.replace(".js", "")}`,
       };
-      const firstSectionIdx = mapping.sections.findIndex((s) => s.type === "section");
-      if (firstSectionIdx >= 0) {
-        mapping.sections.splice(firstSectionIdx, 0, entry);
-      } else {
-        mapping.sections.splice(1, 0, entry);
-      }
+      mapping.sections.splice(insertIdx, 0, entry);
+      insertIdx++;
     }
     console.log(`  Custom modules: ${customFiles.length} (from patches.d/modules/)`);
   }
