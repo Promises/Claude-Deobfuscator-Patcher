@@ -61,10 +61,61 @@ interface WalkRule {
     find?: FindCriteria | string; // optional: locate position within parent before walking
 }
 
-type AnchorRule = RootRule | WalkRule;
+interface PinRule {
+    type: "pin";
+    description?: string;
+    source: string; // target source path (e.g. "components/PromptInput/useSwarmBanner.ts")
+    find: FindCriteria | string; // content anchor — must match inside the module
+}
+
+type AnchorRule = RootRule | WalkRule | PinRule;
 
 function isWalkRule(rule: AnchorRule): rule is WalkRule {
     return "from" in rule;
+}
+
+function isPinRule(rule: AnchorRule): rule is PinRule {
+    return "type" in rule && (rule as any).type === "pin";
+}
+
+/**
+ * Resolve pin rules by scanning raw split modules for find patterns.
+ * Returns a map: module_name → source file path for modules that matched a pin.
+ */
+export function resolvePinRules(rulesPath: string, modulesDir: string): Map<string, string> {
+    const result = new Map<string, string>();
+    if (!fs.existsSync(rulesPath)) return result;
+
+    const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
+    const pins = rules.filter(isPinRule) as PinRule[];
+    if (pins.length === 0) return result;
+
+    const manifestPath = path.join(modulesDir, "_manifest.json");
+    if (!fs.existsSync(manifestPath)) return result;
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+
+    for (const pin of pins) {
+        let found = false;
+        for (const section of manifest.sections) {
+            if (section.type !== "section") continue;
+            const modPath = path.join(modulesDir, section.filename);
+            if (!fs.existsSync(modPath)) continue;
+
+            const code = fs.readFileSync(modPath, "utf-8");
+            const sf = ts.createSourceFile(section.filename, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+            const pos = findPatternPos(code, pin.find, sf);
+            if (pos !== -1) {
+                result.set(section.module_name, pin.source);
+                console.log(`  Pin: ${section.module_name} → ${pin.source} (${pin.description ?? ""})`);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            console.warn(`  Pin miss: no module matched find for ${pin.source} (${pin.description ?? ""})`);
+        }
+    }
+    return result;
 }
 
 // Resolved anchor for use by dependent rules
@@ -911,7 +962,7 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
 
     // ── Phase 1: Root rules ──────────────────────────────────────────────────
 
-    for (const rule of rules.filter((r) => !isWalkRule(r)) as RootRule[]) {
+    for (const rule of rules.filter((r) => !isWalkRule(r) && !isPinRule(r)) as RootRule[]) {
         const filePath = path.join(deobDir, rule.file);
         if (!fs.existsSync(filePath)) {
             if (verbose) console.warn(`  anchor skip: file not found — ${rule.file}`);
@@ -1147,7 +1198,7 @@ export function applyAnchorScopedRenamesInDir(deobDir: string, rulesPath: string
     const anchors = new Map<string, { file: string; renamedName: string }>();
 
     // Root rules
-    for (const rule of rules.filter((r) => !isWalkRule(r)) as RootRule[]) {
+    for (const rule of rules.filter((r) => !isWalkRule(r) && !isPinRule(r)) as RootRule[]) {
         if (rule.rename) anchors.set(rule.id ?? rule.rename, { file: rule.file, renamedName: rule.rename });
     }
 

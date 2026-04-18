@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import type { MatchOutput } from "./matcher";
 import { beautify } from "./beautify";
+import { resolvePinRules } from "./anchor-rules";
 
 export interface MappingSection {
   index: number;
@@ -40,6 +41,31 @@ export function emitProject(
   const matchLookup = new Map<string, (typeof matchesData.matches)[0]>();
   for (const m of matchesData.matches) {
     matchLookup.set(m.module, m);
+  }
+
+  // Apply pin rules: content-anchored module → source path overrides
+  const anchorRulesPath = path.resolve(__dirname, "../anchor-rules.json");
+  const pins = resolvePinRules(anchorRulesPath, modulesDir);
+  for (const [modName, sourceFile] of pins) {
+    const existing = matchLookup.get(modName);
+    if (existing) {
+      existing.sourceFile = sourceFile;
+      existing.confidence = "high";
+    } else {
+      // Module wasn't matched at all — inject a synthetic match
+      matchLookup.set(modName, {
+        module: modName,
+        sourceFile,
+        score: 999,
+        secondBestScore: 0,
+        margin: 999,
+        confidence: "high",
+        details: { pin: 1 },
+        moduleKind: "R",
+        moduleSize: 0,
+        moduleIndex: 0,
+      } as any);
+    }
   }
 
   fs.mkdirSync(outputDir, { recursive: true });

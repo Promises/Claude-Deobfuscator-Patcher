@@ -291,5 +291,12 @@
         "walk": "param:0",
         "rename": "columns",
         "description": "columns — terminal width param"
+    },
+
+    {
+        "type": "pin",
+        "source": "components/PromptInput/useSwarmBanner.ts",
+        "find": { "text": "View teammates" },
+        "description": "useSwarmBanner — swarm banner hook"
     }
 ]

@@ -3,36 +3,128 @@
 # Run once per account, giving each a label.
 #
 # Usage:
-#   ./grab-creds.sh dump <label>        Dump current account to /tmp/claude-account-<label>.json
-#   ./grab-creds.sh build               Build registry from all dumped accounts
-#   ./grab-creds.sh list                List dumped account files
+#   ./grab-creds.sh login <label> [priority]  Login, capture creds, restore original (all-in-one)
+#   ./grab-creds.sh dump <label> [priority]  Dump current account (priority: lower = tried first, default 99)
+#   ./grab-creds.sh build                    Build registry from all dumped accounts
+#   ./grab-creds.sh list                     List dumped account files
 
 set -e
 
 CMD="${1:-help}"
 LABEL="${2}"
+PRIORITY="${3:-99}"
+
+KEYCHAIN_SERVICE="Claude Code-credentials"
+KEYCHAIN_ACCOUNT="$(whoami)"
+BACKUP_DIR="/tmp/claude-creds-backup"
 
 case "$CMD" in
+  login)
+    if [ -z "$LABEL" ]; then
+      echo "Usage: ./grab-creds.sh login <label> [priority]"
+      echo "Example: ./grab-creds.sh login team 2"
+      exit 1
+    fi
+
+    echo "=== Login & capture: $LABEL (priority: $PRIORITY) ==="
+
+    # 1. Back up current keychain entry
+    mkdir -p "$BACKUP_DIR"
+    EXISTING_KEYCHAIN=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null || echo "")
+    if [ -n "$EXISTING_KEYCHAIN" ]; then
+      echo "$EXISTING_KEYCHAIN" > "$BACKUP_DIR/keychain.bak"
+      echo "  Backed up keychain entry"
+    fi
+
+    # 2. Back up oauthAccount from config
+    python3 -c "
+import json, os
+config_path = os.path.expanduser('~/.claude.json')
+with open(config_path) as f:
+    config = json.load(f)
+backup = config.get('oauthAccount', {})
+with open('$BACKUP_DIR/oauthAccount.json', 'w') as f:
+    json.dump(backup, f)
+"
+    echo "  Backed up oauthAccount config"
+
+    # 3. Clear keychain so Claude sees no auth
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null || true
+    echo "  Cleared keychain (login will prompt fresh auth)"
+
+    # 4. Run claude auth login
+    echo ""
+    echo ">>> Starting claude auth login..."
+    echo ">>> Complete the login in your browser, then it will continue automatically."
+    echo ""
+    claude auth login
+    LOGIN_EXIT=$?
+
+    if [ $LOGIN_EXIT -ne 0 ]; then
+      echo "Login failed (exit $LOGIN_EXIT). Restoring backup..."
+      # Restore keychain
+      if [ -f "$BACKUP_DIR/keychain.bak" ]; then
+        security add-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$(cat "$BACKUP_DIR/keychain.bak")" -U 2>/dev/null
+      fi
+      exit 1
+    fi
+
+    echo ""
+    echo ">>> Login successful. Dumping credentials..."
+
+    # 5. Dump the new creds (reuses dump logic via self-call)
+    "$0" dump "$LABEL" "$PRIORITY"
+
+    # 6. Restore original keychain + config
+    echo ""
+    echo ">>> Restoring original credentials..."
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" 2>/dev/null || true
+    if [ -f "$BACKUP_DIR/keychain.bak" ]; then
+      security add-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$(cat "$BACKUP_DIR/keychain.bak")" -U 2>/dev/null
+      echo "  Restored keychain"
+    fi
+
+    # Restore oauthAccount in config
+    python3 -c "
+import json, os
+config_path = os.path.expanduser('~/.claude.json')
+with open(config_path) as f:
+    config = json.load(f)
+with open('$BACKUP_DIR/oauthAccount.json') as f:
+    config['oauthAccount'] = json.load(f)
+with open(config_path, 'w') as f:
+    json.dump(config, f, indent=2)
+    f.write('\n')
+"
+    echo "  Restored oauthAccount config"
+
+    # Cleanup
+    rm -rf "$BACKUP_DIR"
+    echo ""
+    echo "=== Done! Captured $LABEL, original session intact ==="
+    ;;
+
   dump)
     if [ -z "$LABEL" ]; then
-      echo "Usage: ./grab-creds.sh dump <label>"
-      echo "Example: ./grab-creds.sh dump team"
+      echo "Usage: ./grab-creds.sh dump <label> [priority]"
+      echo "Example: ./grab-creds.sh dump team 2"
       exit 1
     fi
 
     OUTFILE="/tmp/claude-account-${LABEL}.json"
 
     # Read keychain
-    KEYCHAIN_DATA=$(security find-generic-password -s "Claude Code-credentials" -a "$(whoami)" -w 2>/dev/null || \
-                    security find-generic-password -s "Claude Code" -a "$(whoami)" -w 2>/dev/null || echo "")
+    KEYCHAIN_DATA=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null || \
+                    security find-generic-password -s "Claude Code" -a "$KEYCHAIN_ACCOUNT" -w 2>/dev/null || echo "")
 
     # Read config
-    python3 - "$LABEL" "$KEYCHAIN_DATA" "$OUTFILE" << 'PYEOF'
+    python3 - "$LABEL" "$KEYCHAIN_DATA" "$OUTFILE" "$PRIORITY" << 'PYEOF'
 import json, sys, os
 
 label = sys.argv[1]
 keychain_raw = sys.argv[2]
 outfile = sys.argv[3]
+priority = int(sys.argv[4]) if len(sys.argv) > 4 else 99
 config_path = os.path.expanduser("~/.claude.json")
 
 with open(config_path) as f:
@@ -53,6 +145,7 @@ oauth_tokens = keychain.get("claudeAiOauth", {})
 
 dump = {
     "label": label,
+    "priority": priority,
     "accountInfo": {
         "accountUuid": account_info.get("accountUuid"),
         "emailAddress": account_info.get("emailAddress"),
@@ -124,6 +217,7 @@ for d in dumps:
         "id": aid,
         "label": d["label"],
         "type": "oauth" if has_oauth else "api-key",
+        "priority": d.get("priority", 99),
         "accountUuid": d["accountInfo"].get("accountUuid"),
         "emailAddress": d["accountInfo"].get("emailAddress"),
         "organizationUuid": d["accountInfo"].get("organizationUuid"),
@@ -148,7 +242,8 @@ for d in dumps:
         creds["apiKey"] = d["apiKey"]
     account_credentials[aid] = creds
 
-# First account is primary
+# Sort by priority (lower = higher priority), first is primary
+accounts.sort(key=lambda a: a["priority"])
 registry = {
     "version": 1,
     "primaryAccountId": accounts[0]["id"],
@@ -179,15 +274,16 @@ PYEOF
 
   *)
     echo "Usage:"
-    echo "  ./grab-creds.sh dump <label>   Dump current login to /tmp/claude-account-<label>.json"
-    echo "  ./grab-creds.sh build          Build registry from all dumps (first = primary)"
-    echo "  ./grab-creds.sh list           List dumped files"
+    echo "  ./grab-creds.sh login <label> [priority]  Login & capture (backs up + restores current session)"
+    echo "  ./grab-creds.sh dump <label> [priority]   Dump current login to /tmp/claude-account-<label>.json"
+    echo "  ./grab-creds.sh build                     Build registry (sorted by priority, first = primary)"
+    echo "  ./grab-creds.sh list                      List dumped files"
     echo ""
     echo "Workflow:"
-    echo "  1. Login as account A:  claude auth login"
-    echo "  2. Dump it:            ./grab-creds.sh dump primary"
-    echo "  3. Login as account B:  claude auth login"
-    echo "  4. Dump it:            ./grab-creds.sh dump team"
-    echo "  5. Build registry:     ./grab-creds.sh build"
+    echo "  1. ./grab-creds.sh login pro 1       # login as pro (highest priority)"
+    echo "  2. ./grab-creds.sh login team 2      # login as team (failover)"
+    echo "  3. ./grab-creds.sh build             # build registry"
+    echo ""
+    echo "Priority: lower number = tried first. Default 99."
     ;;
 esac

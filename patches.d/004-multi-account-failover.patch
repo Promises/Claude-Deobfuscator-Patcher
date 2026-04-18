@@ -1,58 +1,20 @@
 # patch: 004-multi-account-failover
-# depends: 003
-# generated: 2026-04-17
+# depends: 001
+# generated: 2026-04-19
 # description: Multi-account auth override with disk-based credential storage.
 #   - OAuth credentials served from config.accountCredentials (disk), not keychain
+#   - API key accounts served via getAnthropicApiKeyWithSource override
 #   - Token refresh writes to disk only (keychain singleton left untouched)
 #   - In-memory credential cache cleared on 401 so disk re-read picks up external refreshes
 #   - 429 rate-limit failover to next account
 #   - Post-login hook syncs fresh tokens to active multi-account
 
-diff --git a/_tail.js b/_tail.js
-index 926f13b..5721164 100644
---- a/_tail.js
-+++ b/_tail.js
-@@ -2428,7 +2428,7 @@ Usage: claude --remote "your task description"`,
-                 }
-             })
-             .version(
--                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
-+                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
-                 '-v, --version',
-                 'Output the version number',
-             ),
-@@ -3129,7 +3129,7 @@ async function mN5() {
-     let H = process.argv.slice(2);
-     if (H.length === 1 && (H[0] === '--version' || H[0] === '-v' || H[0] === '-V')) {
-         console.log(
--            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
-+            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
-         );
-         return;
-     }
-diff --git a/_tentative/4477_useSwarmBanner.js b/_tentative/4477_useSwarmBanner.js
-index 045bacf..77525c0 100644
---- a/_tentative/4477_useSwarmBanner.js
-+++ b/_tentative/4477_useSwarmBanner.js
-@@ -54,6 +54,12 @@ function Mp7() {
-         let Y = T.agentDefinitions.activeAgents.find((j) => j.agentType === q);
-         return { text: q, bgColor: Ma_(Y?.color, 'promptBorder') };
-     }
-+    try {
-+        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
-+            let __acc = __multiAccount.getActiveAccount();
-+            if (__acc) return { text: __acc.label, bgColor: 'promptBorder' };
-+        }
-+    } catch (__e) {}
-     return null;
- }
- 
 diff --git a/cli/handlers/auth.js b/cli/handlers/auth.js
-index 04a5d86..c4a1370 100644
+index 0d27462..a6f2f1e 100644
 --- a/cli/handlers/auth.js
 +++ b/cli/handlers/auth.js
-@@ -57,6 +57,25 @@ async function VwH(H) {
-     let q = saveOAuthTokensIfNeeded(H);
+@@ -57,6 +57,25 @@ async function VwH(stats) {
+     let q = saveOAuthTokensIfNeeded(stats);
      if ((clearOAuthTokenCache(), q.warning))
          logEvent('tengu_oauth_storage_warning', { warning: q.warning });
 +    try {
@@ -64,36 +26,24 @@ index 04a5d86..c4a1370 100644
 +                    emailAddress: _.account.email,
 +                    organizationUuid: _.organization ? _.organization.uuid : null,
 +                };
-+            } else if (H.tokenAccount) {
++            } else if (stats.tokenAccount) {
 +                __accountInfo = {
-+                    accountUuid: H.tokenAccount.uuid,
-+                    emailAddress: H.tokenAccount.emailAddress,
-+                    organizationUuid: H.tokenAccount.organizationUuid,
++                    accountUuid: stats.tokenAccount.uuid,
++                    emailAddress: stats.tokenAccount.emailAddress,
++                    organizationUuid: stats.tokenAccount.organizationUuid,
 +                };
 +            }
-+            __multiAccount.handlePostLogin(H, __accountInfo);
++            __multiAccount.handlePostLogin(stats, __accountInfo);
 +        }
 +    } catch (__e) {}
      if (
-         (await UD6(H.accessToken).catch((K) => logForDebugging(String(K), { level: 'error' })),
-         GE(H.scopes))
-diff --git a/commands.js b/commands.js
-index 54907c6..cf041b6 100644
---- a/commands.js
-+++ b/commands.js
-@@ -509,6 +509,7 @@ var bT = R(() => {
-             ...(Wy7 ? [Wy7] : []),
-             ...(Ly7 ? [Ly7] : []),
-             ...[],
-+            ...(typeof __commandHooks !== 'undefined' ? __commandHooks.getCommands() : []),
-         ])),
-         (aF = z6(() => new Set(g48().flatMap((H) => [H.name, ...(H.aliases ?? [])])))));
-     Vy7 = z6(async (H) => {
+         (await UD6(stats.accessToken).catch((K) => logForDebugging(String(K), { level: 'error' })),
+         GE(stats.scopes))
 diff --git a/services/api/withRetry.js b/services/api/withRetry.js
-index 9042101..79fe121 100644
+index b8ec945..5cfea5a 100644
 --- a/services/api/withRetry.js
 +++ b/services/api/withRetry.js
-@@ -137,6 +137,24 @@ async function* th_(H, _, q) {
+@@ -137,6 +137,24 @@ async function* th_(stats, _, q) {
                          );
                  }
              }
@@ -119,12 +69,27 @@ index 9042101..79fe121 100644
              if (w > K && !j) throw new su(Y, $);
              if (!(wQ4(Y) || YQ4(Y)) && (!(Y instanceof iq) || !jQ4(Y))) throw new su(Y, $);
 diff --git a/utils/auth.js b/utils/auth.js
-index 447d6f9..34ea654 100644
+index fb31443..2b6d729 100644
 --- a/utils/auth.js
 +++ b/utils/auth.js
-@@ -663,6 +663,11 @@ function handleOAuth401Error(H) {
+@@ -151,6 +151,14 @@ function hasAnthropicApiKeyAuth() {
+ }
  
- async function FJ4(H) {
+ function getAnthropicApiKeyWithSource(stats = {}) {
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            var __creds = __multiAccount.getActiveCredentials();
++            if (__creds && __creds.type === 'api-key' && __creds.apiKey) {
++                return { key: __creds.apiKey, source: 'multi-account' };
++            }
++        }
++    } catch (__e) {}
+     if (J1()) {
+         if (process.env.ANTHROPIC_API_KEY)
+             return { key: process.env.ANTHROPIC_API_KEY, source: 'ANTHROPIC_API_KEY' };
+@@ -666,6 +674,11 @@ function handleOAuth401Error(stats) {
+ 
+ async function FJ4(stats) {
      clearOAuthTokenCache();
 +    try {
 +        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
@@ -133,8 +98,8 @@ index 447d6f9..34ea654 100644
 +    } catch (__e) {}
      let _ = await getClaudeAIOAuthTokensAsync();
      if (!_?.refreshToken) return !1;
-     if (_.accessToken !== H) return (logEvent('tengu_oauth_401_recovered_from_keychain', {}), !0);
-@@ -672,6 +677,22 @@ async function FJ4(H) {
+     if (_.accessToken !== stats)
+@@ -676,6 +689,22 @@ async function FJ4(stats) {
  async function getClaudeAIOAuthTokensAsync() {
      if (J1()) return null;
      if (process.env.CLAUDE_CODE_OAUTH_TOKEN || RD_()) return getClaudeAIOAuthTokens();
@@ -157,7 +122,7 @@ index 447d6f9..34ea654 100644
      try {
          let q = (await U4().readAsync())?.claudeAiOauth;
          if (!q?.accessToken) return null;
-@@ -734,9 +755,26 @@ async function CL6(H, _) {
+@@ -738,9 +767,26 @@ async function CL6(stats, _) {
              return (logEvent('tengu_oauth_token_refresh_race_resolved', {}), !1);
          logEvent('tengu_oauth_token_refresh_starting', {});
          let A = await FBH(z.refreshToken, { scopes: GE(z.scopes) ? void 0 : z.scopes });
@@ -185,7 +150,7 @@ index 447d6f9..34ea654 100644
          let A = await getClaudeAIOAuthTokensAsync();
          if (A && !SB(A.expiresAt))
              return (logEvent('tengu_oauth_token_refresh_race_recovered', {}), !0);
-@@ -770,7 +808,20 @@ function is1PApiCustomer() {
+@@ -774,7 +820,20 @@ function is1PApiCustomer() {
  }
  
  function getOauthAccountInfo() {
@@ -207,7 +172,7 @@ index 447d6f9..34ea654 100644
  }
  
  function isOverageProvisioningAllowed() {
-@@ -1057,6 +1108,22 @@ var N8 = R(() => {
+@@ -1067,6 +1126,22 @@ var N8 = R(() => {
      });
      getClaudeAIOAuthTokens = z6(() => {
          if (J1()) return null;

@@ -180,7 +180,12 @@ step_deob() {
   header "Step 2: Deobfuscate (Python split + TS AST match)"
   rm -rf "$SCRIPT_DIR/.deob_cache" "$DEOB_DIR"
   cd "$TOOLS_TS"
-  bun run src/deob.ts "$SCRIPT_DIR/source.js" "$SOURCE_REF" "$DEOB_DIR"
+  local sigs_flag=""
+  if [ "${REGEN_SIGS:-0}" = "1" ]; then
+    info "Regenerating signatures from $SOURCE_REF"
+    sigs_flag="--regen-sigs $SOURCE_REF"
+  fi
+  bun run src/deob.ts "$SCRIPT_DIR/source.js" "$DEOB_DIR" $sigs_flag
   cd "$SCRIPT_DIR"
 }
 
@@ -196,10 +201,17 @@ step_rename() {
   require_step "modrecon"
   header "Step 2.6: Rename identifiers"
   cd "$TOOLS_TS"
-  if [ -f "$RENAME_DB" ]; then
-    bun run src/renamer.ts "$DEOB_DIR" "$SOURCE_REF" "$DEOB_DIR/_mapping.json" "$RENAME_DB"
+  if [ "${LEGACY_RENAME:-0}" = "1" ]; then
+    info "Legacy renamer enabled (LEGACY_RENAME=1)"
+    if [ -f "$RENAME_DB" ]; then
+      bun run src/renamer.ts "$DEOB_DIR" "$SOURCE_REF" "$DEOB_DIR/_mapping.json" "$RENAME_DB"
+    else
+      bun run src/renamer.ts "$DEOB_DIR" "$SOURCE_REF" "$DEOB_DIR/_mapping.json"
+    fi
   else
-    bun run src/renamer.ts "$DEOB_DIR" "$SOURCE_REF" "$DEOB_DIR/_mapping.json"
+    info "Skipping legacy renamer (set LEGACY_RENAME=1 to enable)"
+    # Global anchor renames still need to run (legacy renamer includes them)
+    bun run src/apply-global-renames.ts "$DEOB_DIR" "$TOOLS_TS/anchor-rules.json"
   fi
   cd "$SCRIPT_DIR"
 }
@@ -245,18 +257,6 @@ step_patch() {
     local name
     name="$(basename "$patch")"
     info "Applying $name..."
-
-    # Read dependency from patch header
-    local depends
-    depends=$(grep -m1 '^# depends:' "$patch" 2>/dev/null | sed 's/^# depends: *//' || echo "none")
-
-    # If dependent, ensure we're on the right base
-    if [[ "$depends" != "none" && "$depends" != "" ]]; then
-      local dep_tag="after-${depends}"
-      if git rev-parse "$dep_tag" >/dev/null 2>&1; then
-        git checkout -q "$dep_tag" -- .
-      fi
-    fi
 
     if git apply "$patch" 2>&1; then
       :

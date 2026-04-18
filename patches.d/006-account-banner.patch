@@ -1,23 +1,51 @@
 # patch: 006-account-banner
-# depends: 005
-# generated: 2026-04-17
-# description: Shows active account label in prompt separator bar, with * on failover.
+# depends: 004
+# generated: 2026-04-19
+# description: Account banner with failover indicator + version marker.
+#   - Shows active account label in prompt separator bar, with * on failover
+#   - Appends [claudiverse] to --version output as patch canary
 
-diff --git a/_tentative/4477_useSwarmBanner.js b/_tentative/4477_useSwarmBanner.js
-index 77525c0..4f589aa 100644
---- a/_tentative/4477_useSwarmBanner.js
-+++ b/_tentative/4477_useSwarmBanner.js
-@@ -57,7 +57,12 @@ function Mp7() {
-     try {
-         if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
-             let __acc = __multiAccount.getActiveAccount();
--            if (__acc) return { text: __acc.label, bgColor: 'promptBorder' };
+diff --git a/_tail.js b/_tail.js
+index 815131a..5965e82 100644
+--- a/_tail.js
++++ b/_tail.js
+@@ -2428,7 +2428,7 @@ Usage: claude --remote "your task description"`,
+                 }
+             })
+             .version(
+-                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
++                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
+                 '-v, --version',
+                 'Output the version number',
+             ),
+@@ -3134,7 +3134,7 @@ async function mN5() {
+         (stats[0] === '--version' || stats[0] === '-v' || stats[0] === '-V')
+     ) {
+         console.log(
+-            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
++            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
+         );
+         return;
+     }
+diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
+index a24541f..e233ba4 100644
+--- a/components/PromptInput/useSwarmBanner.js
++++ b/components/PromptInput/useSwarmBanner.js
+@@ -54,6 +54,17 @@ function Mp7() {
+         let Y = T.agentDefinitions.activeAgents.find((j) => j.agentType === q);
+         return { text: q, bgColor: Ma_(Y?.color, 'promptBorder') };
+     }
++    try {
++        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
++            let __acc = __multiAccount.getActiveAccount();
 +            if (__acc) {
 +                let __status = __multiAccount.getStatus();
 +                let __primary = __status.accounts.find(function(a) { return a.isPrimary; });
 +                let __isFailover = __primary && !__primary.isActive;
 +                return { text: __acc.label + (__isFailover ? '*' : ''), bgColor: 'promptBorder' };
 +            }
-         }
-     } catch (__e) {}
++        }
++    } catch (__e) {}
      return null;
+ }
+ 
