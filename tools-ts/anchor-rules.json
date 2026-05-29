@@ -292,7 +292,6 @@
         "rename": "columns",
         "description": "columns — terminal width param"
     },
-
     {
         "type": "pin",
         "source": "components/PromptInput/useSwarmBanner.ts",

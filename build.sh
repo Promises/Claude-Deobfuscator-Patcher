@@ -60,7 +60,7 @@ echo ""
 echo "=== Step 2: Deobfuscate (Python split + TS AST match) ==="
 rm -rf "$SCRIPT_DIR/.deob_cache" "$SCRIPT_DIR/deobfuscated"
 cd "$TOOLS_TS"
-bun run src/deob.ts "$SCRIPT_DIR/source.js" "$SOURCE_REF" "$SCRIPT_DIR/deobfuscated"
+bun run src/deob.ts "$SCRIPT_DIR/source.js" "$SCRIPT_DIR/deobfuscated"
 cd "$SCRIPT_DIR"
 
 # Step 2.5: Module reconstruction (add import/export for scope-aware renaming)
