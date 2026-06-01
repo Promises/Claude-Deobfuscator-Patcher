@@ -1,0 +1,26 @@
+# Development overrides — auto-merged with docker-compose.yml on `docker compose up`.
+# Frontend runs `next dev` with source bind-mounted for hot reload; backend runs
+# Bun in --watch mode. Same hostnames / networks / :80 as production.
+
+services:
+  patcher-studio:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM node:22-alpine
+        WORKDIR /app
+        COPY package.json package-lock.json ./
+        RUN npm ci
+        CMD ["npx", "next", "dev", "-p", "80", "-H", "0.0.0.0"]
+    environment:
+      - NEXT_PUBLIC_STUDIO_WS=${NEXT_PUBLIC_STUDIO_WS:-https://patcher-studio-api.test}
+    volumes:
+      - ./app:/app/app
+      - ./components:/app/components
+      - ./lib:/app/lib
+      - ./public:/app/public
+      - ./next.config.mjs:/app/next.config.mjs
+      - ./tsconfig.json:/app/tsconfig.json
+
+  patcher-studio-api:
+    command: ["bun", "run", "--watch", "index.ts"]

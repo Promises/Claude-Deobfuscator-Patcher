@@ -1,0 +1,62 @@
+# Deobfuscator Patcher Studio
+#
+# Two services, no published ports. Each gets a *.test hostname on the external
+# shared_network so the global nginx routes <hostname>.test → container:80.
+# They also share an internal-only network for service-to-service traffic.
+#
+#   frontend → https://patcher-studio.test
+#   backend  → https://patcher-studio-api.test   (browser connects here via socket.io)
+#
+# The backend imports the real tools-ts pipeline, so the whole patch-ref repo is
+# bind-mounted (versionref cli.js, tools-ts, tools/splitter.py, patches.d).
+#
+#   docker compose up -d           # prod-style (built images)
+#   docker compose up              # dev (auto-merges docker-compose.override.yml)
+
+services:
+  patcher-studio:
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_STUDIO_WS: ${NEXT_PUBLIC_STUDIO_WS:-https://patcher-studio-api.test}
+    container_name: patcher-studio
+    hostname: patcher-studio.test
+    restart: unless-stopped
+    environment:
+      - PORT=80
+      - HOSTNAME=0.0.0.0
+    networks:
+      - internal
+      - shared_network
+    depends_on:
+      - patcher-studio-api
+
+  patcher-studio-api:
+    build:
+      context: ./server
+    container_name: patcher-studio-api
+    hostname: patcher-studio-api.test
+    restart: unless-stopped
+    environment:
+      - PORT=80
+      - STUDIO_PORT=80
+    working_dir: /patch-ref/studio/server
+    command: ["bun", "run", "index.ts"]
+    volumes:
+      # The pipeline reads/writes across the patch-ref repo.
+      - ..:/patch-ref
+      # Keep the heavy per-version deob cache in a named volume (not on the host).
+      - studio_cache:/patch-ref/studio/.cache
+    networks:
+      - internal
+      - shared_network
+
+networks:
+  internal:
+    name: patcher-studio-internal-network
+    internal: true
+  shared_network:
+    external: true
+
+volumes:
+  studio_cache:

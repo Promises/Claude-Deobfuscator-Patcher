@@ -1,0 +1,12 @@
+{
+  "name": "patcher-studio-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch index.ts",
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  }
+}
