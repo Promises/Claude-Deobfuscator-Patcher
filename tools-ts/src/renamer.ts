@@ -614,6 +614,15 @@ function renameWithLanguageService(
       target: ts.ScriptTarget.Latest,
       noEmit: true,
       strict: false,
+      // Identifier rename on plain JS (checkJs off) never consults the standard
+      // library or module resolution, so skip all of that — it's pure binding/
+      // scope work. Cuts program setup without changing rename locations.
+      noLib: true,
+      lib: [],
+      types: [],
+      skipLibCheck: true,
+      noResolve: true,
+      skipDefaultLibCheck: true,
     }),
     getDefaultLibFileName: () => ts.getDefaultLibFilePath({}),
     fileExists: (fn) => fn === virtualFileName || ts.sys.fileExists(fn),
