@@ -49,6 +49,11 @@ export interface MatchResult {
   original: string;
   confidence: number;
   reason: string;
+  // Optional resolved-node location (set by the anchor resolver) so callers can
+  // navigate to the exact node the anchor binds — never a heuristic.
+  file?: string;
+  start?: number;
+  line?: number;
 }
 
 // ── Fingerprint Extraction ───────────────────────────────────────────────────

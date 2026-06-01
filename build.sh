@@ -5,7 +5,7 @@ export PYTHONDONTWRITEBYTECODE=1
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOLS_PY="$SCRIPT_DIR/tools"
 TOOLS_TS="$SCRIPT_DIR/tools-ts"
-SOURCE_REF="$SCRIPT_DIR/../claude-code"
+SOURCE_REF="$SCRIPT_DIR/../claude-source-reference-2.1.88"
 
 # Find Claude binary (macOS)
 VERSIONS_DIR="$HOME/.local/share/claude/versions"

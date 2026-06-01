@@ -3,7 +3,23 @@
         "id": "query",
         "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
         "file": "query.js",
-        "find": { "string_literal": "completed" },
+        "find": {
+            "string_literal": "completed",
+            "filter": [
+                {
+                    "not": {
+                        "property_assignment": {
+                            "key": "reason"
+                        }
+                    }
+                },
+                {
+                    "include": {
+                        "case": "completed"
+                    }
+                }
+            ]
+        },
         "scope": "async_generator",
         "rename": "query"
     },
@@ -44,26 +60,51 @@
         "rename": "notifyCommandLifecycle",
         "description": "notifyCommandLifecycle — called with 'completed' in query"
     },
-
     {
         "id": "yieldMissingToolResultBlocks",
         "description": "generator that yields tool_result error messages for unmatched tool uses",
         "file": "query.js",
-        "find": { "property_assignment": { "key": "type", "value": "tool_result" } },
+        "find": {
+            "property_assignment": {
+                "key": "type",
+                "value": "tool_result"
+            }
+        },
         "scope": "generator",
         "rename": "yieldMissingToolResultBlocks"
     },
-    { "from": "yieldMissingToolResultBlocks", "walk": "param:0", "rename": "assistantMessages" },
-    { "from": "yieldMissingToolResultBlocks", "walk": "param:1", "rename": "errorMessage" },
-    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding", "rename": "assistantMessage" },
-    { "from": "yieldMissingToolResultBlocks", "walk": "local:call_result", "rename": "toolUseBlocks" },
-    { "from": "yieldMissingToolResultBlocks", "walk": "local:for_of_binding:1", "rename": "toolUse" },
-
+    {
+        "from": "yieldMissingToolResultBlocks",
+        "walk": "param:0",
+        "rename": "assistantMessages"
+    },
+    {
+        "from": "yieldMissingToolResultBlocks",
+        "walk": "param:1",
+        "rename": "errorMessage"
+    },
+    {
+        "from": "yieldMissingToolResultBlocks",
+        "walk": "local:for_of_binding",
+        "rename": "assistantMessage"
+    },
+    {
+        "from": "yieldMissingToolResultBlocks",
+        "walk": "local:call_result",
+        "rename": "toolUseBlocks"
+    },
+    {
+        "from": "yieldMissingToolResultBlocks",
+        "walk": "local:for_of_binding:1",
+        "rename": "toolUse"
+    },
     {
         "id": "getCustomApiKeyStatus",
         "description": "getCustomApiKeyStatus — returns 'approved', 'rejected', or 'new'",
         "file": "utils/config.js",
-        "find": { "string_literal": "approved" },
+        "find": {
+            "string_literal": "approved"
+        },
         "scope": "function",
         "rename": "getCustomApiKeyStatus"
     },
@@ -136,12 +177,13 @@
         "rename": "configCacheMisses",
         "description": "configCacheMisses — incremented at start of cache miss path"
     },
-
     {
         "id": "getTotalCacheReadInputTokens",
         "description": "getTotalCacheReadInputTokens — sumBy on STATE.modelUsage",
         "file": "bootstrap/state.js",
-        "find": { "string_literal": "cacheReadInputTokens" },
+        "find": {
+            "string_literal": "cacheReadInputTokens"
+        },
         "scope": "function",
         "rename": "getTotalCacheReadInputTokens"
     },
@@ -158,7 +200,6 @@
         "id": "state_exports",
         "description": "bulk rename all bootstrap/state.js exports from the export map"
     },
-
     {
         "from": "getGlobalConfig",
         "walk": "export_map",
@@ -174,7 +215,9 @@
     },
     {
         "from": "utils/config.js_fun_saveGlobalConfig",
-        "find": { "string_contains": "refusing to write" },
+        "find": {
+            "string_contains": "refusing to write"
+        },
         "walk": "closest_parent:call",
         "id": "saveGlobalConfig_fallbackCall",
         "description": "the logForDebugging(...) call in saveGlobalConfig's auth loss guard"
@@ -204,12 +247,13 @@
         "rename": "currentConfig",
         "description": "currentConfig — the re-read config passed to wouldLoseAuthState"
     },
-
     {
         "id": "getInitialState",
         "description": "getInitialState — creates the initial STATE object with defaults",
         "file": "bootstrap/state.js",
-        "find": { "string_literal": "userSettings" },
+        "find": {
+            "string_literal": "userSettings"
+        },
         "scope": "function",
         "rename": "getInitialState"
     },
@@ -219,12 +263,13 @@
         "rename": "flushInteractionTime_inner",
         "description": "flushInteractionTime_inner — the actual flush, guarded by flushInteractionTime"
     },
-
     {
         "id": "hasAnthropicApiKeyAuth",
         "description": "hasAnthropicApiKeyAuth — checks for API key auth, contains skipRetrievingKeyFromApiKeyHelper",
         "file": "utils/auth.js",
-        "find": { "text": "skipRetrievingKeyFromApiKeyHelper" },
+        "find": {
+            "text": "skipRetrievingKeyFromApiKeyHelper"
+        },
         "scope": "function",
         "anchor_only": true
     },
@@ -235,18 +280,27 @@
         "id": "auth_exports",
         "description": "bulk rename all utils/auth.js exports from the export map"
     },
-
     {
         "id": "prependUserMessage",
         "description": "prependUserMessage — method that calls jsonStringify with role:'user'",
         "file": "cli/structuredIO.js",
-        "find": { "property_assignment": { "key": "role", "value": "user" } },
+        "find": {
+            "property_assignment": {
+                "key": "role",
+                "value": "user"
+            }
+        },
         "scope": "method",
         "anchor_only": true
     },
     {
         "from": "prependUserMessage",
-        "find": { "property_assignment": { "key": "role", "value": "user" } },
+        "find": {
+            "property_assignment": {
+                "key": "role",
+                "value": "user"
+            }
+        },
         "walk": "closest_parent:call",
         "id": "jsonStringify_call"
     },
@@ -262,12 +316,13 @@
         "rename": "StructuredIO",
         "description": "StructuredIO — CLI structured I/O class"
     },
-
     {
         "id": "LogoV2",
         "description": "LogoV2 — main logo/header component with compact and horizontal layouts",
         "file": "components/LogoV2/LogoV2.js",
-        "find": { "text": "sandboxed" },
+        "find": {
+            "text": "sandboxed"
+        },
         "scope": "function",
         "rename": "LogoV2"
     },
@@ -277,12 +332,13 @@
         "rename": "React",
         "description": "React — imported as R8, used for createElement calls"
     },
-
     {
         "id": "getLayoutMode",
         "description": "getLayoutMode — returns 'horizontal' or 'compact' based on terminal width",
         "file": "utils/logoV2Utils.js",
-        "find": { "string_literal": "compact" },
+        "find": {
+            "string_literal": "compact"
+        },
         "scope": "function",
         "rename": "getLayoutMode"
     },
@@ -295,7 +351,9 @@
     {
         "type": "pin",
         "source": "components/PromptInput/useSwarmBanner.ts",
-        "find": { "text": "View teammates" },
+        "find": {
+            "text": "View teammates"
+        },
         "description": "useSwarmBanner — swarm banner hook"
     }
 ]

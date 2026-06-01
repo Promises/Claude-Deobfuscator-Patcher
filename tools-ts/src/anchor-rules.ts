@@ -21,16 +21,34 @@ import type { MatchResult } from "./constraint-renamer";
 
 // ── Rule Types ───────────────────────────────────────────────────────────────
 
-type FindCriteria =
-    | { text: string }
-    | { regex: string }
+// A single node-matchable criterion (no text/regex — those are string-offset based).
+type NodeCriterion =
     | { string_literal: string }
     | { string_startswith: string }
     | { string_endswith: string }
     | { string_contains: string }
     | { number: number; op?: string }
-    | { property_assignment: { key: string; value: string } }
-    | { function_name: string };
+    | { property_assignment: { key?: string; value?: string } }
+    | { function_name: string }
+    | { case: string | number }
+    | { default_case: true };
+
+// A single ancestor-context filter entry. Every find criterion can be reused as a
+// filter (since all are NodeCriterion-based). Filters are an ordered list and ALL
+// entries must pass for a candidate to be kept.
+//   { include: C } → keep candidate only if some ancestor (inclusive) matches C.
+//   { not: C }     → drop candidate if any ancestor matches C.
+type FilterEntry = { not: NodeCriterion } | { include: NodeCriterion };
+
+// Optional ancestor-context filters applicable to any find criterion.
+interface ContextFilters {
+    filter?: FilterEntry[];
+}
+
+type FindCriteria =
+    | ({ text: string } & ContextFilters)
+    | ({ regex: string } & ContextFilters)
+    | (NodeCriterion & ContextFilters);
 
 type Scope =
     | "function"
@@ -130,116 +148,137 @@ interface Resolved {
 
 // ── Pattern Search ───────────────────────────────────────────────────────────
 
+/**
+ * Shared per-node predicate covering every AST-node-based criterion type.
+ * `text`/`regex` are string-offset based and are NOT handled here (they have no
+ * single node) — callers special-case them. Returns false for those keys.
+ */
+function matchesNode(node: ts.Node, criterion: NodeCriterion, sf: ts.SourceFile): boolean {
+    const c = criterion as any;
+    if ("string_literal" in c) return ts.isStringLiteral(node) && node.text === c.string_literal;
+    if ("string_startswith" in c) return ts.isStringLiteral(node) && node.text.startsWith(c.string_startswith);
+    if ("string_endswith" in c) return ts.isStringLiteral(node) && node.text.endsWith(c.string_endswith);
+    if ("string_contains" in c) return ts.isStringLiteral(node) && node.text.includes(c.string_contains);
+    if ("number" in c) {
+        if (!(ts.isNumericLiteral(node) && Number(node.text) === c.number)) return false;
+        if (c.op) {
+            const p = node.parent;
+            return !!(p && ts.isBinaryExpression(p) && ts.tokenToString(p.operatorToken.kind) === c.op);
+        }
+        return true;
+    }
+    if ("property_assignment" in c) {
+        const { key, value } = c.property_assignment as { key?: string; value?: string };
+        if (!(ts.isPropertyAssignment(node) && ts.isIdentifier(node.name))) return false;
+        const km = !key || node.name.text === key;
+        const vm = !value || (ts.isStringLiteral(node.initializer) && node.initializer.text === value);
+        return km && vm;
+    }
+    if ("function_name" in c) return getNodeName(node) === c.function_name;
+    if ("case" in c) {
+        if (!ts.isCaseClause(node)) return false;
+        const expr = node.expression;
+        if (!(ts.isStringLiteral(expr) || ts.isNumericLiteral(expr))) return false;
+        return expr.text === String(c.case);
+    }
+    if ("default_case" in c) return ts.isDefaultClause(node);
+    return false;
+}
+
+/** Does any ancestor of `node` (inclusive of node itself) satisfy `criterion`? */
+function anyAncestorMatches(node: ts.Node, criterion: NodeCriterion, sf: ts.SourceFile): boolean {
+    let cur: ts.Node | undefined = node;
+    while (cur) {
+        if (matchesNode(cur, criterion, sf)) return true;
+        cur = cur.parent;
+    }
+    return false;
+}
+
+/**
+ * Apply the optional `filter` list of ancestor-context filters to a candidate node.
+ * Filters are an ordered list; ALL entries must pass.
+ * - `{ not: C }`:     drop candidate if C matches any ancestor.
+ * - `{ include: C }`: keep candidate only if C matches some ancestor.
+ * For text/regex finds there is no single AST node, so `node` is the deepest
+ * node resolved at the match offset (or null). When null, context filters pass.
+ */
+function passesContextFilters(node: ts.Node | null, filters: ContextFilters, sf: ts.SourceFile): boolean {
+    const entries = filters.filter ?? [];
+    if (entries.length === 0) return true;
+    if (!node) return true; // text/regex offset with no resolvable node — skip filtering
+    for (const entry of entries) {
+        if ("not" in entry) {
+            if (anyAncestorMatches(node, entry.not, sf)) return false;
+        } else {
+            if (!anyAncestorMatches(node, entry.include, sf)) return false;
+        }
+    }
+    return true;
+}
+
+/** Resolve the deepest AST node whose span contains `pos`. */
+function deepestNodeAt(sf: ts.SourceFile, pos: number): ts.Node | null {
+    let deepest: ts.Node | null = null;
+    function descend(n: ts.Node) {
+        if (n.getStart(sf) <= pos && pos < n.end) {
+            deepest = n;
+            ts.forEachChild(n, descend);
+        }
+    }
+    ts.forEachChild(sf, descend);
+    return deepest;
+}
+
+/**
+ * Collect all candidate match positions for a find, in depth-first traversal
+ * order, after applying any `filter` ancestor-context filters.
+ * Shared by findPatternPos (takes [0]) and analyzeFind (takes all).
+ */
+function collectFindPositions(code: string, find: FindCriteria | string, sf: ts.SourceFile): number[] {
+    const f: any = typeof find === "string" ? { text: find } : find;
+    const filters: ContextFilters = { filter: f.filter };
+    const positions: number[] = [];
+
+    if ("text" in f) {
+        let i = code.indexOf(f.text);
+        while (i !== -1) {
+            if (passesContextFilters(deepestNodeAt(sf, i), filters, sf)) positions.push(i);
+            i = code.indexOf(f.text, i + Math.max(1, f.text.length));
+        }
+        return positions;
+    }
+
+    if ("regex" in f) {
+        const re = new RegExp(f.regex, "g");
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(code))) {
+            if (passesContextFilters(deepestNodeAt(sf, m.index), filters, sf)) positions.push(m.index);
+            if (m.index === re.lastIndex) re.lastIndex++;
+        }
+        return positions;
+    }
+
+    // property_assignment with neither key nor value matches nothing (legacy behavior)
+    if ("property_assignment" in f) {
+        const { key, value } = f.property_assignment ?? {};
+        if (!key && !value) return positions;
+    }
+
+    const criterion = f as NodeCriterion;
+    function visit(node: ts.Node) {
+        if (matchesNode(node, criterion, sf) && passesContextFilters(node, filters, sf)) {
+            positions.push(node.getStart(sf));
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    return positions;
+}
+
 function findPatternPos(code: string, find: FindCriteria | string, sf: ts.SourceFile): number {
-    if (typeof find === "string") return code.indexOf(find);
-
-    if ("text" in find) return code.indexOf(find.text);
-
-    if ("regex" in find) {
-        const m = code.match(new RegExp(find.regex));
-        return m ? code.indexOf(m[0]) : -1;
-    }
-
-    if ("string_literal" in find) {
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isStringLiteral(node) && node.text === (find as { string_literal: string }).string_literal)
-                pos = node.getStart(sf);
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("string_startswith" in find) {
-        const prefix = (find as { string_startswith: string }).string_startswith;
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isStringLiteral(node) && node.text.startsWith(prefix)) pos = node.getStart(sf);
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("string_endswith" in find) {
-        const suffix = (find as { string_endswith: string }).string_endswith;
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isStringLiteral(node) && node.text.endsWith(suffix)) pos = node.getStart(sf);
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("string_contains" in find) {
-        const needle = (find as { string_contains: string }).string_contains;
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isStringLiteral(node) && node.text.includes(needle)) pos = node.getStart(sf);
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("number" in find) {
-        const target = find as { number: number; op?: string };
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isNumericLiteral(node) && Number(node.text) === target.number) {
-                if (target.op) {
-                    const p = node.parent;
-                    if (ts.isBinaryExpression(p) && ts.tokenToString(p.operatorToken.kind) === target.op)
-                        pos = node.getStart(sf);
-                } else {
-                    pos = node.getStart(sf);
-                }
-            }
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("property_assignment" in find) {
-        const { key, value } = (find as { property_assignment: { key?: string; value?: string } }).property_assignment;
-        if (!key && !value) return -1;
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
-                const keyMatch = !key || node.name.text === key;
-                const valueMatch = !value || (ts.isStringLiteral(node.initializer) && node.initializer.text === value);
-                if (keyMatch && valueMatch) pos = node.getStart(sf);
-            }
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    if ("function_name" in find) {
-        const name = (find as { function_name: string }).function_name;
-        let pos = -1;
-        function visit(node: ts.Node) {
-            if (pos !== -1) return;
-            if (getNodeName(node) === name) {
-                pos = node.getStart(sf);
-            }
-            ts.forEachChild(node, visit);
-        }
-        visit(sf);
-        return pos;
-    }
-
-    return -1;
+    const positions = collectFindPositions(code, find, sf);
+    return positions.length > 0 ? positions[0] : -1;
 }
 
 // ── Scope Detection ──────────────────────────────────────────────────────────
@@ -298,6 +337,29 @@ function findContainingScope(sf: ts.SourceFile, pos: number, scope: Scope): ts.N
         cur = cur.parent;
     }
     return null;
+}
+
+// ── Find ambiguity analysis ──────────────────────────────────────────────────
+// findPatternPos binds to the FIRST match. This reports ALL matches (with line
+// + enclosing scope) so callers can warn when a landmark is ambiguous. Mirrors
+// findPatternPos's matching semantics exactly; matches[0] is the one used.
+
+export interface FindMatch { line: number; column: number; scope: string | null; inRequestedScope: boolean; }
+export interface FindAnalysis { count: number; usedIndex: number; matches: FindMatch[]; }
+
+export function analyzeFind(code: string, find: FindCriteria | string, scope: Scope = "function"): FindAnalysis {
+    const sf = ts.createSourceFile("f.js", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+    const positions = collectFindPositions(code, find, sf);
+
+    const matches: FindMatch[] = positions.map((pos) => {
+        const lc = sf.getLineAndCharacterOfPosition(pos);
+        const scopeNode = findContainingScope(sf, pos, scope);
+        let name = scopeNode ? getNodeName(scopeNode) : null;
+        if (!name) { const fn = findContainingScope(sf, pos, "function"); name = fn ? getNodeName(fn) : null; }
+        return { line: lc.line + 1, column: lc.character + 1, scope: name, inRequestedScope: !!scopeNode };
+    });
+
+    return { count: matches.length, usedIndex: 0, matches };
 }
 
 // ── Walk Execution ───────────────────────────────────────────────────────────
@@ -947,13 +1009,36 @@ function extractExportMapRenames(node: ts.Node, sf: ts.SourceFile): MatchResult[
     return results;
 }
 
+// First occurrence of identifier `name` WITHIN `scope` (the node the walk
+// resolved against). The anchor renames this name across that scope, so this
+// is a position the anchor genuinely binds — derived from the resolver itself,
+// never a heuristic that could point elsewhere.
+function firstIdentStart(scope: ts.Node, name: string, sf: ts.SourceFile): number | undefined {
+    let found: number | undefined;
+    function visit(n: ts.Node) {
+        if (found !== undefined) return;
+        if (ts.isIdentifier(n) && n.text === name) { found = n.getStart(sf); return; }
+        ts.forEachChild(n, visit);
+    }
+    visit(scope);
+    return found;
+}
+
 // ── Main Entry Point ─────────────────────────────────────────────────────────
 
 export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResult[] {
     if (!fs.existsSync(rulesPath)) return [];
 
     const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
-    if (rules.length === 0) return [];
+    return applyAnchorRulesFromRules(deobDir, rules);
+}
+
+/**
+ * Same as applyAnchorRules but takes already-parsed rules in memory.
+ * Used by the studio backend to resolve DRAFT rules without writing to disk.
+ */
+export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]): MatchResult[] {
+    if (!rules || rules.length === 0) return [];
 
     const results: MatchResult[] = [];
     const resolvedById = new Map<string, Resolved>();
@@ -991,11 +1076,15 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
         resolvedById.set(id, { id, file: rule.file, minifiedName });
 
         if (!rule.anchor_only && rule.rename) {
+            const start = node.getStart(sf);
             results.push({
                 minified: minifiedName,
                 original: rule.rename,
                 confidence: 100,
                 reason: `anchor: ${rule.description ?? rule.rename}`,
+                file: rule.file,
+                start,
+                line: sf.getLineAndCharacterOfPosition(start).line + 1,
             });
         }
 
@@ -1102,11 +1191,18 @@ export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResul
 
             // Only emit a rename if this walk has a rename target (not an intermediate anchor)
             if (rule.rename && !walkResult.name.startsWith("__pos_")) {
+                // Prefer the precise node the walk found; otherwise the first
+                // occurrence of the resolved name within the scope it resolved
+                // against (the node the anchor renames over).
+                const start = walkResult.nodeStart ?? firstIdentStart(node, walkResult.name, sf);
                 results.push({
                     minified: walkResult.name,
                     original: rule.rename,
                     confidence: 95,
                     reason: `anchor walk (${rule.from} → ${rule.walk})`,
+                    file: parent.file,
+                    start,
+                    line: start !== undefined ? sf.getLineAndCharacterOfPosition(start).line + 1 : undefined,
                 });
             }
         }

@@ -44,7 +44,7 @@ const JS_RESERVED = new Set([
   "protected", "public", "static", "yield", "await",
 ]);
 
-function extractExportMap(code: string): Map<string, string> {
+export function extractExportMap(code: string): Map<string, string> {
   const map = new Map<string, string>();
 
   // Parse with TS
@@ -854,8 +854,10 @@ export function renameProject(
   sourceRefDir: string,
   mappingPath: string,
   dbPath?: string,
+  opts?: { noSourceRef?: boolean },
 ): { totalRenames: number; fileRenames: Map<string, number> } {
   const mapping = JSON.parse(fs.readFileSync(mappingPath, "utf-8"));
+  const noSourceRef = opts?.noSourceRef ?? !!process.env.NO_SOURCE_REF;
 
   // Load rename DB if provided
   let db: RenameDB | null = null;
@@ -872,6 +874,22 @@ export function renameProject(
   const seen = new Map<string, string>(); // minified → original (dedup)
 
   for (const section of mapping.sections) {
+    // No-source-ref mode: export maps (M_() helper calls) are self-contained
+    // in the bundle, so harvest them from EVERY emitted module regardless of
+    // whether it matched a source file. Skip all source-dependent matching.
+    if (noSourceRef) {
+      if (section.type !== "section") continue;
+      const deobPath = path.join(projectDir, section.output_path);
+      if (!fs.existsSync(deobPath)) continue;
+      const exportMap = extractExportMap(fs.readFileSync(deobPath, "utf-8"));
+      for (const [minified, original] of exportMap) {
+        if (seen.has(minified) || JS_RESERVED.has(original)) continue;
+        seen.set(minified, original);
+        renameTasks.push({ minified, original, declFile: section.output_path });
+      }
+      continue;
+    }
+
     if (!section.matched_source || section.confidence === "low") continue;
 
     const deobPath = path.join(projectDir, section.output_path);
@@ -1014,14 +1032,18 @@ function applyDBFilters(
 // CLI
 if (import.meta.main) {
   const args = process.argv.slice(2);
+  const noSourceRefIdx = args.indexOf("--no-source-ref");
+  const noSourceRef = noSourceRefIdx !== -1;
+  if (noSourceRef) args.splice(noSourceRefIdx, 1);
+
   if (args.length < 3) {
-    console.log("Usage: bun run src/renamer.ts <project_dir> <source_ref_dir> <mapping.json> [rename-db.json]");
+    console.log("Usage: bun run src/renamer.ts <project_dir> <source_ref_dir> <mapping.json> [rename-db.json] [--no-source-ref]");
     process.exit(1);
   }
 
   const [projectDir, sourceRefDir, mappingPath, dbPath] = args;
-  console.log("Renaming identifiers...");
-  const { totalRenames, fileRenames } = renameProject(projectDir, sourceRefDir, mappingPath, dbPath);
+  console.log(`Renaming identifiers${noSourceRef ? " (no-source-ref: export maps + anchors only)" : ""}...`);
+  const { totalRenames, fileRenames } = renameProject(projectDir, sourceRefDir, mappingPath, dbPath, { noSourceRef });
 
   console.log(`\nRenamed ${totalRenames} identifiers across ${fileRenames.size} files`);
   const sorted = [...fileRenames.entries()].sort((a, b) => b[1] - a[1]);
