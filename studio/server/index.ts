@@ -10,7 +10,7 @@ import { execSync } from "child_process";
 import { Server } from "socket.io";
 import { PORT, ANCHOR_RULES, PATCH_REF } from "./config";
 import { buildSnapshot, buildVersions } from "./data";
-import { prepareVersion, resolveAnchors, isPrepared, testApplyPatch, isRenamedFresh, prepareRenamed, analyzeLandmark, analyzeLandmarkResolved, locateWalkTarget } from "./pipeline";
+import { prepareVersion, resolveAnchors, isPrepared, testApplyPatch, isRenamedFresh, prepareRenamed, prepareRenamedFile, analyzeLandmark, analyzeLandmarkResolved, locateWalkTarget } from "./pipeline";
 
 const httpServer = createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
@@ -132,15 +132,21 @@ io.on("connection", (socket) => {
       if (t.length > MAX) t = t.slice(0, MAX) + "\n/* … truncated … */";
       return t;
     };
+    const cap = (t: string | null): string | null => {
+      const MAX = 400_000;
+      if (t == null) return null;
+      return t.length > MAX ? t.slice(0, MAX) + "\n/* … truncated … */" : t;
+    };
     try {
       const { deobDir } = await prepareVersion(version);
       const minPath = path.join(deobDir, file);
       const minified = fs.existsSync(minPath) ? readCapped(minPath) : null;
       let resolved: string | null = null;
       if (wantResolved) {
-        const { renamedDir } = await prepareRenamed(version);
-        const resPath = path.join(renamedDir, file);
-        resolved = fs.existsSync(resPath) ? readCapped(resPath) : null;
+        // Per-file on-demand render — byte-identical to the whole-bundle output
+        // for this file, but avoids rebuilding the entire bundle just to view one.
+        const r = await prepareRenamedFile(version, file);
+        resolved = cap(r.content);
       }
       ack?.({ ok: true, minified, resolved });
     } catch (e: any) {

@@ -539,31 +539,30 @@ function stripImportExport(code: string): string {
 }
 
 /**
- * Scope-aware renaming using TS Language Service on a single assembled file.
- *
- * Instead of loading 4688 module files (slow due to cross-file module resolution),
- * we concatenate all code into ONE file. TS natively understands function scope,
- * var hoisting, and parameter shadowing within a single file — no modules needed.
- *
- * Steps:
- * 1. Concatenate all sections (stripping import/export) into one string
- * 2. Track section byte offsets for mapping positions back to split files
- * 3. Create TS LS on the single file
- * 4. For each rename: find declaration position, call findRenameLocations
- * 5. Map returned positions back to individual files, apply edits
+ * A reusable rename "engine": the assembled single-file program + TS Language
+ * Service + declaration-position index. Building this is the one-time setup cost
+ * (~1.7s) shared by the whole-bundle rename and the per-file on-demand rename, so
+ * BOTH paths see identical assembly, identical decl positions, and identical TS
+ * binding — guaranteeing per-file output can never diverge from the full build.
  */
-function renameWithLanguageService(
-  projectDir: string,
-  mapping: any,
-  renameTasks: Array<{ minified: string; original: string; declFile: string }>,
-): { totalRenames: number; fileRenames: Map<string, number> } {
+interface RenameSection {
+  outputPath: string;
+  start: number; // offset in the assembled string
+  length: number;
+  code: string; // stripped code for this section
+}
+interface RenameEngine {
+  sections: RenameSection[];
+  sectionByPath: Map<string, number>;
+  assembled: string;
+  virtualFileName: string;
+  service: ts.LanguageService;
+  assembledPositions: Map<string, number>;
+}
+
+function buildRenameEngine(projectDir: string, mapping: any): RenameEngine {
   // Phase 1: Assemble all sections into one string, tracking offsets
-  const sections: Array<{
-    outputPath: string;
-    start: number; // offset in assembled string
-    length: number;
-    code: string; // stripped code for this section
-  }> = [];
+  const sections: RenameSection[] = [];
   const sectionByPath = new Map<string, number>(); // outputPath → index in sections[]
 
   const assembledParts: string[] = [];
@@ -636,23 +635,29 @@ function renameWithLanguageService(
   );
 
   // Phase 3: Find declaration positions in the assembled file
-  // For each rename task, locate the declaration in the assembled file
   const assembledPositions = findDeclPositions(assembled, virtualFileName);
-
   console.log(
     `  TS LS: ${assembledPositions.size} declarations found in assembled file`,
   );
 
-  // Phase 4: For each rename, call findRenameLocations
-  const allEdits: Array<{
-    start: number;
-    end: number;
-    newText: string;
-  }> = [];
+  return { sections, sectionByPath, assembled, virtualFileName, service, assembledPositions };
+}
+
+interface Edit { start: number; end: number; newText: string }
+
+/**
+ * Run findRenameLocations for each (deduped) task and return every rename
+ * location in ASSEMBLED-file coordinates. Shared by full + per-file renames so
+ * the located positions are identical regardless of how many files we render.
+ */
+function runRenameQueries(
+  engine: RenameEngine,
+  renameTasks: Array<{ minified: string; original: string }>,
+): { allEdits: Edit[]; renamesResolved: number; renamesSkipped: number } {
+  const { service, virtualFileName, assembledPositions } = engine;
+  const allEdits: Edit[] = [];
   let renamesResolved = 0;
   let renamesSkipped = 0;
-
-  // Deduplicate: only process each unique minified name once
   const processed = new Set<string>();
 
   for (const { minified, original } of renameTasks) {
@@ -666,12 +671,7 @@ function renameWithLanguageService(
       continue;
     }
 
-    const locations = service.findRenameLocations(
-      virtualFileName,
-      pos,
-      false,
-      false,
-    );
+    const locations = service.findRenameLocations(virtualFileName, pos, false, false);
     if (!locations || locations.length === 0) {
       if (process.env.RENAME_VERBOSE) console.warn(`    skip (no locs): ${minified} → ${original} at pos ${pos}`);
       renamesSkipped++;
@@ -685,143 +685,157 @@ function renameWithLanguageService(
         newText: original,
       });
     }
-
     renamesResolved++;
   }
 
-  console.log(
-    `  TS LS: ${renamesResolved} renames resolved (${allEdits.length} locations), ${renamesSkipped} skipped`,
+  return { allEdits, renamesResolved, renamesSkipped };
+}
+
+/**
+ * Apply a section's assembled-coordinate edits to its ORIGINAL on-disk file
+ * (import/export lines intact) and return the rewritten code. Positions are
+ * shifted by the import-line offset that was stripped during assembly.
+ */
+function applyEditsToSectionCode(originalCode: string, sec: RenameSection, localEdits: Edit[]): string {
+  const importOffset = findCodeOffset(originalCode, sec.code);
+  const sorted = [...localEdits].sort((a, b) => b.start - a.start);
+  let result = originalCode;
+  for (const edit of sorted) {
+    result = result.slice(0, edit.start + importOffset) + edit.newText + result.slice(edit.end + importOffset);
+  }
+  return result;
+}
+
+/**
+ * Post-pass: rewrite import/export specifier lines (stripped during assembly,
+ * so the TS LS never touched them) to use the renamed identifiers.
+ */
+function updateImportExportSpecifiers(code: string, renameMap: Map<string, string>): { code: string; changed: boolean } {
+  let changed = false;
+
+  // Update export { minified1, minified2 } → export { original1, original2 }
+  code = code.replace(
+    /^(export\s+\{)([^}]+)(\};?)$/gm,
+    (_match, prefix, names, suffix) => {
+      const updated = names.replace(
+        /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
+        (name: string) => {
+          if (JS_RESERVED.has(name)) return name;
+          const orig = renameMap.get(name);
+          if (orig) { changed = true; return orig; }
+          return name;
+        },
+      );
+      return prefix + updated + suffix;
+    },
   );
 
-  // Phase 5: Map assembled-file positions back to individual sections
-  // and apply edits to the split files
-  const editsBySection = new Map<
-    number,
-    Array<{ start: number; end: number; newText: string }>
-  >();
+  // Update import { minified } from './...' → import { original }
+  // AND import { x as minified } from "pkg" → import { x as original }
+  code = code.replace(
+    /^(import\s+\{)([^}]+)(\}\s+from\s+['"][^'"]+['"];?)$/gm,
+    (_match, prefix, names, suffix) => {
+      const isRelative = suffix.match(/from\s+['"]\.\.?\//);
+      const updated = names.replace(
+        isRelative
+          ? /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g
+          : /\bas\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
+        (match: string, name: string) => {
+          if (JS_RESERVED.has(name)) return match;
+          const orig = renameMap.get(name);
+          if (orig) {
+            changed = true;
+            return isRelative ? orig : `as ${orig}`;
+          }
+          return match;
+        },
+      );
+      return prefix + updated + suffix;
+    },
+  );
 
-  for (const edit of allEdits) {
-    // Binary search for which section contains this offset
-    let lo = 0,
-      hi = sections.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi + 1) >> 1;
-      if (sections[mid].start <= edit.start) lo = mid;
-      else hi = mid - 1;
-    }
+  return { code, changed };
+}
 
-    const sec = sections[lo];
-    const localStart = edit.start - sec.start;
-    const localEnd = edit.end - sec.start;
-
-    if (!editsBySection.has(lo)) editsBySection.set(lo, []);
-    editsBySection.get(lo)!.push({
-      start: localStart,
-      end: localEnd,
-      newText: edit.newText,
-    });
-  }
-
-  // Apply edits to each section's ORIGINAL file (with import/export intact)
-  // We need to adjust positions because the original file has import lines
-  // at the top that were stripped during assembly.
-  let totalRenames = 0;
-  const fileRenames = new Map<string, number>();
-
-  for (const [secIdx, edits] of editsBySection) {
-    const sec = sections[secIdx];
-    const fullPath = path.join(projectDir, sec.outputPath);
-    const originalCode = fs.readFileSync(fullPath, "utf-8");
-
-    // Calculate the offset added by import/export lines
-    // The stripped code (sec.code) maps 1:1 to positions in the assembled file.
-    // We need to find where sec.code starts within originalCode.
-    const strippedCode = sec.code;
-    const importOffset = findCodeOffset(originalCode, strippedCode);
-
-    // Sort edits in reverse order for safe replacement
-    const sorted = edits.sort((a, b) => b.start - a.start);
-
-    let result = originalCode;
-    for (const edit of sorted) {
-      const adjStart = edit.start + importOffset;
-      const adjEnd = edit.end + importOffset;
-      result =
-        result.slice(0, adjStart) + edit.newText + result.slice(adjEnd);
-    }
-
-    fs.writeFileSync(fullPath, result);
-    fileRenames.set(sec.outputPath, edits.length);
-    totalRenames += edits.length;
-  }
-
-  // Post-pass: update import/export specifiers to match renamed identifiers.
-  // The TS LS works on the assembled file (no imports/exports), so these
-  // lines weren't touched. Update them so IDE intellisense works on split files.
-  console.log("  Updating import/export specifiers...");
-
-  // Build rename map from tasks + detect import alias renames from the TS LS edits.
-  // The TS LS may rename import aliases (e.g., `import { randomUUID as xAA }`)
-  // that weren't in the original task list.
+/** Build the rename map (task renames + TS-LS cascading renames) for the
+    import/export post-pass, from the resolved edits. */
+function buildRenameMap(
+  renameTasks: Array<{ minified: string; original: string }>,
+  assembled: string,
+  allEdits: Edit[],
+): Map<string, string> {
   const renameMap = new Map<string, string>();
-  for (const task of renameTasks) {
-    renameMap.set(task.minified, task.original);
-  }
-  // Also scan edits to find what was renamed — covers TS LS cascading renames
+  for (const task of renameTasks) renameMap.set(task.minified, task.original);
   for (const edit of allEdits) {
     const oldText = assembled.slice(edit.start, edit.end);
     if (oldText !== edit.newText && oldText.match(/^[a-zA-Z_$]/) && !renameMap.has(oldText)) {
       renameMap.set(oldText, edit.newText);
     }
   }
+  return renameMap;
+}
+
+/** Find which section contains an assembled-file offset (binary search). */
+function sectionIndexForOffset(sections: RenameSection[], offset: number): number {
+  let lo = 0, hi = sections.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (sections[mid].start <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * Scope-aware renaming using TS Language Service on a single assembled file.
+ * Concatenates all sections into ONE virtual file so TS understands scope/
+ * shadowing without cross-file module resolution, renames every task, then maps
+ * edits back to the split files.
+ */
+function renameWithLanguageService(
+  projectDir: string,
+  mapping: any,
+  renameTasks: Array<{ minified: string; original: string; declFile: string }>,
+): { totalRenames: number; fileRenames: Map<string, number> } {
+  const engine = buildRenameEngine(projectDir, mapping);
+  const { sections, assembled } = engine;
+
+  // Phase 4: resolve every rename's locations (assembled coordinates).
+  const { allEdits, renamesResolved, renamesSkipped } = runRenameQueries(engine, renameTasks);
+  console.log(
+    `  TS LS: ${renamesResolved} renames resolved (${allEdits.length} locations), ${renamesSkipped} skipped`,
+  );
+
+  // Phase 5: map assembled positions back to sections and apply to split files.
+  const editsBySection = new Map<number, Edit[]>();
+  for (const edit of allEdits) {
+    const idx = sectionIndexForOffset(sections, edit.start);
+    const sec = sections[idx];
+    if (!editsBySection.has(idx)) editsBySection.set(idx, []);
+    editsBySection.get(idx)!.push({
+      start: edit.start - sec.start,
+      end: edit.end - sec.start,
+      newText: edit.newText,
+    });
+  }
+
+  let totalRenames = 0;
+  const fileRenames = new Map<string, number>();
+  for (const [secIdx, edits] of editsBySection) {
+    const sec = sections[secIdx];
+    const fullPath = path.join(projectDir, sec.outputPath);
+    const result = applyEditsToSectionCode(fs.readFileSync(fullPath, "utf-8"), sec, edits);
+    fs.writeFileSync(fullPath, result);
+    fileRenames.set(sec.outputPath, edits.length);
+    totalRenames += edits.length;
+  }
+
+  // Post-pass: update import/export specifiers across all sections.
+  console.log("  Updating import/export specifiers...");
+  const renameMap = buildRenameMap(renameTasks, assembled, allEdits);
   for (const sec of sections) {
     const fullPath = path.join(projectDir, sec.outputPath);
-    let code = fs.readFileSync(fullPath, "utf-8");
-    let changed = false;
-
-    // Update export { minified1, minified2 } → export { original1, original2 }
-    code = code.replace(
-      /^(export\s+\{)([^}]+)(\};?)$/gm,
-      (_match, prefix, names, suffix) => {
-        const updated = names.replace(
-          /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
-          (name: string) => {
-            if (JS_RESERVED.has(name)) return name;
-            const orig = renameMap.get(name);
-            if (orig) { changed = true; return orig; }
-            return name;
-          },
-        );
-        return prefix + updated + suffix;
-      },
-    );
-
-    // Update import { minified } from './...' → import { original }
-    // AND import { x as minified } from "pkg" → import { x as original }
-    code = code.replace(
-      /^(import\s+\{)([^}]+)(\}\s+from\s+['"][^'"]+['"];?)$/gm,
-      (_match, prefix, names, suffix) => {
-        const isRelative = suffix.match(/from\s+['"]\.\.?\//);
-        const updated = names.replace(
-          // For relative imports: rename all identifiers
-          // For bare imports (crypto, fs): only rename the "as ALIAS" part
-          isRelative
-            ? /\b([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g
-            : /\bas\s+([a-zA-Z_$][a-zA-Z0-9_$]*)\b/g,
-          (match: string, name: string) => {
-            if (JS_RESERVED.has(name)) return match;
-            const orig = renameMap.get(name);
-            if (orig) {
-              changed = true;
-              return isRelative ? orig : `as ${orig}`;
-            }
-            return match;
-          },
-        );
-        return prefix + updated + suffix;
-      },
-    );
-
+    const { code, changed } = updateImportExportSpecifiers(fs.readFileSync(fullPath, "utf-8"), renameMap);
     if (changed) fs.writeFileSync(fullPath, code);
   }
 
@@ -850,36 +864,20 @@ function findCodeOffset(original: string, stripped: string): number {
 }
 
 /**
- * Process all matched modules in a deobfuscated project.
- *
- * Two-pass approach:
- *   Pass 1: Discover renames from all matched modules
- *   Pass 2: Apply renames using TS Language Service (scope-aware)
- *
- * Files must have import/export from module-reconstruct.ts before calling this.
+ * Pass 1: discover the rename task set (minified → original) for a project via
+ * constraint/export-map/signature matching + anchor rules, then drop cross-file
+ * collisions. Extracted so the whole-bundle rename and the per-file on-demand
+ * rename use the IDENTICAL task set — a per-file render can never disagree with
+ * the full build about what a name resolves to.
  */
-export function renameProject(
+function discoverRenameTasks(
   projectDir: string,
   sourceRefDir: string,
-  mappingPath: string,
-  dbPath?: string,
-  opts?: { noSourceRef?: boolean },
-): { totalRenames: number; fileRenames: Map<string, number> } {
-  const mapping = JSON.parse(fs.readFileSync(mappingPath, "utf-8"));
-  const noSourceRef = opts?.noSourceRef ?? !!process.env.NO_SOURCE_REF;
-
-  // Load rename DB if provided
-  let db: RenameDB | null = null;
-  if (dbPath && fs.existsSync(dbPath)) {
-    db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
-  }
-
-  // Pass 1: Discover renames via constraint matching + export maps
-  const renameTasks: Array<{
-    minified: string;
-    original: string;
-    declFile: string;
-  }> = [];
+  mapping: any,
+  db: RenameDB | null,
+  noSourceRef: boolean,
+): { filteredTasks: Array<{ minified: string; original: string; declFile: string }>; seenSize: number; collisions: number } {
+  const renameTasks: Array<{ minified: string; original: string; declFile: string }> = [];
   const seen = new Map<string, string>(); // minified → original (dedup)
 
   for (const section of mapping.sections) {
@@ -989,8 +987,102 @@ export function renameProject(
   if (collisions.size > 0) {
     console.log(`  Filtered ${collisions.size} cross-file collisions`);
   }
-
   console.log(`  Discovered ${seen.size} unique renames → ${filteredTasks.length} after collision filter`);
+
+  return { filteredTasks, seenSize: seen.size, collisions: collisions.size };
+}
+
+/**
+ * Per-file on-demand rename. Builds the SAME assembled program as the full
+ * rename (so TS binding/scope is identical), but only runs findRenameLocations
+ * for the names that actually appear in the requested file — typically tens of
+ * names instead of thousands. Returns the file's renamed source WITHOUT touching
+ * any other file on disk.
+ *
+ * Correctness: every rename location that lands inside the target file has, by
+ * definition, the pre-rename minified text at that spot — so that name appears
+ * in the file and is therefore queried. Decl positions and the task set come
+ * from the whole-bundle helpers, so the rendered bytes are identical to what the
+ * full build would write for this file. (Used by the studio's resolved/split
+ * source view and walk-jump to avoid the whole-bundle rebuild.)
+ */
+export function renameSingleFile(
+  projectDir: string,
+  mappingPath: string,
+  targetOutputPath: string,
+  opts?: { noSourceRef?: boolean },
+): { code: string; renames: number } | null {
+  const mapping = JSON.parse(fs.readFileSync(mappingPath, "utf-8"));
+  const noSourceRef = opts?.noSourceRef ?? !!process.env.NO_SOURCE_REF;
+
+  let db: RenameDB | null = null;
+  const { filteredTasks } = discoverRenameTasks(projectDir, "", mapping, db, noSourceRef);
+
+  const engine = buildRenameEngine(projectDir, mapping);
+  const { sections, sectionByPath, assembled } = engine;
+
+  const secIdx = sectionByPath.get(targetOutputPath);
+  if (secIdx === undefined) return null;
+  const target = sections[secIdx];
+  const rangeStart = target.start;
+  const rangeEnd = target.start + target.length;
+
+  const fullPath = path.join(projectDir, targetOutputPath);
+  const originalCode = fs.readFileSync(fullPath, "utf-8");
+
+  // Names that textually appear in the target file — only these can produce a
+  // rename location inside it (body edits) or need rewriting in its import/
+  // export lines. Scan the FULL original file so import-only names are covered.
+  const present = new Set<string>();
+  for (const m of originalCode.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) present.add(m[0]);
+  const tasksForFile = filteredTasks.filter((t) => present.has(t.minified));
+
+  const { allEdits } = runRenameQueries(engine, tasksForFile);
+
+  // Keep only locations inside the target section; convert to local offsets.
+  const localEdits: Edit[] = [];
+  for (const edit of allEdits) {
+    if (edit.start >= rangeStart && edit.start < rangeEnd) {
+      localEdits.push({ start: edit.start - rangeStart, end: edit.end - rangeStart, newText: edit.newText });
+    }
+  }
+
+  let code = applyEditsToSectionCode(originalCode, target, localEdits);
+
+  // Import/export specifier post-pass for this one file (same map source as full).
+  const renameMap = buildRenameMap(tasksForFile, assembled, allEdits);
+  code = updateImportExportSpecifiers(code, renameMap).code;
+
+  return { code, renames: localEdits.length };
+}
+
+/**
+ * Process all matched modules in a deobfuscated project.
+ *
+ * Two-pass approach:
+ *   Pass 1: Discover renames from all matched modules
+ *   Pass 2: Apply renames using TS Language Service (scope-aware)
+ *
+ * Files must have import/export from module-reconstruct.ts before calling this.
+ */
+export function renameProject(
+  projectDir: string,
+  sourceRefDir: string,
+  mappingPath: string,
+  dbPath?: string,
+  opts?: { noSourceRef?: boolean },
+): { totalRenames: number; fileRenames: Map<string, number> } {
+  const mapping = JSON.parse(fs.readFileSync(mappingPath, "utf-8"));
+  const noSourceRef = opts?.noSourceRef ?? !!process.env.NO_SOURCE_REF;
+
+  // Load rename DB if provided
+  let db: RenameDB | null = null;
+  if (dbPath && fs.existsSync(dbPath)) {
+    db = JSON.parse(fs.readFileSync(dbPath, "utf-8"));
+  }
+
+  // Pass 1: Discover the rename task set (shared with the per-file path).
+  const { filteredTasks } = discoverRenameTasks(projectDir, sourceRefDir, mapping, db, noSourceRef);
 
   // Write _renames.json — minified → original per file, for patch authoring
   const renamesByFile: Record<string, Record<string, string>> = {};

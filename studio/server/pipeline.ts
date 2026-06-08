@@ -12,8 +12,8 @@ import { matchModules } from "../../tools-ts/src/matcher";
 import { emitProject } from "../../tools-ts/src/emitter";
 import { reconstructModules } from "../../tools-ts/src/module-reconstruct";
 import { applyAnchorRulesFromRules, applyAnchorScopedRenamesInDir, analyzeFind } from "../../tools-ts/src/anchor-rules";
-import { renameProject } from "../../tools-ts/src/renamer";
-import { prettifyProject } from "../../tools-ts/src/prettify";
+import { renameProject, renameSingleFile } from "../../tools-ts/src/renamer";
+import { prettifyProject, prettifyCode } from "../../tools-ts/src/prettify";
 import {
   SIGNATURES, SPLITTER, CACHE_DIR, ANCHOR_RULES, PATCHES_DIR, versionCliPath, ensureDir,
 } from "./config";
@@ -295,6 +295,105 @@ export async function prepareRenamed(version: string): Promise<RenamedResult> {
 
   renameInflight.set(version, job);
   return job;
+}
+
+// ── Per-file on-demand resolved render ────────────────────────────────────────
+// The studio's source view / walk-jump only need ONE file rendered, not the whole
+// bundle. renameSingleFile builds the same assembled TS program but queries only
+// the names that appear in the requested file (tens, not thousands), so its output
+// is byte-identical to the full build (verified) at a fraction of the cost (~4s vs
+// ~24s host / ~49s docker). Results are cached on disk keyed by the anchor-
+// resolution hash + file, and the heavy assemble/binder work is offloaded to a
+// child process so it never blocks the Socket.IO loop.
+
+function renderedFileCacheRoot(version: string): string {
+  return path.join(availableVersionWorkdir(version), "renamed-files");
+}
+function renderedFileCachePath(version: string, hash: string, file: string): string {
+  return path.join(renderedFileCacheRoot(version), hash, file);
+}
+
+const renderInflight = new Map<string, Promise<string | null>>();
+
+/** Render ONE file's resolved source (rename → prettify → scoped renames),
+    byte-identical to the whole-bundle output for that file. Heavy (assembles the
+    full program) — call from a worker, never on the main loop. Writes the result
+    into the per-file cache (keyed by `hash`) and returns it. */
+export async function runRenderResolvedFileInline(version: string, file: string, hash?: string): Promise<string | null> {
+  const { deobDir } = await runPrepareInline(version);
+  const mappingPath = path.join(deobDir, "_mapping.json");
+  if (!fs.existsSync(path.join(deobDir, file))) return null;
+
+  // 1. Rename just this file (export maps + anchors) — same task set as full build.
+  const r = quiet(() => renameSingleFile(deobDir, mappingPath, file, { noSourceRef: true }));
+  if (!r) return null;
+  // 2. Prettify (per-file, same formatter specs as the full build).
+  let code = r.code;
+  try { code = await prettifyCode(code); } catch {}
+  // 3. Scoped anchor renames: resolve against a temp dir holding just this file
+  //    and let the existing scoped-rename pass edit it (mirrors the whole-build
+  //    applyAnchorScopedRenamesInDir, which only ever edits a rule's own file).
+  const tmp = fs.mkdtempSync(path.join(availableVersionWorkdir(version), "pf-"));
+  try {
+    const dst = path.join(tmp, file);
+    ensureDir(path.dirname(dst));
+    fs.writeFileSync(dst, code);
+    fs.copyFileSync(mappingPath, path.join(tmp, "_mapping.json"));
+    quiet(() => applyAnchorScopedRenamesInDir(tmp, ANCHOR_RULES));
+    code = fs.readFileSync(dst, "utf-8");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  const h = hash ?? (await anchorResolutionHash(version));
+  // Drop stale-hash renders so the per-file cache doesn't grow unbounded.
+  try {
+    const root = renderedFileCacheRoot(version);
+    if (fs.existsSync(root)) for (const d of fs.readdirSync(root)) if (d !== h) fs.rmSync(path.join(root, d), { recursive: true, force: true });
+  } catch {}
+  const out = renderedFileCachePath(version, h, file);
+  ensureDir(path.dirname(out));
+  fs.writeFileSync(out, code);
+  return code;
+}
+
+/** Get ONE file's resolved source. Fast paths: the warm whole-bundle (if its hash
+    matches) or the per-file disk cache. Otherwise offloads a single-file render to
+    a child process. Avoids the whole-bundle rebuild for the common view/jump. */
+export async function prepareRenamedFile(version: string, file: string): Promise<{ content: string | null; cached: boolean; ms: number }> {
+  const start = Date.now();
+  // Fastest: the whole renamed bundle is already fresh for this resolution.
+  if (await renamedHashMatches(version)) {
+    const p = path.join(renamedWorkdir(version), file);
+    return { content: fs.existsSync(p) ? fs.readFileSync(p, "utf-8") : null, cached: true, ms: 0 };
+  }
+  const hash = await anchorResolutionHash(version);
+  const cachePath = renderedFileCachePath(version, hash, file);
+  if (fs.existsSync(cachePath)) {
+    console.log(`[studio] per-file cache hit ${version} ${file}`);
+    return { content: fs.readFileSync(cachePath, "utf-8"), cached: true, ms: 0 };
+  }
+
+  const key = `${version}::${hash}::${file}`;
+  let job = renderInflight.get(key);
+  if (!job) {
+    job = (async () => {
+      console.log(`[studio] per-file render ${version} ${file} (offload)`);
+      const workerPath = path.join(import.meta.dir, "rename-file-worker.ts");
+      const proc = Bun.spawn({ cmd: ["bun", workerPath, version, file, hash], stdout: "pipe", stderr: "pipe" });
+      const exit = await proc.exited;
+      if (exit !== 0) {
+        const err = await new Response(proc.stderr).text();
+        throw new Error(`render ${version}:${file} failed: ${err.trim().slice(0, 500)}`);
+      }
+      return fs.existsSync(cachePath) ? fs.readFileSync(cachePath, "utf-8") : null;
+    })().finally(() => renderInflight.delete(key));
+    renderInflight.set(key, job);
+  }
+  const content = await job;
+  const ms = Date.now() - start;
+  console.log(`[studio] per-file render done ${version} ${file} ${(ms / 1000).toFixed(1)}s (${content?.length ?? 0}b)`);
+  return { content, cached: false, ms };
 }
 
 export interface PatchTestResult {

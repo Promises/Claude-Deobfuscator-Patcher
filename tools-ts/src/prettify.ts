@@ -23,6 +23,16 @@ function spaceFunctions(code: string): string {
     return code.replace(/^(})\n(?!\n)((?:async\s+)?function[\s(*]|class[\s{])/gm, '$1\n\n$2');
 }
 
+/**
+ * Format a single file's code exactly as prettifyProject does (prettier with the
+ * project's formatter specs, then the blank-line spacer). Shared so the studio's
+ * per-file resolved render produces byte-identical output to the full build.
+ */
+export async function prettifyCode(code: string): Promise<string> {
+    const prettied = await prettier.format(code, FORMATTER_SPECS);
+    return spaceFunctions(prettied);
+}
+
 export async function prettifyProject(projectDir: string): Promise<void> {
     const mappingPath = path.join(projectDir, '_mapping.json');
     const mapping = JSON.parse(fs.readFileSync(mappingPath, 'utf-8'));
@@ -38,9 +48,7 @@ export async function prettifyProject(projectDir: string): Promise<void> {
         if (!code.trim()) continue;
 
         try {
-            const prettied = await prettier.format(code, FORMATTER_SPECS);
-            const spaced = spaceFunctions(prettied);
-            fs.writeFileSync(fullPath, spaced);
+            fs.writeFileSync(fullPath, await prettifyCode(code));
             formatted++;
         } catch {
             // Some files may not parse (preamble edge cases) — skip silently
