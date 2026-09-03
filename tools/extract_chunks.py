@@ -67,15 +67,38 @@ WHY THE MODULE GRAPH IS RESOLVED BY SYMBOLS, NOT BY FILENAME
   them anywhere — so no symbol-bearing reference exists to intersect. Those 5 are
   genuinely irreducible under this method and are listed by name at retarget time.
 
-  MEASURED AND REJECTED — the bunfs path table as an alternative key. The task of
-  zipping the table against body order fails because the two are uncorrelated:
-  taking each resolved specifier's FIRST occurrence outside any chunk body and
-  sorting by that offset yields a chunk-index sequence whose adjacent pairs are
-  increasing 528/875 = 60.3% of the time, against 49.8% for a shuffled control
-  and the ~100% a real correlation would give. Every one of the 107,806 name
-  occurrences in the binary is a full `/$bunfs/root/…` path (zero bare names), so
-  there is no separate ordered module table to read — what looks like one is a
-  string interning pool scattered across the bytecode blobs.
+  ⛔ RETRACTED — "MEASURED AND REJECTED: the bunfs path table as an alternative
+  key". That verdict was WRONG, it stood here as settled fact, and it very nearly
+  cost the whole chunked port. Read the retraction before trusting any other
+  "rejected" note in this file.
+
+  What it said: zipping the table against body order fails because the two are
+  uncorrelated — each resolved specifier's first occurrence outside a chunk body,
+  sorted by offset, gives a chunk-index sequence increasing 528/875 = 60.3% of
+  adjacent pairs, against 49.8% for a shuffled control. Those numbers are real
+  and reproducible.
+
+  Why it was wrong: THEY MEASURE THE WRONG BYTES. "First occurrence outside a
+  body" lands in the BYTECODE STRING-INTERNING POOLS at ~70/77 MB, which are
+  scattered by construction and so genuinely score ~60%. The real module table is
+  a single 109,643-byte run of NUL-terminated `/$bunfs/root/` strings at offset
+  199,408,182 — found STRUCTURALLY (exactly one run of >=20 such strings
+  qualifies), not by a heuristic over every occurrence. Against it: 875/875 =
+  100.0% adjacent-increasing on the independently symbol-pinned specifiers, and
+  1642 names vs 1649 bodies with exactly 7 non-uniform steps summing to exactly 7
+  — every gap closed, interpolation forced, 0 ambiguous.
+
+  ⚠️ THE LESSON, because this file is where the next person will look: a control
+  that fires (49.8% shuffled vs 60.3% real) proves the STATISTIC discriminates.
+  It says nothing about whether the sample is the right sample. Both this note
+  and a later independent re-test (voting 99 .zst entries against 141 zstd
+  frames, best base agreeing 2/99) were confidently wrong the same way, and the
+  agreement between two wrong measurements read as confirmation.
+
+  Injectivity is what finally adjudicated: the table map is injective (0 of 1642
+  double-claimed) while the symbol-derived map is not (4 indices claimed 2-3x,
+  which is impossible), and all 6 disagreements sit on exactly those over-claimed
+  indices. Prefer a structural invariant over a correlation score.
 
 Usage:
   extract_chunks.py <claude-binary> <out-dir> [--manifest manifest.json]
@@ -85,6 +108,7 @@ Usage:
   (NNNN_<module_name>.js + _manifest.json), so build.sh step 2 and everything
   after it consume a chunked build unchanged. See emit_splitter_compat().
 """
+import bisect
 import json
 import os
 import re
@@ -102,6 +126,9 @@ SIDE_EFFECT_IMPORT_RE = re.compile(
     r'import\s*["\'](/\$bunfs/root/chunk-[a-z0-9]+\.js)["\']'
 )
 EXPORT_RE = re.compile(r"export\s*\{([^}]*)\}\s*;?\s*$")
+# The same clause NOT anchored to end of text — used only to recover chunks whose
+# named export is followed by an `export default`. See the owner map in extract().
+ANY_EXPORT_RE = re.compile(r"export\s*\{([^}]*)\}")
 
 # Shared by destructured_names() and module_names().
 IDENT_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
@@ -207,6 +234,214 @@ def is_chunked(binary_path):
     """True if this binary is a 2.1.242+ chunked build (no monolithic bundle)."""
     with open(binary_path, "rb") as fh:
         return fh.read().find(MONOLITHIC_MARKER) == -1
+
+
+# ---------------------------------------------------------------------------
+# THE BUNFS MODULE TABLE — the direct specifier -> chunk-index key.
+#
+# 🔴 THIS SUPERSEDES THE DOCSTRING'S "MEASURED AND REJECTED" VERDICT ON THE PATH
+# TABLE. That rejection was real but it measured the WRONG BYTES. It took "each
+# resolved specifier's FIRST occurrence outside any chunk body" — which lands in
+# the bytecode STRING-INTERNING POOLS (measured: dense clusters at ~69.9 MB and
+# ~77.5 MB, where bunfs paths sit interleaved with unrelated literals like
+# "getNativeModule" and "claude_code_github_action") — and correctly found that
+# pool order carries no module order: 60.3% adjacent-increasing against a 49.8%
+# shuffled control.
+#
+# There IS a real table, and it is somewhere else: ONE contiguous run of
+# NUL-terminated /$bunfs/root/ strings, 109,643 bytes at offset 199,408,182 on
+# 2.1.259. It is found by structure, not by a hardcoded offset — the run regex
+# below requires >=20 consecutive entries, and MEASURED on 2.1.259 exactly ONE
+# run in the whole binary qualifies, so there is nothing to choose between.
+#
+# MEASURED on 2.1.259, and this is the check that makes it usable rather than
+# plausible: the table's first-occurrence order for chunk-*.js names is an exact
+# ORDER-ISOMORPHISM onto body order. Against the 876 specifiers independently
+# pinned by symbol intersection, adjacent pairs are increasing 875/875 = 100.0%
+# (the rejected pool scored 60.3%). The table holds 1642 distinct chunk names to
+# 1649 bodies, and the alignment has exactly 7 non-uniform steps summing to
+# exactly 7 — the 7 bodies (5, 8, 10, 12, 14, 16, 23) that carry no VFS path
+# because bun never gave them one. So every gap is closed and interpolation is
+# forced, not fitted: all 1642 names map, ZERO ambiguous.
+#
+# WHY IT MATTERS: symbol intersection can only see a chunk that EXPORTS NAMED
+# SYMBOLS. A chunk whose only export is `export default` contributes nothing to
+# any owner set and can never be the result of an intersection — measured, 27 of
+# 1649 chunks on 2.1.259 — and the consumers that crashed the rebuild read
+# exactly `.default`. The table does not care what a chunk exports.
+#
+# 🔴 IT IS ALSO MORE CORRECT THAN THE SYMBOL METHOD, NOT MERELY WIDER. A
+# specifier names one chunk, so the map MUST be injective. MEASURED on 2.1.259:
+# the table map is injective (0 indices claimed twice of 1642), while the
+# symbol-derived dynamic table is NOT — 4 indices are claimed by 2-3 specifiers
+# each, which is impossible. The two tables disagree on 6 of their 505 shared
+# specifiers, and all 6 sit on exactly those over-claimed indices; the table
+# assigns each collision's members to distinct chunks whose bodies match the
+# consumers. So on every observed conflict the table is right and the
+# intersection over-claimed, which is why check_table_agrees_with_symbols()
+# below treats a disagreement outside that pattern as fatal rather than
+# tie-breaking silently.
+# ---------------------------------------------------------------------------
+BUNFS_TABLE_RUN_RE = re.compile(rb"(?:/\$bunfs/root/[!-~]{1,120}\x00){20,}")
+BUNFS_CHUNK_NAME_RE = re.compile(r"^/\$bunfs/root/chunk-[a-z0-9]+\.js$")
+
+
+def bunfs_table_order(data):
+    """The chunk-*.js specifiers in bunfs module-table order, deduplicated.
+
+    Returns [] when no table is found, which is a legitimate outcome for a build
+    whose packaging changed — callers fall back to symbol intersection alone
+    rather than failing, because that is what produced every working build so
+    far.
+
+    The table lists most names TWICE (a `chunk-x.js` / `chunk-x.js` pair per
+    entry on 2.1.259) and also carries non-chunk paths (`/$bunfs/root/cli`,
+    `*.node`, `*.md`). First-occurrence order over the chunk-*.js subset is what
+    aligns with body order; dict.fromkeys preserves it.
+    """
+    runs = BUNFS_TABLE_RUN_RE.findall(data)
+    if not runs:
+        return []
+    # The module table is the single large run; interning-pool fragments are
+    # short and interleaved with non-path literals, so they cannot form a run of
+    # >=20 consecutive bunfs paths. Taking the longest is a tiebreak that has
+    # never had to fire (measured: exactly one qualifying run on 2.1.259).
+    blob = max(runs, key=len)
+    names = []
+    for raw in blob.split(b"\x00"):
+        if not raw:
+            continue
+        try:
+            s = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if BUNFS_CHUNK_NAME_RE.match(s):
+            names.append(s)
+    return list(dict.fromkeys(names))
+
+
+def bunfs_specifier_map(data, anchors, total_bodies=None):
+    """specifier -> chunk index, from the bunfs table aligned by `anchors`.
+
+    `anchors` is {specifier: index} already pinned by symbol intersection. They
+    are what ties table POSITION to body INDEX: the table gives a total order but
+    no absolute numbering, so without at least one anchor it says nothing.
+
+    Between two anchors whose table gap and body gap are EQUAL, every name in
+    between is forced and is filled in. Where the gaps differ, unnamed bodies sit
+    in the interval and the assignment is NOT determined — those names are left
+    out rather than guessed, which is the same refusal the rest of this file
+    makes for an ambiguous intersection.
+
+    Returns ({}, reason) when the table cannot be used at all.
+    """
+    order = bunfs_table_order(data)
+    if not order:
+        return {}, "no bunfs module table found"
+    pos = {spec: i for i, spec in enumerate(order)}
+    pairs = sorted((pos[s], idx) for s, idx in anchors.items() if s in pos)
+    if len(pairs) < 2:
+        return {}, f"only {len(pairs)} anchors land in the table"
+
+    # The table is only usable if its order AGREES with body order on the
+    # anchors. A single inversion means the two are not the same sequence and
+    # every interpolation below would be fiction.
+    inversions = sum(1 for a, b in zip(pairs, pairs[1:]) if b[1] <= a[1])
+    if inversions:
+        return {}, (
+            f"table order is not monotonic in body order "
+            f"({inversions} inversions over {len(pairs)} anchors)"
+        )
+
+    table_pos = [p for p, _ in pairs]
+    body_idx = [b for _, b in pairs]
+    out = {}
+    for k, spec in enumerate(order):
+        j = bisect.bisect_left(table_pos, k)
+        if j < len(table_pos) and table_pos[j] == k:
+            out[spec] = body_idx[j]
+            continue
+        if j == 0:
+            # Before the first anchor there is no lower bound, so an unnamed body
+            # out there would shift every name silently. Skipped, not guessed.
+            continue
+        if j == len(table_pos):
+            # AFTER the last anchor there normally is no bound either — except
+            # when the counts leave no slack. If the names remaining after the
+            # last anchor exactly equal the bodies remaining after it, every one
+            # of those bodies must be named and the assignment is FORCED, not
+            # fitted: one unnamed body in the tail would make the two counts
+            # differ, so this is a real arithmetic constraint rather than an
+            # assumption that the tail is dense.
+            #
+            # MEASURED on 2.1.259: last anchor is table 1616 -> body 1623,
+            # leaving 25 names and 25 bodies. The forced assignment is then
+            # cross-checked against evidence the table did not supply — 17 of
+            # those 25 specifiers were independently resolved by dynamic symbol
+            # intersection, and all 17 AGREE with the forced tail, 0 conflicts.
+            # (Without this branch those 4 stragglers stay unresolved: measured
+            # 753/757 dynamic specifiers instead of 757/757.)
+            if total_bodies is None:
+                continue
+            last_p, last_b = table_pos[-1], body_idx[-1]
+            if (len(order) - 1 - last_p) != (total_bodies - 1 - last_b):
+                continue
+            out[spec] = last_b + (k - last_p)
+            continue
+        lo_p, lo_b = table_pos[j - 1], body_idx[j - 1]
+        hi_p, hi_b = table_pos[j], body_idx[j]
+        if hi_p - lo_p == hi_b - lo_b:
+            out[spec] = lo_b + (k - lo_p)
+    return out, None
+
+
+def check_table_map(table_map, symbol_map, label, exempt=()):
+    """Fail loudly if the table map is not injective or contradicts `symbol_map`.
+
+    Two properties are asserted, and they are different checks:
+
+    INJECTIVITY is a property of the table alone. A specifier is a content-hashed
+    filename naming ONE chunk, so two specifiers mapping to one index means the
+    alignment slipped. Measured on 2.1.259 the table map is injective and the
+    symbol-derived dynamic map is not, which is the evidence that the table is
+    the better key rather than merely the wider one.
+
+    AGREEMENT is checked only where the symbol method itself is trustworthy —
+    against indices it claims EXACTLY ONCE. Where symbol intersection
+    over-claimed an index (measured: 4 indices, 2-3 claimants each), it is known
+    wrong by the injectivity argument above, so counting those as disagreements
+    would reject the correct table on the strength of the broken one.
+    """
+    dupes = defaultdict(list)
+    for spec, idx in table_map.items():
+        dupes[idx].append(spec)
+    collided = {i: s for i, s in dupes.items() if len(s) > 1}
+    if collided:
+        sample = list(collided.items())[:3]
+        raise SystemExit(
+            f"bunfs table map is not injective ({len(collided)} chunk indices "
+            f"claimed by more than one specifier, e.g. {sample}). The table's "
+            f"order no longer aligns with body order; refusing to build on it."
+        )
+
+    sym_claims = defaultdict(list)
+    for spec, idx in symbol_map.items():
+        sym_claims[idx].append(spec)
+    disagree = [
+        (spec, symbol_map[spec], table_map[spec])
+        for spec in symbol_map
+        if spec in table_map
+        and symbol_map[spec] != table_map[spec]
+        and len(sym_claims[symbol_map[spec]]) == 1
+        and spec not in exempt
+    ]
+    if disagree:
+        raise SystemExit(
+            f"bunfs table disagrees with {len(disagree)} unambiguous {label} "
+            f"symbol resolutions, e.g. {disagree[:5]}. Two independent methods "
+            f"contradicting each other means one is wrong; refusing to guess."
+        )
+    return len(collided)
 
 
 def body_end(data, start):
@@ -493,6 +728,9 @@ def resolve_dynamic(chunks, owner):
         "ambiguous": 0,
         "empty": 0,
         "facade_tiebreak": 0,
+        # Specifiers whose index was chosen ARBITRARILY among value-equivalent
+        # candidates. Not evidence of identity — see the facade_tiebreak branch.
+        "tiebroken": set(),
     }
     for spec, sets in candidates.items():
         inter = None
@@ -505,10 +743,23 @@ def resolve_dynamic(chunks, owner):
         elif len(inter) == 1:
             resolved[spec] = next(iter(inter))
         elif equivalent_reexporters(chunks, inter, needed_syms[spec]):
-            # Not a guess: every surviving candidate was shown to hand back the
-            # SAME binding, from the same chunk, for every symbol any site
-            # actually reads off this specifier. See equivalent_reexporters.
+            # Not a guess about the VALUE: every surviving candidate was shown to
+            # hand back the SAME binding, from the same chunk, for every symbol
+            # any site reads off this specifier. See equivalent_reexporters.
+            #
+            # ⚠️ But it IS a guess about the IDENTITY. `min(inter)` picks the
+            # lowest-numbered candidate, which is arbitrary — the claim proved is
+            # only that the candidates are interchangeable for `syms`, not that
+            # this one is the chunk the specifier names. So these are recorded in
+            # `tiebroken` and EXEMPTED from the bunfs-table agreement check:
+            # counting an arbitrary pick as an unambiguous resolution would let
+            # it veto the table. MEASURED on 2.1.259, chunk-yb117e5b.js is
+            # exactly this case — tiebroken to 827 (a 3,692-byte module) while
+            # the table says 948, a 124-byte facade exporting precisely the one
+            # symbol every site reads. The table is right and the tiebreak was
+            # arbitrary, which is why it must not be treated as evidence.
             stats["facade_tiebreak"] += 1
+            stats["tiebroken"].add(spec)
             resolved[spec] = min(inter)
         else:
             stats["ambiguous"] += 1
@@ -539,11 +790,24 @@ def extract(binary_path):
         chunks.append({"offset": s, "text": text})
 
     # Ownership map: exported symbol -> set of chunk indices.
+    #
+    # EXPORT_RE is anchored to END OF TEXT, so it sees a named export clause only
+    # when nothing follows it. MEASURED on 2.1.259 that loses 2 chunks (1313,
+    # 1439) whose `export{...}` is followed by an `export default`, e.g.
+    #   ...;export{E as EventStreamSerde};export default {get EventStreamSerde(){…}};
+    # Their symbols were absent from every owner set, so no import naming them
+    # could resolve. ANY_EXPORT_RE is the same clause without the anchor, and the
+    # two are unioned rather than swapped: the anchored form is what the rest of
+    # this file (symbol_origin, module_names) agrees with for the ordinary case.
     owner = defaultdict(set)
     for idx, c in enumerate(chunks):
         m = EXPORT_RE.search(c["text"].rstrip())
         c["exports"] = local_names(m.group(1)) if m else []
-        for sym in c["exports"]:
+        extra = []
+        if not m:
+            for clause in ANY_EXPORT_RE.findall(c["text"]):
+                extra.extend(local_names(clause))
+        for sym in c["exports"] + extra:
             owner[sym].add(idx)
 
     # Resolve every import to a chunk index by intersecting owner sets.
@@ -598,9 +862,89 @@ def extract(binary_path):
                 missing.add(spec)
     stats["side_effect_unresolved_specs"] = len(missing)
 
+    # THE BUNFS MODULE TABLE. Built from the specifiers symbol intersection
+    # already pinned (they anchor table position to body index) and then used to
+    # resolve every OTHER specifier the table names — including the ones symbol
+    # intersection is structurally blind to, i.e. chunks whose only export is
+    # `export default`. See bunfs_specifier_map().
+    static_map = {}
+    for c in chunks:
+        for imp in c["imports"]:
+            if imp["target"] is not None:
+                static_map[imp["path"]] = imp["target"]
+    table_map, table_reason = bunfs_specifier_map(
+        data, static_map, total_bodies=len(chunks)
+    )
+    stats["table_specs"] = len(table_map)
+    stats["table_reason"] = table_reason
+
     # Dynamic (lazy) edges, resolved on their OWN symbol evidence — the static
     # table cannot help, since the two specifier populations are disjoint.
     dynamic, dyn_stats = resolve_dynamic(chunks, owner)
+
+    # Cross-check BEFORE anything consumes the table: injective, and consistent
+    # with every symbol resolution the symbol method itself claims unambiguously.
+    if table_map:
+        check_table_map(table_map, static_map, "static")
+        check_table_map(
+            table_map, dynamic, "dynamic", exempt=dyn_stats["tiebroken"]
+        )
+
+    # The table is authoritative where the two differ, but only in the exact
+    # place that was ADJUDICATED: an index the symbol method claimed more than
+    # once cannot be right for every claimant, and check_table_map has already
+    # made any other kind of disagreement fatal.
+    stats["dyn_corrected"] = 0
+    stats["dyn_added"] = 0
+    dyn_named = set()
+    for c in chunks:
+        dyn_named.update(DYN_SITE_RE.findall(c["text"]))
+    for spec, idx in table_map.items():
+        if spec in dynamic:
+            if dynamic[spec] != idx:
+                dynamic[spec] = idx
+                stats["dyn_corrected"] += 1
+        elif spec in dyn_named:
+            # A dynamic specifier the symbol method never reached — typically a
+            # default-only chunk (no named exports to intersect) or a site that
+            # names no symbols. The table knows it regardless of what it exports.
+            dynamic[spec] = idx
+            stats["dyn_added"] += 1
+
+    # The static side-effect residue: specifiers named ONLY by bare
+    # `import"/$bunfs/…"`, which module-reconstruct.ts otherwise DROPS, silently
+    # losing that module's load-time side effect. They are unreachable by symbol
+    # intersection by construction (a bare import names no symbols) but the table
+    # names them like any other. Written onto the import records so the existing
+    # bundle-wide specifier table in retargetChunkImports() picks them up with no
+    # change to that consumer.
+    stats["side_effect_recovered"] = 0
+    recovered_specs = set()
+    for c in chunks:
+        have = {imp["path"] for imp in c["imports"]}
+        for spec in SIDE_EFFECT_IMPORT_RE.findall(c["text"]):
+            if spec in resolved_specs or spec in have:
+                continue
+            idx = table_map.get(spec)
+            if idx is None:
+                continue
+            c["imports"].append({"path": spec, "clause": "", "target": idx})
+            have.add(spec)
+            recovered_specs.add(spec)
+            stats["side_effect_recovered"] += 1
+    # Re-score the side-effect residue AFTER recovery, so the printed coverage is
+    # what step 2.5 will actually reach rather than the pre-table figure.
+    if recovered_specs:
+        resolved_specs |= recovered_specs
+        stats["side_effect_unresolved"] = 0
+        still_missing = set()
+        for c in chunks:
+            for spec in SIDE_EFFECT_IMPORT_RE.findall(c["text"]):
+                if spec not in resolved_specs:
+                    stats["side_effect_unresolved"] += 1
+                    still_missing.add(spec)
+        stats["side_effect_unresolved_specs"] = len(still_missing)
+
     stats["dyn_sites"] = 0
     for c in chunks:
         stats["dyn_sites"] += len(DYN_SITE_RE.findall(c["text"]))
@@ -811,6 +1155,18 @@ def main():
 
     print(f"  chunks written : {len(chunks)}")
     print(f"  total source   : {total:,} bytes")
+    # The bunfs module table, reported on its OWN line and with its own
+    # denominator, because it is a different key from symbol intersection and a
+    # reader must be able to see which one carried the graph.
+    if stats.get("table_reason"):
+        print(f"  bunfs table    : UNUSED — {stats['table_reason']}")
+    else:
+        print(
+            f"  bunfs table    : {stats['table_specs']}/{len(chunks)} specifiers"
+            f" pinned by module-table order"
+            f"  (dyn +{stats['dyn_added']} added, {stats['dyn_corrected']} corrected;"
+            f" side-effect +{stats['side_effect_recovered']} sites recovered)"
+        )
     # Report the TRUE denominator. Printing only "resolved/clause-imports" reads
     # as full coverage — it was reported as "100% of imports" once, when it was
     # 13.3%. Side-effect imports are shown on the same line so the two numbers

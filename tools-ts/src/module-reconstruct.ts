@@ -715,6 +715,211 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
   const missingSpecs = new Set<string>();
   let assetGuarded = 0;
   const assetGuardedSpecs = new Set<string>();
+  let cycleGuarded = 0;
+  const cycleGuardedSpecs = new Set<string>();
+
+  /**
+   * Is the site at `offset` inside a function/block body rather than at module
+   * scope? Answered by brace depth, which is what decides whether keeping the
+   * call form actually defers anything.
+   *
+   * Strings, template literals, comments and REGEX LITERALS are all skipped,
+   * because a brace inside any of them is not a block. That matters here: the
+   * tree is prettified but still full of minified data, and one unbalanced `{`
+   * in a literal shifts the depth for the whole rest of the file and flips every
+   * later decision — the guard would then either fire on module scope (the
+   * failure this test exists to prevent) or stop firing on nested sites.
+   *
+   * 🔴 THE REGEX CASE IS NOT THEORETICAL — it was the bug. Without it, the `/*`
+   * inside `n.replace(/\/*$/, '')` in entrypoints/sdk/coreSchemas.js reads as a
+   * BLOCK-COMMENT OPEN, swallowing ~780 KB up to the next `*​/` and leaving the
+   * depth permanently wrong. MEASURED: the module-scope site at offset 1,040,481
+   * in that file scored depth 2 instead of 0, so it was treated as nested,
+   * stayed a call, and the binary died with `Cannot find module
+   * '../../_unmatched/0557_AGENT_VIEW_RELAUNCH_ENV_KEY.js'`.
+   *
+   * A `/` is a regex only where a value cannot precede it; that is decided by
+   * the last significant character, which is the standard disambiguation and is
+   * exercised by the division cases in the unit test.
+   */
+  function isNestedSite(code: string, offset: number): boolean {
+    let depth = 0;
+    let i = 0;
+    let prev = "";
+    while (i < offset) {
+      const ch = code[i];
+      if (ch === "/" && code[i + 1] === "/") {
+        const nl = code.indexOf("\n", i);
+        i = nl === -1 ? offset : nl + 1;
+        continue;
+      }
+      if (ch === "/" && code[i + 1] === "*") {
+        const end = code.indexOf("*/", i + 2);
+        i = end === -1 ? offset : end + 2;
+        continue;
+      }
+      if (ch === "/" && regexAllowedAfter(prev)) {
+        // Regex literal: scan to the unescaped closing slash, honouring
+        // character classes (a `/` inside `[...]` does not end the literal).
+        i++;
+        let inClass = false;
+        while (i < offset) {
+          const c = code[i];
+          if (c === "\\") {
+            i += 2;
+            continue;
+          }
+          if (c === "[") inClass = true;
+          else if (c === "]") inClass = false;
+          else if (c === "/" && !inClass) break;
+          else if (c === "\n") break; // unterminated — not a regex after all
+          i++;
+        }
+        i++;
+        prev = "/";
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < offset && code[i] !== quote) {
+          if (code[i] === "\\") i++;
+          i++;
+        }
+        i++;
+        prev = quote;
+        continue;
+      }
+      if (ch === "`") {
+        // 🔴 A TEMPLATE LITERAL IS NOT AN OPAQUE STRING — it nests code.
+        // Skipping to the next backtick treats the `}` of every `${…}` as a
+        // block close, which drives the depth NEGATIVE and silently disables the
+        // `depth > 0` test for the rest of the file. MEASURED on 2.1.259: in
+        // services/compact/precomputedCompact.js the first `` `<${j}>` `` at
+        // offset 2,237,206 takes depth below zero, and all three
+        // pathValidation sites then score -9/-14/-15 instead of a positive
+        // depth — so the cycle guard did not fire, the edge was hoisted, and the
+        // binary died again on the SAME `Object.entries(a3)` TDZ read.
+        //
+        // Interpolations are therefore SKIPPED as balanced regions, so braces
+        // inside them cancel out and the outer depth is untouched.
+        i++;
+        while (i < offset && code[i] !== "`") {
+          if (code[i] === "\\") {
+            i += 2;
+            continue;
+          }
+          if (code[i] === "$" && code[i + 1] === "{") {
+            let nest = 1;
+            i += 2;
+            while (i < offset && nest > 0) {
+              if (code[i] === "\\") {
+                i += 2;
+                continue;
+              }
+              if (code[i] === "{") nest++;
+              else if (code[i] === "}") nest--;
+              i++;
+            }
+            continue;
+          }
+          i++;
+        }
+        i++;
+        prev = "`";
+        continue;
+      }
+      if (ch === "{") depth++;
+      else if (ch === "}") depth--;
+      if (!/\s/.test(ch)) prev = ch;
+      i++;
+    }
+    return depth > 0;
+  }
+
+  /**
+   * Can a regex literal start after this significant character?
+   *
+   * `/` is division after a value (identifier, literal, `)`, `]`) and a regex
+   * after an operator, `(`, `,`, `{`, `}`, `;`, `:` or `=`. Closers are the
+   * discriminating cases: `a / b` must NOT be read as a regex, or the scan
+   * swallows real code.
+   */
+  function regexAllowedAfter(prev: string): boolean {
+    if (prev === "") return true;
+    if (/[)\]}]/.test(prev)) return false;
+    return !/[A-Za-z0-9_$"'`]/.test(prev);
+  }
+
+  /**
+   * Static-import adjacency over the emitted tree, for the cycle guard below.
+   *
+   * Only STATIC relative imports are edges. An `import.meta.require` call is
+   * deliberately excluded: it is precisely the lazy edge this pass is deciding
+   * whether to make eager, so counting it would make every candidate look like
+   * it already closed the loop and the guard would refuse everything.
+   */
+  const staticDeps = new Map<string, Set<string>>();
+  function staticImportsOf(absPath: string): Set<string> {
+    let deps = staticDeps.get(absPath);
+    if (deps) return deps;
+    deps = new Set<string>();
+    staticDeps.set(absPath, deps);
+    let text: string;
+    try {
+      text = fs.readFileSync(absPath, "utf-8");
+    } catch {
+      return deps;
+    }
+    const dir = path.dirname(absPath);
+    const re = /\bfrom\s*['"](\.[^'"]*)['"]|\bimport\s*['"](\.[^'"]*)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      const spec = m[1] ?? m[2];
+      if (spec) deps.add(path.resolve(dir, spec));
+    }
+    return deps;
+  }
+
+  /**
+   * Would making `from -> to` a static import create an import CYCLE?
+   *
+   * 🔴 THIS GUARD EXISTS BECAUSE ITS ABSENCE WAS MEASURED, exactly as the
+   * eager-ing hazard in this function's docstring predicted it would be.
+   * Hoisting `import.meta.require('../../tools/PowerShellTool/pathValidation.js')`
+   * inside `services/compact/precomputedCompact.js` created the cycle
+   *   precomputedCompact -> pathValidation -> readOnlyValidation -> precomputedCompact
+   * and `readOnlyValidation.js` evaluates a MODULE-SCOPE IIFE that calls
+   * `De(e)`, which reads `a3` — a binding owned by precomputedCompact that is
+   * still in its temporal dead zone when the cycle is entered. The rebuilt
+   * binary died on the first real turn with
+   *   TypeError: Object.entries requires that input parameter not be null or undefined
+   * That IIFE is faithful to upstream (verified in the raw chunk); upstream
+   * simply never has the cycle, because the edge stays LAZY there.
+   *
+   * Leaving the site as a call is the STATUS QUO for it, not a regression — the
+   * same reasoning the embedded-asset guard above uses.
+   *
+   * A path that cannot be read contributes no edges, so an unreadable module
+   * cannot hide a cycle behind itself; that errs toward hoisting, which is why
+   * this guard is a complement to the asset guard rather than a replacement.
+   */
+  function wouldCycle(fromAbs: string, toAbs: string): boolean {
+    if (fromAbs === toAbs) return true;
+    const seen = new Set<string>([toAbs]);
+    const stack = [toAbs];
+    while (stack.length) {
+      const cur = stack.pop() as string;
+      for (const dep of staticImportsOf(cur)) {
+        if (dep === fromAbs) return true;
+        if (!seen.has(dep)) {
+          seen.add(dep);
+          stack.push(dep);
+        }
+      }
+    }
+    return false;
+  }
 
   // Memo for loadsEmbeddedAsset, keyed by absolute path. The walk below is
   // transitive and the graph has ~1650 nodes with heavy sharing, so without
@@ -826,7 +1031,7 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
     RELATIVE_META_REQUIRE_RE.lastIndex = 0;
     const rewritten = code.replace(
       RELATIVE_META_REQUIRE_RE,
-      (whole, spec: string) => {
+      (whole, spec: string, offset: number) => {
         // The specifier must name a file that actually exists, resolved the
         // same way the runtime would have. If it does not, converting the call
         // into a static import turns a runtime failure on one path into a
@@ -845,6 +1050,32 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
         if (loadsEmbeddedAsset(targetAbs)) {
           assetGuarded++;
           assetGuardedSpecs.add(spec);
+          return whole;
+        }
+        // Hoisting this edge would close an import cycle and expose a
+        // temporal-dead-zone read at module-evaluation time. See wouldCycle().
+        //
+        // ⚠️ ONLY WORTH GUARDING WHEN THE SITE IS ACTUALLY LAZY. The guard's
+        // whole value is that keeping the call form defers evaluation — which
+        // is true for a call inside a function, and FALSE for one in a
+        // module-scope `var` initialiser, since that runs at load either way.
+        // Worse than useless there: `import.meta.require` with a RELATIVE
+        // specifier does not resolve inside a compiled single-file binary, so
+        // the guarded site fails harder than the hoisted one would.
+        // MEASURED on 2.1.259 — guarding without this depth test left
+        //   var Mue = import.meta.require('../../_unmatched/0557_AGENT_VIEW_…')
+        // a call in entrypoints/sdk/coreSchemas.js and the binary died at
+        // startup with `Cannot find module '../../_unmatched/0557_…'`.
+        // That site is safe to hoist despite its cycle: `Mue` is read only
+        // inside a function body, and through `?.`, so the cycle-time value
+        // being undefined cannot throw.
+        // Measured split of the 31 candidate sites: 30 nested, 1 module-scope.
+        if (
+          isNestedSite(code, offset) &&
+          wouldCycle(path.join(projectDir, section.output_path), targetAbs)
+        ) {
+          cycleGuarded++;
+          cycleGuardedSpecs.add(spec);
           return whole;
         }
         let ns = specToNs.get(spec);
@@ -875,6 +1106,13 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
         .join("\n") + "\n";
     fs.writeFileSync(fullPath, header + rewritten);
     filesRewritten++;
+    // The edges just added are real static imports now, so a LATER file's cycle
+    // check must see them. Without this the guard would be evaluated against a
+    // stale graph and could hoist an edge that closes a loop through one of
+    // these — the cache is an optimisation, not a snapshot of the input tree.
+    const selfAbs = path.join(projectDir, section.output_path);
+    const deps = staticImportsOf(selfAbs);
+    for (const spec of specToNs.keys()) deps.add(path.resolve(fileDir, spec));
   }
 
   console.log(
@@ -888,6 +1126,15 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
     console.log(
       `  ⚠️  ${assetGuarded} sites left as calls (${assetGuardedSpecs.size} distinct ` +
         `specifiers) — hoisting them would eagerly load an embedded /$bunfs asset`,
+    );
+  }
+  if (cycleGuarded > 0) {
+    // Reported for the same reason as the asset guard: these sites still throw
+    // if their path runs, and a jump in this count between versions means the
+    // module graph's cycle structure moved.
+    console.log(
+      `  ⚠️  ${cycleGuarded} sites left as calls (${cycleGuardedSpecs.size} distinct ` +
+        `specifiers) — hoisting them would close an import cycle`,
     );
   }
   if (missingTargets > 0) {
