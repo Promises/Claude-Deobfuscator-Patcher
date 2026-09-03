@@ -6,6 +6,17 @@ deobfuscated/
 .deob_cache/
 .build-state.json
 
+# Compiled binaries built alongside the live one. `claude` above matches ONLY the
+# exact name, so every parked//backup build was untracked-but-not-ignored and showed
+# up as a `??` staging candidate — 601 MB of them as of 2026-09-03. Listed
+# explicitly rather than as `claude-*`, which would also swallow claude-renamer.md.
+claude-2.1.*
+claude-test
+claude-prev-*
+claude-rel
+claude-rel-*
+*.backup
+
 # TS build
 tools-ts/node_modules/
 

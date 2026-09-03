@@ -231,6 +231,17 @@ function testAnchorRulesDetailed(
   for (const rule of rules) {
     if (rule.from || rule.type === "pin") continue; // skip walk/pin rules
 
+    // Documentation-only entries (a bare `__note` object) carry no `file`, and
+    // path.join(dir, undefined) THROWS. That aborted the whole per-version run,
+    // which the caller records as one error and zero anchor renames — a result
+    // indistinguishable from "this version resolves nothing". A single note
+    // object silently voided 60 of 64 versions in the 2026-08-21 sweep.
+    //
+    // The engine has the same guard, but this file keeps its OWN copy of the
+    // rule loop, so fixing it there did not fix it here. If you change one,
+    // check the other.
+    if (!rule.file) continue;
+
     const id = rule.id ?? rule.rename ?? "unknown";
     const filePath = path.join(deobDir, rule.file);
 

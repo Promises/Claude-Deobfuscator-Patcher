@@ -42,7 +42,68 @@ const JS_RESERVED = new Set([
   "void", "while", "with", "class", "const", "enum", "export", "extends",
   "import", "super", "implements", "interface", "let", "package", "private",
   "protected", "public", "static", "yield", "await",
+  // Literal keywords. These are NOT in the ECMAScript "reserved word" list
+  // proper, but they are equally illegal as binding names — and they DO occur
+  // as export names (zod does `export { _null as null }`, whose minified
+  // export map reads `null:()=>tXy`). Omitting them is what let the renamer
+  // rewrite the *binding* tXy to `null`, emitting `null:()=>null` and a bare
+  // `null` in the flattened export list — a hard parse error.
+  "null", "true", "false",
 ]);
+
+/**
+ * Names that are legal bindings but must never be a rename TARGET, because
+ * binding them shadows a global that the rest of the bundle depends on.
+ *
+ * Everything is bundled into ONE scope, so a module-level `var undefined` in
+ * any single module shadows the global `undefined` for EVERY other module in
+ * the bundle. Measured on 2.1.238: zod exports a schema factory as `undefined`
+ * (`_unmatched/0264_NNo.js`, export map `undefined:()=>eXy`). Renaming the
+ * binding eXy to `undefined` emitted `undefined: () => undefined` plus a bare
+ * `undefined` in the flattened export list, after which every `x !== undefined`
+ * in the bundle compared against a FUNCTION. The first casualty on the startup
+ * path was `Lr.of` (`_tentative/0137_index.js`): `this.#t.get(e)` returned the
+ * primitive undefined, `t !== undefined` evaluated TRUE, and `of` returned the
+ * cached-miss value, so `startCapturingEarlyInput` crashed on `e.capturing`.
+ *
+ * This class is strictly nastier than the JS_RESERVED one above. `null` was a
+ * hard PARSE error — loud, and it failed the build. These names parse fine,
+ * compile fine, report the right --version, and silently corrupt comparisons
+ * anywhere in the bundle. Keep them out by name.
+ *
+ * `NaN`/`Infinity` are the same shape (writable-in-sloppy-mode globals that
+ * comparisons rely on); `globalThis` likewise. None of them appear as export
+ * names today — they are listed so a future bundle cannot reintroduce the bug.
+ */
+const SHADOWS_GLOBAL = new Set([
+  "undefined", "NaN", "Infinity", "globalThis",
+]);
+
+/**
+ * Is `name` legal as a JavaScript *binding* identifier?
+ *
+ * A rename target is used as a declaration name, so it must satisfy the full
+ * IdentifierName grammar AND not be a reserved word or literal keyword. Export
+ * *names* are laxer (any IdentifierName, plus string literals, so `null` is a
+ * fine export name) — but we rename the binding, not the export alias, so the
+ * strict rule is the one that applies.
+ *
+ * Note the class this guards: `catch`, `default`, `enum`, `export`, `function`,
+ * `import`, `instanceof` and `void` all appear as export names in this bundle
+ * and reach the same code path. They were surviving only because they happened
+ * to be listed above; this predicate makes the coverage structural instead of
+ * enumerated, so a name outside the list (`null`) can no longer slip through.
+ *
+ * SHADOWS_GLOBAL covers the second class: names that ARE valid identifiers, so
+ * the grammar check below passes them, but whose binding would shadow a global
+ * the rest of the single-scope bundle reads (`undefined`). See that set.
+ */
+function isValidBindingName(name: string): boolean {
+  if (!name) return false;
+  if (JS_RESERVED.has(name)) return false;
+  if (SHADOWS_GLOBAL.has(name)) return false;
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
+}
 
 export function extractExportMap(code: string): Map<string, string> {
   const map = new Map<string, string>();
@@ -68,7 +129,7 @@ export function extractExportMap(code: string): Map<string, string> {
           const exportName = prop.name.text;
           const body = prop.initializer.body;
 
-          if (ts.isIdentifier(body) && !JS_RESERVED.has(exportName)) {
+          if (ts.isIdentifier(body) && isValidBindingName(exportName)) {
             // { exportName: () => minifiedVar }
             map.set(body.text, exportName);
           }
@@ -787,18 +848,71 @@ function sectionIndexForOffset(sections: RenameSection[], offset: number): numbe
 }
 
 /**
+ * Drop renames whose target name would collide with a top-level declaration that
+ * KEEPS that name. All module sections are flattened into one scope, so a rename
+ * X→Y is unsafe when another top-level decl is (or stays) named Y: the duplicate
+ * `function Y(){}` makes JS hoisting pick the last one, silently rebinding live
+ * references (e.g. a startup `config(en())` ended up calling an unrelated
+ * module's `en` that pulls in a native addon). We let the identifier already
+ * named Y keep it and revert the colliding rename — reverting also leaves that
+ * symbol's own references on their original name, so they stay consistent.
+ *
+ * `declNames` is the set of every top-level declaration name in the assembled
+ * (pre-rename) file. Identical inputs in the full-build and per-file paths ⇒
+ * identical drops ⇒ no divergence.
+ */
+function dropCollidingRenames<T extends { minified: string; original: string }>(
+  tasks: T[],
+  declNames: Set<string>,
+): T[] {
+  const renamedFrom = new Map(tasks.map((t) => [t.minified, t.original]));
+  const finalName = (d: string) => renamedFrom.get(d) ?? d;
+
+  // Group every top-level decl by the name it will have after renaming.
+  const byFinal = new Map<string, string[]>();
+  for (const d of declNames) {
+    const f = finalName(d);
+    let g = byFinal.get(f);
+    if (!g) byFinal.set(f, (g = []));
+    g.push(d);
+  }
+
+  const drop = new Set<string>();
+  for (const [name, decls] of byFinal) {
+    if (decls.length <= 1) continue; // unique → safe
+    // A decl literally named `name` (present in this group ⇒ it stays `name`)
+    // owns the name; every other entry got renamed INTO it, so revert those.
+    const owner = decls.includes(name) ? name : undefined;
+    for (const d of decls) {
+      if (d === owner) continue;
+      if (renamedFrom.get(d) === name && d !== name) drop.add(d);
+    }
+    // No original owner: several renames target `name` from different sources —
+    // ambiguous, so drop them all (mirrors the cross-file collision policy).
+    if (!owner) for (const d of decls) drop.add(d);
+  }
+
+  if (drop.size) console.log(`  Dropped ${drop.size} renames colliding with existing top-level names`);
+  return tasks.filter((t) => !drop.has(t.minified));
+}
+
+/**
  * Scope-aware renaming using TS Language Service on a single assembled file.
  * Concatenates all sections into ONE virtual file so TS understands scope/
  * shadowing without cross-file module resolution, renames every task, then maps
- * edits back to the split files.
+ * edits back to the split files. Returns the tasks actually applied (after
+ * collision filtering) so callers can record an accurate rename map.
  */
 function renameWithLanguageService(
   projectDir: string,
   mapping: any,
   renameTasks: Array<{ minified: string; original: string; declFile: string }>,
-): { totalRenames: number; fileRenames: Map<string, number> } {
+): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string }> } {
   const engine = buildRenameEngine(projectDir, mapping);
   const { sections, assembled } = engine;
+
+  // Drop renames that would collide with an existing top-level name post-flatten.
+  renameTasks = dropCollidingRenames(renameTasks, new Set(engine.assembledPositions.keys()));
 
   // Phase 4: resolve every rename's locations (assembled coordinates).
   const { allEdits, renamesResolved, renamesSkipped } = runRenameQueries(engine, renameTasks);
@@ -839,7 +953,7 @@ function renameWithLanguageService(
     if (changed) fs.writeFileSync(fullPath, code);
   }
 
-  return { totalRenames, fileRenames };
+  return { totalRenames, fileRenames, effectiveTasks: renameTasks };
 }
 
 /**
@@ -890,7 +1004,7 @@ function discoverRenameTasks(
       if (!fs.existsSync(deobPath)) continue;
       const exportMap = extractExportMap(fs.readFileSync(deobPath, "utf-8"));
       for (const [minified, original] of exportMap) {
-        if (seen.has(minified) || JS_RESERVED.has(original)) continue;
+        if (seen.has(minified) || !isValidBindingName(original)) continue;
         seen.set(minified, original);
         renameTasks.push({ minified, original, declFile: section.output_path });
       }
@@ -923,7 +1037,7 @@ function discoverRenameTasks(
       // Merge: constraint matches take priority, then legacy
       // Filter out JS reserved words as rename targets
       for (const m of constraintMatches) {
-        if (seen.has(m.minified) || JS_RESERVED.has(m.original)) continue;
+        if (seen.has(m.minified) || !isValidBindingName(m.original)) continue;
         seen.set(m.minified, m.original);
         renameTasks.push({
           minified: m.minified,
@@ -933,7 +1047,7 @@ function discoverRenameTasks(
       }
 
       for (const [minified, original] of legacyRenames) {
-        if (seen.has(minified) || JS_RESERVED.has(original)) continue;
+        if (seen.has(minified) || !isValidBindingName(original)) continue;
         seen.set(minified, original);
         renameTasks.push({
           minified,
@@ -950,6 +1064,12 @@ function discoverRenameTasks(
   for (const m of anchorMatches) {
     if (seen.has(m.minified)) {
       if (process.env.RENAME_VERBOSE) console.warn(`    anchor skip (already seen): ${m.minified} → ${m.original} (existing: ${seen.get(m.minified)})`);
+      continue;
+    }
+    // Anchors were the one admission path with NO validity guard. A typo'd or
+    // keyword rule name would have emitted unparseable code with no warning.
+    if (!isValidBindingName(m.original)) {
+      console.warn(`    anchor skip (invalid identifier): ${m.minified} → ${m.original}`);
       continue;
     }
     seen.set(m.minified, m.original);
@@ -1021,6 +1141,10 @@ export function renameSingleFile(
   const engine = buildRenameEngine(projectDir, mapping);
   const { sections, sectionByPath, assembled } = engine;
 
+  // Apply the SAME collision filter the full build does (on the full task set,
+  // before restricting to this file) so per-file output can't diverge.
+  const safeTasks = dropCollidingRenames(filteredTasks, new Set(engine.assembledPositions.keys()));
+
   const secIdx = sectionByPath.get(targetOutputPath);
   if (secIdx === undefined) return null;
   const target = sections[secIdx];
@@ -1035,7 +1159,7 @@ export function renameSingleFile(
   // export lines. Scan the FULL original file so import-only names are covered.
   const present = new Set<string>();
   for (const m of originalCode.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) present.add(m[0]);
-  const tasksForFile = filteredTasks.filter((t) => present.has(t.minified));
+  const tasksForFile = safeTasks.filter((t) => present.has(t.minified));
 
   const { allEdits } = runRenameQueries(engine, tasksForFile);
 
@@ -1084,9 +1208,13 @@ export function renameProject(
   // Pass 1: Discover the rename task set (shared with the per-file path).
   const { filteredTasks } = discoverRenameTasks(projectDir, sourceRefDir, mapping, db, noSourceRef);
 
-  // Write _renames.json — minified → original per file, for patch authoring
+  // Pass 2: Scope-aware renaming via TS Language Service (also drops collisions).
+  const result = renameWithLanguageService(projectDir, mapping, filteredTasks);
+
+  // Write _renames.json from the tasks ACTUALLY applied (collision-safe), so the
+  // patch-authoring map matches the emitted output.
   const renamesByFile: Record<string, Record<string, string>> = {};
-  for (const task of filteredTasks) {
+  for (const task of result.effectiveTasks) {
     const f = task.declFile === "__anchor__" ? "__anchor__" : task.declFile;
     if (!renamesByFile[f]) renamesByFile[f] = {};
     renamesByFile[f][task.minified] = task.original;
@@ -1096,8 +1224,7 @@ export function renameProject(
     JSON.stringify({ version: mapping.version ?? "unknown", files: renamesByFile }, null, 2),
   );
 
-  // Pass 2: Scope-aware renaming via TS Language Service
-  return renameWithLanguageService(projectDir, mapping, filteredTasks);
+  return { totalRenames: result.totalRenames, fileRenames: result.fileRenames };
 }
 
 /**
