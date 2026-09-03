@@ -575,6 +575,25 @@ const RELATIVE_META_REQUIRE_RE =
   /import\.meta\.require\(\s*['"](\.[^'"]*)['"]\s*\)/g;
 
 /**
+ * The call form the cycle guard rewrites a guarded site to.
+ *
+ * 🔴 IT MUST BE A BARE `require`, AND `createRequire` WAS MEASURED TO BE WRONG.
+ * `createRequire(import.meta.url)` looked correct and passed a probe — but the
+ * probe was invalid: the target still existed ON DISK beside the binary, so the
+ * call resolved from the filesystem and the bundle was never consulted. The
+ * decisive control is to DELETE the target and re-run; done that way,
+ * `createRequire` fails with `Cannot find module` (bun does not trace a require
+ * function through a variable, so it bundles nothing — `bundle 1 modules`),
+ * while a bare `require('./dep.js')` reports `bundle 2 modules` and still
+ * resolves with the source file absent.
+ *
+ * Bare `require` keeps the LAZINESS this guard exists to protect: probed on a
+ * real cycle a -> b -> a, `b` evaluated only when the calling line ran, and the
+ * cycle-owned binding read back fully initialised rather than TDZ-undefined.
+ */
+const LAZY_REQUIRE_FN = "require";
+
+/**
  * A load of a file EMBEDDED IN THE ORIGINAL BINARY, e.g.
  * `ve('/$bunfs/root/loopAutonomousPreamble-07qcyhv4.md')`.
  *
@@ -897,8 +916,12 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
    * That IIFE is faithful to upstream (verified in the raw chunk); upstream
    * simply never has the cycle, because the edge stays LAZY there.
    *
-   * Leaving the site as a call is the STATUS QUO for it, not a regression — the
-   * same reasoning the embedded-asset guard above uses.
+   * ⚠️ THE MATCHING SITE IS NOT LEFT AS `import.meta.require`. That was the
+   * original behaviour and it was wrong: the call form does not resolve in a
+   * compiled binary at all, so "deferred" meant "throws whenever it runs", and
+   * for `_unmatched/0874_DesignTool.js` that is startup. The site is rewritten
+   * to a bare lazy `require(spec)` instead, which keeps the deferral this guard
+   * exists to protect while actually resolving. See the call site below.
    *
    * A path that cannot be read contributes no edges, so an unreadable module
    * cannot hide a cycle behind itself; that errs toward hoisting, which is why
@@ -1027,6 +1050,10 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
     // but it bloats the file and obscures the diff.
     const specToNs = new Map<string, string>();
     const fileDir = path.dirname(path.join(projectDir, section.output_path));
+    // Set by the cycle guard below when it rewrites a site to a lazy
+    // `require()`, so a file whose ONLY change was that rewrite is still
+    // counted as rewritten rather than silently reported as untouched.
+    let needsLazyRequire = false;
 
     RELATIVE_META_REQUIRE_RE.lastIndex = 0;
     const rewritten = code.replace(
@@ -1076,7 +1103,29 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
         ) {
           cycleGuarded++;
           cycleGuardedSpecs.add(spec);
-          return whole;
+          needsLazyRequire = true;
+          // 🔴 LEAVING THE CALL AS-IS IS NOT A SAFE STATUS QUO — MEASURED.
+          // The old code returned `whole` here, keeping `import.meta.require`.
+          // That form does not resolve inside a compiled single-file binary at
+          // ALL (it resolves against a real filesystem that does not exist), so
+          // a "deferred" site does not fail only if its path runs — it fails
+          // WHENEVER its path runs, which for several of these is startup.
+          // MEASURED on 2.1.259: `_unmatched/0874_DesignTool.js` is guarded
+          // here, reached from `Zk()` on the mandatory `-p` path, and the throw
+          // propagated into an async chain that never settled — the binary
+          // authenticated, sent the request, received 8 KB of response, and
+          // then hung forever in kevent64 at 0% CPU printing nothing.
+          //
+          // A bare `require(spec)` fixes the RESOLUTION without touching the
+          // LAZINESS the cycle guard exists to preserve: bun treats it as a
+          // static dependency and bundles the target, and the call still runs
+          // only when the enclosing line runs. Probed with `bun build
+          // --compile` and controlled BY DELETING THE TARGET FROM DISK, so a
+          // pass cannot be an accidental filesystem hit; also positive-
+          // controlled on a real cycle a -> b -> a, where the dependency
+          // evaluated after the calling line and the cycle-owned binding read
+          // back fully initialised rather than TDZ-undefined.
+          return `${LAZY_REQUIRE_FN}('${spec}')`;
         }
         let ns = specToNs.get(spec);
         if (!ns) {
@@ -1092,8 +1141,14 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
       },
     );
 
+    // No preamble: `require` must stay a BARE call for bun to see it as a
+    // static dependency and bundle the target (see LAZY_REQUIRE_FN). Binding it
+    // to a name first is exactly what stopped the target being bundled.
     if (specToNs.size === 0) {
-      if (rewritten !== code) fs.writeFileSync(fullPath, rewritten);
+      if (rewritten !== code) {
+        fs.writeFileSync(fullPath, rewritten);
+        if (needsLazyRequire) filesRewritten++;
+      }
       continue;
     }
 
@@ -1129,12 +1184,15 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
     );
   }
   if (cycleGuarded > 0) {
-    // Reported for the same reason as the asset guard: these sites still throw
-    // if their path runs, and a jump in this count between versions means the
-    // module graph's cycle structure moved.
+    // Reported because a jump in this count between versions means the module
+    // graph's cycle structure moved. Unlike the asset guard above, these sites
+    // no longer throw when their path runs: they are rewritten to a bare lazy
+    // `require()`, which bun bundles and which resolves inside the compiled
+    // binary while still deferring evaluation past the cycle.
     console.log(
-      `  ⚠️  ${cycleGuarded} sites left as calls (${cycleGuardedSpecs.size} distinct ` +
-        `specifiers) — hoisting them would close an import cycle`,
+      `  ⚠️  ${cycleGuarded} sites kept lazy as bare ${LAZY_REQUIRE_FN}() ` +
+        `(${cycleGuardedSpecs.size} distinct specifiers) — hoisting them would ` +
+        `close an import cycle`,
     );
   }
   if (missingTargets > 0) {

@@ -151,8 +151,27 @@ def rewrite_file(path, assets_dir, available, text_asset):
         # `.md.zst` / `.txt.zst` is still compressed on disk. Sniffing the magic
         # rather than the extension keeps this correct if a name and its
         # encoding ever disagree.
+        # 🔴 RESOLVE AGAINST THE EMBED ROOT, NOT THE CWD.
+        # A `with { type: "file" }` import yields a path like
+        # `./loopAutonomousPreamble-07qcyhv4.md`, and readFileSync resolves a
+        # relative path against process.cwd() — inside a compiled binary that is
+        # wherever the user ran it, not `/$bunfs/root`. MEASURED 2026-09-04, the
+        # REPL died with:
+        #   ENOENT: no such file or directory, open './loopAutonomousPreamble-07qcyhv4.md'
+        # ⚠️ `-p` did NOT catch this. That path reads no asset, so a green
+        # `-p 'reply with exactly: OK'` exercised ZERO of the asset lane — the
+        # check that proved the turn works is blind to this whole class.
+        # import.meta.dir is `/$bunfs/root` in a compiled binary, so the retry
+        # lands there. The direct read is tried first so an absolute path (dev
+        # runs, tests) keeps working unchanged, and a non-ENOENT error is
+        # re-thrown rather than being masked by the fallback.
         "const __cvReadAsset = (p) => {",
-        "  const b = __cvReadFileSync(p);",
+        "  let b;",
+        "  try { b = __cvReadFileSync(p); }",
+        "  catch (e) {",
+        "    if (e && e.code !== 'ENOENT') throw e;",
+        "    b = __cvReadFileSync(import.meta.dir + '/' + String(p).replace(/^.*\\//, ''));",
+        "  }",
         "  const z = b.length >= 4 && b[0] === 40 && b[1] === 181"
         " && b[2] === 47 && b[3] === 253;",
         "  return (z ? Bun.zstdDecompressSync(b) : b).toString('utf8');",
