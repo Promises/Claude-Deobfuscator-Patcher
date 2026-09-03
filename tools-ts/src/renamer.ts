@@ -600,6 +600,75 @@ function stripImportExport(code: string): string {
 }
 
 /**
+ * Does this tree have ONE shared top-level scope, or one scope PER FILE?
+ *
+ * This is the discriminator between the two bundle formats, and it is measured
+ * from the tree itself rather than passed down from build.sh — the renamer is
+ * also called by the studio, which has no FORMAT variable to hand it.
+ *
+ * Up to 2.1.241 the binary embeds ONE monolithic CJS bundle. esbuild gave every
+ * declaration in it a bundle-unique name, so concatenating the split files back
+ * into one virtual file re-creates the original single scope faithfully. MEASURED
+ * on the 2.1.238 tree: of 60,885 top-level declarations in the assembled file,
+ * exactly ONE name is declared twice.
+ *
+ * From 2.1.242 the bundle is ~1400-1700 separate ESM chunks, each with its OWN
+ * top-level scope, so short names are reused freely between chunks. MEASURED on
+ * the 2.1.259 tree: 10,558 names are declared more than once at top level, the
+ * worst (`x`) 192 times. Concatenating those merges 192 unrelated declarations
+ * into one TS symbol; `findRenameLocations` then walks the merged control-flow
+ * graph and dies with "Maximum call stack size exceeded" inside
+ * getTypeAtFlowNode. That is NOT a marginal stack shortfall — it reproduces
+ * identically under --stack-size=8000000 with a raised ulimit -s — and it is
+ * CUMULATIVE rather than caused by any one chunk: assembling sections 0..1200
+ * resolves fine, 0..1400 throws, and neither half of the tree throws alone.
+ *
+ * So the ratio, not the version, decides. A tree whose names are essentially
+ * unique per bundle can be flattened; one with heavy cross-file reuse must keep
+ * its per-file scopes. The threshold is deliberately far from both measured
+ * values (1/60885 = 0.002% vs 10558/19809 = 53%) so neither format sits near it.
+ */
+function hasSharedTopLevelScope(perFileDecls: Map<string, Set<string>>): boolean {
+  const seen = new Set<string>();
+  let dupes = 0;
+  let total = 0;
+  for (const decls of perFileDecls.values()) {
+    for (const name of decls) {
+      total++;
+      if (seen.has(name)) dupes++;
+      else seen.add(name);
+    }
+  }
+  if (total === 0) return true;
+  return dupes / total < 0.02;
+}
+
+/**
+ * Top-level declaration names for one file. Mirrors the statement kinds that
+ * findDeclPositions/module-reconstruct treat as declarations, so the scope
+ * discriminator and the rename machinery agree about what a declaration is.
+ */
+function topLevelDeclNames(code: string, fileName: string): Set<string> {
+  const sf = ts.createSourceFile(fileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const out = new Set<string>();
+  const bind = (name: ts.BindingName) => {
+    if (ts.isIdentifier(name)) out.add(name.text);
+    else if (ts.isObjectBindingPattern(name)) for (const el of name.elements) bind(el.name);
+    else if (ts.isArrayBindingPattern(name)) {
+      for (const el of name.elements) if (!ts.isOmittedExpression(el)) bind(el.name);
+    }
+  };
+  for (const stmt of sf.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name) out.add(stmt.name.text);
+    else if (ts.isClassDeclaration(stmt) && stmt.name) out.add(stmt.name.text);
+    else if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) bind(decl.name);
+    }
+  }
+  return out;
+}
+
+/**
  * A reusable rename "engine": the assembled single-file program + TS Language
  * Service + declaration-position index. Building this is the one-time setup cost
  * (~1.7s) shared by the whole-bundle rename and the per-file on-demand rename, so
@@ -705,6 +774,211 @@ function buildRenameEngine(projectDir: string, mapping: any): RenameEngine {
 }
 
 interface Edit { start: number; end: number; newText: string }
+
+/**
+ * Rename engine for CHUNKED bundles (2.1.242+), where each chunk is a real ESM
+ * module with its own top-level scope.
+ *
+ * Instead of concatenating, this hands the TS Language Service the module graph
+ * as it actually is: one source file per chunk, with real `import`/`export` and
+ * real module resolution. Each chunk's `de` is then its own symbol, so TS never
+ * has to merge 93 unrelated declarations — which is precisely what made the
+ * single-file engine recurse to death.
+ *
+ * MEASURED on the 2.1.259 tree: the name `de` is declared at top level in 93
+ * separate chunks. Under this engine all 93 resolve, each to its own scope
+ * (617 locations for the largest, single digits for the rest), in ~6.5 s total;
+ * under the concatenating engine the first query throws.
+ *
+ * A chunk is renamed by its OWN declarations only. Cross-chunk propagation still
+ * happens, because findRenameLocations follows the import graph — that is the
+ * whole reason module-reconstruct adds import/export in step 2.5 — so renaming a
+ * binding also rewrites the import specifiers that reference it in other chunks.
+ */
+interface MultiFileEngine {
+  /** absolute path → the section's output_path, for writing results back */
+  fileToOutputPath: Map<string, string>;
+  outputPathToFile: Map<string, string>;
+  fileNames: string[];
+  service: ts.LanguageService;
+  /** absolute file → (decl name → offset of its first top-level declaration) */
+  declPositions: Map<string, Map<string, number>>;
+  /** decl name → every file that declares it at top level */
+  declaringFiles: Map<string, string[]>;
+  texts: Map<string, string>;
+}
+
+function buildMultiFileEngine(
+  projectDir: string,
+  mapping: any,
+  fileTexts: Map<string, string>,
+): MultiFileEngine {
+  const root = path.resolve(projectDir);
+  const fileNames: string[] = [];
+  const texts = new Map<string, string>();
+  const fileToOutputPath = new Map<string, string>();
+  const outputPathToFile = new Map<string, string>();
+
+  for (const section of mapping.sections) {
+    const abs = path.resolve(root, section.output_path);
+    const code = fileTexts.get(section.output_path);
+    if (code === undefined) continue;
+    fileNames.push(abs);
+    texts.set(abs, code);
+    fileToOutputPath.set(abs, section.output_path);
+    outputPathToFile.set(section.output_path, abs);
+  }
+
+  const snapshots = new Map<string, ts.IScriptSnapshot>();
+  for (const [f, c] of texts) snapshots.set(f, ts.ScriptSnapshot.fromString(c));
+
+  const host: ts.LanguageServiceHost = {
+    getScriptFileNames: () => fileNames,
+    getScriptVersion: () => "1",
+    getScriptSnapshot: (fn) => snapshots.get(path.resolve(fn)),
+    getCurrentDirectory: () => root,
+    getCompilationSettings: () => ({
+      allowJs: true,
+      checkJs: false,
+      target: ts.ScriptTarget.Latest,
+      noEmit: true,
+      strict: false,
+      // Real ESM resolution — this is the point of this engine. Unlike the
+      // single-file path we must NOT set noResolve, or the import graph goes
+      // unread and cross-chunk references stop resolving.
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      // Still no standard library: identifier rename on plain JS never consults
+      // it, and loading lib.d.ts across ~1650 files is pure cost.
+      noLib: true,
+      lib: [],
+      types: [],
+      skipLibCheck: true,
+      skipDefaultLibCheck: true,
+    }),
+    getDefaultLibFileName: () => ts.getDefaultLibFilePath({}),
+    fileExists: (fn) => texts.has(path.resolve(fn)),
+    readFile: (fn) => texts.get(path.resolve(fn)),
+  };
+
+  const service = ts.createLanguageService(host, ts.createDocumentRegistry());
+
+  // Index every file's own top-level declarations and where they start.
+  const declPositions = new Map<string, Map<string, number>>();
+  const declaringFiles = new Map<string, string[]>();
+  for (const abs of fileNames) {
+    const positions = findDeclPositions(texts.get(abs)!, abs);
+    declPositions.set(abs, positions);
+    for (const name of positions.keys()) {
+      let arr = declaringFiles.get(name);
+      if (!arr) declaringFiles.set(name, (arr = []));
+      arr.push(abs);
+    }
+  }
+
+  console.log(
+    `  TS LS (multi-file): ${fileNames.length} chunks, ${declaringFiles.size} distinct top-level names`,
+  );
+
+  return { fileToOutputPath, outputPathToFile, fileNames, service, declPositions, declaringFiles, texts };
+}
+
+/**
+ * Resolve rename tasks against the per-chunk module graph.
+ *
+ * Returns edits grouped by the file they land in, in that FILE's coordinates
+ * (not assembled coordinates) — the chunked path never builds an assembled
+ * string, so there is no global coordinate space to map back from.
+ *
+ * ONE query per task, against the chunk that OWNS the symbol.
+ *
+ * A minified name is not unique in a chunked bundle (`x` is declared at top
+ * level in 192 different chunks of 2.1.259), so "rename the symbol called x" is
+ * not a well-formed request — there are 192 unrelated symbols with that name and
+ * the evidence identifies exactly one of them. Every task carries the declFile it
+ * was learned from: the chunk whose export map named it, or the chunk an anchor
+ * rule matched. That chunk is the owner, and renaming any of the other 191 would
+ * assert something the evidence never established.
+ *
+ * Querying only the owner is also what makes this affordable. MEASURED on the
+ * 2.1.259 task set: renaming every declaring chunk is 31,404 findRenameLocations
+ * calls for 2,086 tasks (15x amplification, worst single name 192) and did not
+ * finish in 20 minutes at 7 GB RSS; owner-only is 2,086 calls.
+ *
+ * Cross-chunk references still update, because findRenameLocations follows the
+ * ESM import graph out of the owning chunk — that is what step 2.5 builds it for.
+ */
+function runMultiFileRenameQueries(
+  engine: MultiFileEngine,
+  renameTasks: Array<{ minified: string; original: string; declFile?: string }>,
+): { editsByFile: Map<string, Edit[]>; renamesResolved: number; renamesSkipped: number } {
+  const { service, declaringFiles, declPositions, outputPathToFile } = engine;
+  const editsByFile = new Map<string, Edit[]>();
+  let renamesResolved = 0;
+  let renamesSkipped = 0;
+  const processed = new Set<string>();
+
+  for (const { minified, original, declFile } of renameTasks) {
+    if (processed.has(minified)) continue;
+    processed.add(minified);
+
+    // Prefer the owning chunk. Anchor tasks carry the sentinel "__anchor__"
+    // rather than a real path, and an export map can name a binding the chunk
+    // re-exports without declaring; in both cases fall back to the unique
+    // declaring chunk, and give up if the name is declared in several (we have
+    // no evidence for which one is meant).
+    const owner = declFile ? outputPathToFile.get(declFile) : undefined;
+    let targetFile: string | undefined;
+    if (owner && declPositions.get(owner)?.has(minified)) {
+      targetFile = owner;
+    } else {
+      const declFiles = declaringFiles.get(minified);
+      if (declFiles && declFiles.length === 1) targetFile = declFiles[0];
+    }
+
+    if (!targetFile) {
+      if (process.env.RENAME_VERBOSE) {
+        const n = declaringFiles.get(minified)?.length ?? 0;
+        console.warn(`    skip (${n === 0 ? "no decl" : `ambiguous: ${n} declaring chunks`}): ${minified} → ${original}`);
+      }
+      renamesSkipped++;
+      continue;
+    }
+
+    const pos = declPositions.get(targetFile)!.get(minified)!;
+    let locations: readonly ts.RenameLocation[] | undefined;
+    try {
+      locations = service.findRenameLocations(targetFile, pos, false, false);
+    } catch (err) {
+      // One pathological symbol must not abort the whole rename pass — the
+      // alternative is losing every later rename too.
+      console.warn(
+        `    skip (LS error): ${minified} → ${original} in ${engine.fileToOutputPath.get(targetFile)}: ${(err as Error).message.slice(0, 60)}`,
+      );
+      renamesSkipped++;
+      continue;
+    }
+    if (!locations || locations.length === 0) {
+      renamesSkipped++;
+      continue;
+    }
+
+    for (const loc of locations) {
+      const target = path.resolve(loc.fileName);
+      if (!engine.texts.has(target)) continue;
+      let arr = editsByFile.get(target);
+      if (!arr) editsByFile.set(target, (arr = []));
+      arr.push({
+        start: loc.textSpan.start,
+        end: loc.textSpan.start + loc.textSpan.length,
+        newText: original,
+      });
+    }
+    renamesResolved++;
+  }
+
+  return { editsByFile, renamesResolved, renamesSkipped };
+}
 
 /**
  * Run findRenameLocations for each (deduped) task and return every rename
@@ -894,6 +1168,127 @@ function dropCollidingRenames<T extends { minified: string; original: string }>(
 
   if (drop.size) console.log(`  Dropped ${drop.size} renames colliding with existing top-level names`);
   return tasks.filter((t) => !drop.has(t.minified));
+}
+
+/**
+ * Per-chunk collision filter, for the chunked format.
+ *
+ * The flat-scope rule above is far too strict here: chunks do NOT share a scope,
+ * so `Y` existing in chunk A says nothing about whether X→Y is safe in chunk B.
+ * Applying the flat rule to a chunked tree would drop essentially every rename,
+ * because with 10,558 duplicated names almost every target name exists SOMEWHERE.
+ *
+ * The real hazard is per chunk: renaming X→Y inside a chunk that already has its
+ * own top-level `Y` would shadow it there. So a task is dropped only if the chunk
+ * being edited would end up with two top-level declarations of the same name.
+ *
+ * Only chunks that actually get edited are considered — i.e. the chunk each task
+ * is applied to. A name clash in some unrelated chunk is not a collision here,
+ * because that chunk keeps its own scope and is never touched.
+ */
+function dropCollidingRenamesPerChunk<T extends { minified: string; original: string; declFile?: string }>(
+  tasks: T[],
+  perChunkDecls: Map<string, Set<string>>,
+): T[] {
+  // Which chunk will each task edit? Mirrors the owner resolution in
+  // runMultiFileRenameQueries, so the filter and the rename agree on the target.
+  const declaringChunks = new Map<string, string[]>();
+  for (const [chunk, decls] of perChunkDecls) {
+    for (const d of decls) {
+      let a = declaringChunks.get(d);
+      if (!a) declaringChunks.set(d, (a = []));
+      a.push(chunk);
+    }
+  }
+  const targetChunk = (t: T): string | undefined => {
+    if (t.declFile && perChunkDecls.get(t.declFile)?.has(t.minified)) return t.declFile;
+    const c = declaringChunks.get(t.minified);
+    return c && c.length === 1 ? c[0] : undefined;
+  };
+
+  // Group tasks by the chunk they edit, then apply the shadowing rule there.
+  const byChunk = new Map<string, T[]>();
+  for (const t of tasks) {
+    const c = targetChunk(t);
+    if (!c) continue;
+    let a = byChunk.get(c);
+    if (!a) byChunk.set(c, (a = []));
+    a.push(t);
+  }
+
+  const drop = new Set<string>();
+  for (const [chunk, chunkTasks] of byChunk) {
+    const decls = perChunkDecls.get(chunk)!;
+    const renamedHere = new Map(chunkTasks.map((t) => [t.minified, t.original]));
+    const byFinal = new Map<string, string[]>();
+    for (const d of decls) {
+      const f = renamedHere.get(d) ?? d;
+      let g = byFinal.get(f);
+      if (!g) byFinal.set(f, (g = []));
+      g.push(d);
+    }
+    for (const [name, group] of byFinal) {
+      if (group.length <= 1) continue;
+      const owner = group.includes(name) ? name : undefined;
+      for (const d of group) {
+        if (d === owner) continue;
+        if (renamedHere.get(d) === name && d !== name) drop.add(d);
+      }
+      if (!owner) for (const d of group) drop.add(d);
+    }
+  }
+
+  if (drop.size) {
+    console.log(`  Dropped ${drop.size} renames colliding with a chunk's own top-level names`);
+  }
+  return tasks.filter((t) => !drop.has(t.minified));
+}
+
+/**
+ * Scope-aware renaming for CHUNKED bundles, over the real per-chunk ESM graph.
+ *
+ * Same contract as renameWithLanguageService (its single-scope counterpart):
+ * rewrite the files on disk and return the tasks actually applied. It differs
+ * only in that edits arrive already grouped per file, so there is no assembled
+ * coordinate space and no import-offset correction — the LS reports positions in
+ * the real on-disk files, imports and all.
+ */
+function renameWithMultiFileService(
+  projectDir: string,
+  mapping: any,
+  renameTasks: Array<{ minified: string; original: string; declFile: string }>,
+  fileTexts: Map<string, string>,
+  perChunkDecls: Map<string, Set<string>>,
+): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string }> } {
+  renameTasks = dropCollidingRenamesPerChunk(renameTasks, perChunkDecls);
+
+  const engine = buildMultiFileEngine(projectDir, mapping, fileTexts);
+  const { editsByFile, renamesResolved, renamesSkipped } = runMultiFileRenameQueries(engine, renameTasks);
+
+  let locationCount = 0;
+  for (const edits of editsByFile.values()) locationCount += edits.length;
+  console.log(
+    `  TS LS: ${renamesResolved} renames resolved (${locationCount} locations), ${renamesSkipped} skipped`,
+  );
+
+  let totalRenames = 0;
+  const fileRenames = new Map<string, number>();
+  for (const [absFile, edits] of editsByFile) {
+    const outputPath = engine.fileToOutputPath.get(absFile);
+    if (!outputPath) continue;
+    const original = engine.texts.get(absFile)!;
+    // Apply back-to-front so earlier offsets stay valid.
+    const sorted = [...edits].sort((a, b) => b.start - a.start);
+    let result = original;
+    for (const e of sorted) {
+      result = result.slice(0, e.start) + e.newText + result.slice(e.end);
+    }
+    fs.writeFileSync(path.join(projectDir, outputPath), result);
+    fileRenames.set(outputPath, edits.length);
+    totalRenames += edits.length;
+  }
+
+  return { totalRenames, fileRenames, effectiveTasks: renameTasks };
 }
 
 /**
@@ -1138,6 +1533,41 @@ export function renameSingleFile(
   let db: RenameDB | null = null;
   const { filteredTasks } = discoverRenameTasks(projectDir, "", mapping, db, noSourceRef);
 
+  // A chunked tree cannot be assembled (it overflows the stack — see
+  // hasSharedTopLevelScope), so render that one file from the per-chunk engine
+  // instead. Same task set and same collision policy as the chunked full build,
+  // so this file's bytes still match what the full build would write for it.
+  const fileTexts = new Map<string, string>();
+  const perChunkDecls = new Map<string, Set<string>>();
+  for (const section of mapping.sections) {
+    const p = path.join(projectDir, section.output_path);
+    if (!fs.existsSync(p)) continue;
+    const code = fs.readFileSync(p, "utf-8");
+    fileTexts.set(section.output_path, code);
+    perChunkDecls.set(section.output_path, topLevelDeclNames(code, p));
+  }
+
+  if (!hasSharedTopLevelScope(perChunkDecls)) {
+    if (!fileTexts.has(targetOutputPath)) return null;
+    const safeTasks = dropCollidingRenamesPerChunk(filteredTasks, perChunkDecls);
+    const mfEngine = buildMultiFileEngine(projectDir, mapping, fileTexts);
+    const targetAbs = mfEngine.outputPathToFile.get(targetOutputPath);
+    if (!targetAbs) return null;
+
+    // Only names that textually appear in this file can produce a location in it.
+    const originalCode = fileTexts.get(targetOutputPath)!;
+    const present = new Set<string>();
+    for (const m of originalCode.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) present.add(m[0]);
+    const tasksForFile = safeTasks.filter((t) => present.has(t.minified));
+
+    const { editsByFile } = runMultiFileRenameQueries(mfEngine, tasksForFile);
+    const edits = editsByFile.get(targetAbs) ?? [];
+    const sorted = [...edits].sort((a, b) => b.start - a.start);
+    let out = originalCode;
+    for (const e of sorted) out = out.slice(0, e.start) + e.newText + out.slice(e.end);
+    return { code: out, renames: edits.length };
+  }
+
   const engine = buildRenameEngine(projectDir, mapping);
   const { sections, sectionByPath, assembled } = engine;
 
@@ -1208,8 +1638,32 @@ export function renameProject(
   // Pass 1: Discover the rename task set (shared with the per-file path).
   const { filteredTasks } = discoverRenameTasks(projectDir, sourceRefDir, mapping, db, noSourceRef);
 
+  // Which scope model does this tree have? Read every file once and measure it,
+  // rather than trusting a version number — the studio calls this with no
+  // version context at all. See hasSharedTopLevelScope for the measurements.
+  const fileTexts = new Map<string, string>();
+  const perChunkDecls = new Map<string, Set<string>>();
+  for (const section of mapping.sections) {
+    const fullPath = path.join(projectDir, section.output_path);
+    if (!fs.existsSync(fullPath)) continue;
+    const code = fs.readFileSync(fullPath, "utf-8");
+    fileTexts.set(section.output_path, code);
+    perChunkDecls.set(section.output_path, topLevelDeclNames(code, fullPath));
+  }
+  const sharedScope = hasSharedTopLevelScope(perChunkDecls);
+  console.log(
+    `  Scope model: ${sharedScope ? "single shared top-level scope (monolithic) — assembling" : "per-chunk scopes (chunked ESM) — multi-file program"}`,
+  );
+
   // Pass 2: Scope-aware renaming via TS Language Service (also drops collisions).
-  const result = renameWithLanguageService(projectDir, mapping, filteredTasks);
+  //
+  // Monolithic bundles keep the original single-file engine unchanged: it is what
+  // the live fleet binary is built from, and its output is the regression gate.
+  // Chunked bundles get the per-chunk module-graph engine, because concatenating
+  // them overflows the stack (see hasSharedTopLevelScope).
+  const result = sharedScope
+    ? renameWithLanguageService(projectDir, mapping, filteredTasks)
+    : renameWithMultiFileService(projectDir, mapping, filteredTasks, fileTexts, perChunkDecls);
 
   // Write _renames.json from the tasks ACTUALLY applied (collision-safe), so the
   // patch-authoring map matches the emitted output.

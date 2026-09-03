@@ -17,14 +17,40 @@ DEOB="${DEOB_DIR:-$SCRIPT_DIR/deobfuscated}"
 # Source selection. Default: extract from the latest locally-installed binary.
 # Override: BUILD_VERSION=2.1.168 builds from versionref/<ver>-cli.js instead
 # (no install needed — used to build/test against a specific captured version).
+#
+# TWO BUNDLE FORMATS. Up to 2.1.241 the binary embeds ONE monolithic CJS bundle
+# (sliced to versionref/<ver>-cli.js, split by tools/splitter.py). BISECTED
+# 2026-09-03: from 2.1.242 it is `bun build --compile --bytecode` and the bundle
+# is ~1400-1700 separate ESM chunks, which tools/extract_chunks.py recovers.
+#
+# FORMAT is resolved here and steps 1-2 branch on it. The discriminator is the
+# presence of the monolithic start marker in the BINARY — see is_chunked() in
+# tools/extract_chunks.py for why the banner and the bare CJS-wrapper prefix are
+# both unusable as discriminators.
+#
+# A chunked version has no <ver>-cli.js (the slicer cannot produce one), so it
+# is supplied as the native binary at versionref/<ver>-bin instead.
+FORMAT=""
 if [[ -n "$BUILD_VERSION" ]]; then
     VERSION="$BUILD_VERSION"
     SOURCE_CLI="$SCRIPT_DIR/versionref/${BUILD_VERSION}-cli.js"
-    if [[ ! -f "$SOURCE_CLI" ]]; then
-        echo "No versionref cli.js for $BUILD_VERSION at $SOURCE_CLI"
+    SOURCE_BIN="${SOURCE_BINARY:-$SCRIPT_DIR/versionref/${BUILD_VERSION}-bin}"
+    if [[ -f "$SOURCE_CLI" ]]; then
+        FORMAT="monolithic"
+        echo "Source: $SOURCE_CLI (v$VERSION, from versionref, monolithic)"
+    elif [[ -f "$SOURCE_BIN" ]]; then
+        BINARY="$SOURCE_BIN"
+        FORMAT="chunked"
+        echo "Source: $SOURCE_BIN (v$VERSION, chunked binary)"
+    else
+        echo "No source for $BUILD_VERSION."
+        echo "  monolithic (<=2.1.241): expected $SOURCE_CLI"
+        echo "  chunked    (>=2.1.242): expected $SOURCE_BIN, or set SOURCE_BINARY=<path>"
+        echo "  fetch a chunked binary with:"
+        echo "    npm pack @anthropic-ai/claude-code-darwin-arm64@$BUILD_VERSION"
+        echo "    tar xzf *.tgz package/claude"
         exit 1
     fi
-    echo "Source: $SOURCE_CLI (v$VERSION, from versionref)"
 else
     # Find Claude binary (macOS)
     VERSIONS_DIR="$HOME/.local/share/claude/versions"
@@ -40,15 +66,37 @@ else
     echo "Source: $BINARY (v$VERSION)"
 fi
 
+# Probe the binary itself when the source is a binary (either branch above).
+if [[ -z "$FORMAT" ]]; then
+    if python3 -c "import sys; sys.path.insert(0, '$TOOLS_PY'); from extract_chunks import is_chunked; sys.exit(0 if is_chunked('$BINARY') else 1)"; then
+        FORMAT="chunked"
+    else
+        FORMAT="monolithic"
+    fi
+    echo "  format: $FORMAT"
+fi
+
 if ! command -v bun &>/dev/null; then
     echo "bun is required. Install: curl -fsSL https://bun.sh/install | bash"
     exit 1
 fi
 
 # Step 1: Extract JS source
+#
+# Chunked builds skip source.js entirely: there is no single bundle to write,
+# and step 2 consumes the chunk tree directly. The two monolithic sub-branches
+# below are unchanged.
 echo ""
 echo "=== Step 1: Extract JS source ==="
-if [[ -n "$BUILD_VERSION" ]]; then
+if [[ "$FORMAT" = "chunked" ]]; then
+    # Emit straight into the splitter's own layout so step 2 and everything
+    # after it are untouched. See emit_splitter_compat() in extract_chunks.py.
+    rm -rf "$SCRIPT_DIR/.deob_cache"
+    python3 "$TOOLS_PY/extract_chunks.py" "$BINARY" \
+        "$SCRIPT_DIR/.deob_cache/modules" \
+        --manifest "$SCRIPT_DIR/.deob_cache/chunk-graph.json" \
+        --splitter-compat
+elif [[ -f "${SOURCE_CLI:-}" ]]; then
     # versionref cli.js is the raw extracted function (no trailing invocation);
     # append the same call the binary-extraction path adds.
     SOURCE_CLI="$SOURCE_CLI" python3 << PYEOF
@@ -88,11 +136,28 @@ PYEOF
 fi
 
 # Step 2: Deobfuscate
+#
+# deob.ts reuses .deob_cache/modules/ when a _manifest.json is already there.
+# That is exactly the seam the chunked path uses: step 1 has already written the
+# modules in the splitter's layout, so deob.ts skips the split and goes straight
+# to matching + emitting. The monolithic path must still clear the cache, or a
+# stale split from a previous version would be silently reused.
 echo ""
 echo "=== Step 2: Deobfuscate (Python split + TS AST match) ==="
-rm -rf "$SCRIPT_DIR/.deob_cache" "$DEOB"
+if [[ "$FORMAT" = "chunked" ]]; then
+    # deob.ts uses this path ONLY to locate .deob_cache beside it, and to invoke
+    # the splitter on a cache MISS. A chunked build has no bundle to split, so
+    # point it at a name that does not exist: on the expected cache HIT this is
+    # never read, and if the cache were ever missing the splitter fails loudly
+    # instead of silently splitting a stale source.js from another version.
+    rm -rf "$DEOB"
+    SOURCE_FOR_DEOB="$SCRIPT_DIR/.chunked-no-bundle.js"
+else
+    rm -rf "$SCRIPT_DIR/.deob_cache" "$DEOB"
+    SOURCE_FOR_DEOB="$SCRIPT_DIR/source.js"
+fi
 cd "$TOOLS_TS"
-bun run src/deob.ts "$SCRIPT_DIR/source.js" "$DEOB"
+bun run src/deob.ts "$SOURCE_FOR_DEOB" "$DEOB"
 cd "$SCRIPT_DIR"
 
 # Step 2.5: Module reconstruction (add import/export for scope-aware renaming)
