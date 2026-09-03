@@ -224,6 +224,39 @@ const BUNFS_IMPORT_RE =
   /(\bimport\s*(?:\{[^}]*\}|[\w$]+|\*\s+as\s+[\w$]+)?\s*(?:from\s*)?)["'](\/\$bunfs\/[^"']+)["']/g;
 
 /**
+ * A DYNAMIC bunfs specifier: `import("/$bunfs/…")` or
+ * `import.meta.require("/$bunfs/…")`.
+ *
+ * Kept separate from BUNFS_IMPORT_RE because that pattern must NOT match these:
+ * its optional-clause form would match the bare `import` of `import(` and
+ * rewrite the specifier while leaving the call parenthesis, and more
+ * importantly the two resolve from different tables.
+ *
+ * Group 1 is the callee plus its opening paren (preserved verbatim, so
+ * `import.meta.require(` stays what it was); group 2 is the specifier.
+ */
+const BUNFS_DYNAMIC_RE =
+  /(\bimport(?:\.meta\.require)?\s*\(\s*)["'](\/\$bunfs\/[^"']+)["']/g;
+
+/**
+ * Marker prefix for a dynamic specifier that could NOT be resolved to a chunk.
+ *
+ * It is a made-up URL PROTOCOL, which is the point: bun does not try to resolve
+ * an unknown protocol at build time, so one unresolvable lazy edge no longer
+ * fails the whole bundle, but the import still throws `Cannot find module
+ * 'claudiverse-unresolved-chunk:/$bunfs/…'` if that code path ever runs.
+ *
+ * MEASURED (2026-09-03), positive-controlled both ways on a two-branch probe:
+ * compiled clean, printed nothing extra when the branch was not taken, and threw
+ * naming the original specifier when it was.
+ *
+ * Keeping the original specifier in the string is deliberate — the failure names
+ * the exact chunk that was never identified, so it is diagnosable from a crash
+ * report alone.
+ */
+export const UNRESOLVED_CHUNK_PREFIX = "claudiverse-unresolved-chunk:";
+
+/**
  * Does this tree already carry a real ESM import graph?
  *
  * Chunked builds (>=2.1.242) are ~1400-1700 ESM chunks that ALREADY import and
@@ -277,14 +310,27 @@ function hasNativeImportGraph(
  * 0 ambiguous, 0 unresolved) and records a chunk INDEX per import, which
  * `_mapping.json` maps to the emitted output_path.
  *
- * SCOPE — what this deliberately does NOT touch. Only STATIC imports are in the
- * manifest, so only static imports are retargeted. Measured on 2.1.259 the tree
- * also holds 1,104 `await import('/$bunfs/…')` and 320
- * `import.meta.require('/$bunfs/…')` sites. Those are runtime specifiers, not
- * bindings: they create no top-level name, so they cannot cause the duplicate-
- * declaration failure this fixes, and leaving them alone keeps the ESM parse
- * gate green. They ARE still dead paths for a reassembled bundle, which is a
- * step-4 concern and is reported by the counter below rather than assumed away.
+ * DYNAMIC specifiers are retargeted TOO, from a separate table.
+ *
+ * They were once left alone on the grounds that they create no binding and so
+ * cannot cause the duplicate-declaration failure above — true, and it kept the
+ * ESM parse gate green, which is exactly why the real problem stayed invisible.
+ * MEASURED 2026-09-03: step 4 bundling the 2.1.259 tree fails with
+ * `Could not resolve: "/$bunfs/root/chunk-d9r2qdh8.js"` on the entry module's
+ * `let { main } = await import(...)`. The app reaches `main` ONLY through that
+ * dynamic import, so an unretargeted dynamic specifier is not a cosmetic
+ * leftover — it is the edge the whole program hangs from.
+ *
+ * The dynamic table is built by extract_chunks.py resolve_dynamic() and written
+ * beside the manifest as <manifest>-dynamic.json. It is a SEPARATE table
+ * because the two populations are disjoint: measured on 2.1.259, of 757 distinct
+ * dynamic specifiers ZERO also appear as a static import, so the static table
+ * contributes nothing to them and they carry their own coverage figure
+ * (1,127/1,487 sites; 500/757 specifiers).
+ *
+ * A dynamic specifier that stays unresolved is left verbatim. That is the
+ * correct failure: bun then reports it by name at bundle time, whereas
+ * rewriting it to a guess would resolve to the WRONG module silently.
  */
 function retargetChunkImports(
   projectDir: string,
@@ -301,6 +347,25 @@ function retargetChunkImports(
   const indexToOutput = new Map<number, string>();
   for (const section of mapping.sections) {
     indexToOutput.set(section.index, section.output_path);
+  }
+
+  // The DYNAMIC specifier table, written beside the manifest by
+  // extract_chunks.py. Absent for a graph produced before dynamic resolution
+  // existed: that is not fatal here (static retargeting is unaffected), but it
+  // IS reported, because a chunked build whose dynamic edges are all unresolved
+  // cannot reach `main` and would fail at step 4 with a resolve error whose
+  // cause is this missing file rather than the tree.
+  const dynamicPath = graphPath.endsWith(".json")
+    ? graphPath.slice(0, -5) + "-dynamic.json"
+    : graphPath + ".dynamic";
+  const dynamicSpecs: Record<string, number> = fs.existsSync(dynamicPath)
+    ? JSON.parse(fs.readFileSync(dynamicPath, "utf-8"))
+    : {};
+  if (!fs.existsSync(dynamicPath)) {
+    console.log(
+      `  ⚠️  no dynamic specifier table at ${dynamicPath} — dynamic imports ` +
+        `will NOT be retargeted (re-run extract_chunks.py --manifest)`,
+    );
   }
 
   // ONE GLOBAL specifier -> chunk index table, not a per-chunk one.
@@ -355,6 +420,9 @@ function retargetChunkImports(
   let specifiersRewritten = 0;
   let unresolved = 0;
   const unresolvedSpecs = new Set<string>();
+  let dynRewritten = 0;
+  let dynUnresolved = 0;
+  const dynUnresolvedSpecs = new Set<string>();
 
   for (const section of mapping.sections) {
     const fullPath = path.join(projectDir, section.output_path);
@@ -362,20 +430,103 @@ function retargetChunkImports(
     const code = fs.readFileSync(fullPath, "utf-8");
 
     let touched = false;
-    const rewritten = code.replace(
+    let rewritten = code.replace(
       BUNFS_IMPORT_RE,
       (whole, head: string, spec: string) => {
         const out = specToOutput.get(spec);
         if (!out) {
           unresolved++;
           unresolvedSpecs.add(spec);
-          return whole;
+          // Same neutralisation as the dynamic pass below, for the same reason:
+          // a /$bunfs path must resolve at BUILD time, so leaving it verbatim
+          // fails the bundle. MEASURED on 2.1.259 these are 5 specifiers over
+          // 875 sites, all BARE SIDE-EFFECT imports of chunks that export
+          // nothing — no clause, dynamic or import.meta.require site names a
+          // symbol from them anywhere, so symbol intersection cannot reach them.
+          //
+          // ⚠️ These are STATIC side-effect imports, so unlike a lazy edge they
+          // run at module load, and neutralising one means its side effect
+          // NEVER happens rather than happening late. That is a real behaviour
+          // change and is why they stay listed by name above.
+          //
+          // ⚠️ AND IT IS NOT KNOWN TO BE HARMLESS. The tempting reading — that
+          // an unresolved side-effect import must be an empty module, so
+          // dropping it is a no-op — does NOT hold: 2.1.259 has 5 such
+          // specifiers and only 4 empty-bodied chunks in the whole bundle, so
+          // at least one of them names a chunk with a real body. They cannot be
+          // told apart, because the reason they are unresolved is precisely
+          // that nothing names a symbol from them.
+          //
+          // They are neutralised because the alternative is no chunked build at
+          // all, not because they were shown to be inert. If a chunked binary
+          // ever misbehaves in a way that smells like missing module-load
+          // initialisation, these 5 are the first suspects.
+          //
+          // 🔴 DROPPED, NOT SENTINELLED — and the difference is the whole build.
+          // The UNRESOLVED_CHUNK_PREFIX sentinel is correct for a DYNAMIC edge:
+          // an unknown protocol survives bundling and throws only if that code
+          // path runs. A STATIC bare import is hoisted and evaluated at load, so
+          // the same sentinel throws IMMEDIATELY. MEASURED 2026-09-03: a build
+          // that sentinelled these died on `--version` with
+          //   Cannot find module 'claudiverse-unresolved-chunk:/$bunfs/root/chunk-ck0tqv1m.js'
+          // That one specifier alone appears in 555 of 1649 files, so the
+          // "fails only if its code path runs" reasoning does not transfer from
+          // the dynamic case — there is no path that avoids it.
+          //
+          // Emitting nothing keeps the module-load side effect missing (the
+          // hazard documented above, unchanged) but lets the binary start, which
+          // is the only way to find out whether that side effect mattered.
+          return "";
         }
         touched = true;
         specifiersRewritten++;
         return `${head}'${computeRelativePath(section.output_path, out)}'`;
       },
     );
+
+    // Dynamic sites, from the separate table. Run AFTER the static pass; the two
+    // patterns are disjoint (the static one does not match `import(` or
+    // `import.meta.require(`, verified), so neither can rewrite the other's
+    // sites or double-rewrite an already-relative specifier.
+    rewritten = rewritten.replace(
+      BUNFS_DYNAMIC_RE,
+      (whole, head: string, spec: string) => {
+        const idx = dynamicSpecs[spec];
+        const out = idx === undefined ? undefined : indexToOutput.get(idx);
+        if (!out) {
+          dynUnresolved++;
+          dynUnresolvedSpecs.add(spec);
+          // An unresolved specifier CANNOT be left verbatim: /$bunfs/root/... is
+          // a path the bundler must resolve at BUILD time even though the import
+          // itself is deferred to runtime, so one unresolvable specifier fails
+          // the whole bundle. MEASURED on 2.1.259: exactly one such specifier —
+          // chunk-vy55rnd7.js, quoted once, in a bare `Promise.all([import(…)])`
+          // preload that destructures nothing and so names no symbol anywhere —
+          // was the single remaining bundle error.
+          //
+          // So the SPECIFIER is replaced by a module path that does not exist,
+          // built from a name the bundler treats as external rather than
+          // resolving. The call shape is left exactly as it was — only the
+          // string inside the parentheses changes — because this regex does not
+          // consume the closing paren and rewriting the callee would leave it
+          // dangling (verified: doing so produced `Promise.reject(...)),`).
+          //
+          // That converts a build-time hard stop into a runtime failure on the
+          // one code path that actually needs the module, which is the honest
+          // shape of what is known: the edge is unresolved, not absent.
+          // Silently dropping it would let a real dependency vanish with no
+          // trace; this way the original specifier is still in the binary, in
+          // the error the failing path throws.
+          return `${head}'${UNRESOLVED_CHUNK_PREFIX}${spec}'`;
+        }
+        touched = true;
+        dynRewritten++;
+        return `${head}'${computeRelativePath(section.output_path, out)}'`;
+      },
+    );
+    // The neutralisation above rewrites text, so the file must be written even
+    // if no specifier was successfully retargeted in it.
+    if (rewritten !== code) touched = true;
 
     if (touched) {
       fs.writeFileSync(fullPath, rewritten);
@@ -384,7 +535,8 @@ function retargetChunkImports(
   }
 
   console.log(
-    `  Retargeted ${specifiersRewritten} /$bunfs specifiers in ${filesRewritten} files`,
+    `  Retargeted ${specifiersRewritten} static + ${dynRewritten} dynamic ` +
+      `/$bunfs specifiers in ${filesRewritten} files`,
   );
   // Loud, because a surviving bunfs specifier resolves to nothing: renames stop
   // propagating through it and the reassembled bundle carries a dead import.
@@ -393,10 +545,360 @@ function retargetChunkImports(
   // remedy (identify those chunks) is per-specifier.
   if (unresolved > 0) {
     console.log(
-      `  🔴 ${unresolved} /$bunfs sites could NOT be retargeted ` +
+      `  🔴 ${unresolved} static /$bunfs sites could NOT be retargeted ` +
         `(${unresolvedSpecs.size} distinct specifiers)`,
     );
     for (const s of [...unresolvedSpecs].sort()) console.log(`       ${s}`);
+  }
+  // Dynamic residue is counted but NOT listed by name: it is a few hundred
+  // specifiers, not a handful, and printing them all would bury the static list
+  // above, which is the actionable one. An unresolved dynamic edge only breaks
+  // the code path that takes it, and bun names it at bundle time if it is on
+  // the reachable graph.
+  if (dynUnresolved > 0) {
+    console.log(
+      `  ⚠️  ${dynUnresolved} dynamic /$bunfs sites could NOT be retargeted ` +
+        `(${dynUnresolvedSpecs.size} distinct specifiers) — these stay lazy and ` +
+        `fail only if their code path runs`,
+    );
+  }
+}
+
+/**
+ * A RESOLVED-RELATIVE `import.meta.require('./x.js')` site.
+ *
+ * Group 1 is the specifier. Only relative specifiers match: a
+ * `claudiverse-unresolved-chunk:` sentinel must NOT be touched here (see
+ * bindStaticRequires for why).
+ */
+const RELATIVE_META_REQUIRE_RE =
+  /import\.meta\.require\(\s*['"](\.[^'"]*)['"]\s*\)/g;
+
+/**
+ * A load of a file EMBEDDED IN THE ORIGINAL BINARY, e.g.
+ * `ve('/$bunfs/root/loopAutonomousPreamble-07qcyhv4.md')`.
+ *
+ * These are bun standalone-executable assets — bundled skills, prompt
+ * templates, `.node` addons — that live in the source binary's virtual
+ * filesystem. The chunk tree records the PATH but never the CONTENT, so nothing
+ * in the rebuilt tree can satisfy one.
+ *
+ * Matches any callee, not just the `ve` alias: `ve` is a minified re-export of
+ * `import.meta.require` (`_unmatched/0006_G.js`: `ve = import.meta.require`)
+ * and the alias is free to change between builds, whereas the `/$bunfs/root/`
+ * specifier with a non-.js extension is the stable signal.
+ */
+const EMBEDDED_ASSET_RE =
+  /['"]\/\$bunfs\/root\/[^'"]+\.(?:md|txt|node|mjs|html|json|wasm|zst)['"]/;
+
+/** Global form, to visit EVERY asset reference in a module. */
+const EMBEDDED_ASSET_RE_ALL = new RegExp(EMBEDDED_ASSET_RE.source, "g");
+
+/**
+ * Does this module reference an embedded asset in a position that runs when the
+ * module is EVALUATED (as opposed to when some function is later called)?
+ *
+ * Only one lazy shape is recognised, deliberately: the CJS wrapper
+ * `<name>.exports = ve('/$bunfs/root/…')`, whose enclosing `w(...)` returns a
+ * thunk and therefore cannot fire at import time. Everything else -- including
+ * anything this function cannot classify -- counts as import-time, so the
+ * conservative answer remains the default and an unfamiliar shape keeps its
+ * site as a runtime call rather than being silently hoisted.
+ */
+function importTimeAssetRef(text: string): boolean {
+  EMBEDDED_ASSET_RE_ALL.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = EMBEDDED_ASSET_RE_ALL.exec(text)) !== null) {
+    // ⚠️ LOOK BACK A FIXED WINDOW, NOT TO THE START OF THE LINE. This runs at
+    // step 2.5, BEFORE prettify (2.7), so the input is still minified and a
+    // whole module can be one line -- a line-based rule saw the entire file as
+    // "context" and classified everything as import-time, which is why the
+    // narrowing silently had no effect the first time.
+    const before = text.slice(Math.max(0, m.index - 80), m.index).trimEnd();
+    // ⛔ NO EXEMPTION FOR THE CJS `exports = ve(…)` WRAPPER. It looks lazy --
+    // `w(...)` does return a thunk -- but laziness of the WRAPPER says nothing
+    // about whether anything CALLS it during module evaluation, and in this
+    // bundle something does: services/compact/precomputedCompact.js builds
+    //   dir = { simple_plan: iir(), visual_plan: air(), … }
+    // at top level, invoking all three thunks on import. Exempting the shape
+    // let that module be hoisted and moved the failure from a resolvable
+    // "Cannot find module '../..'" to
+    //   Cannot find module '/$bunfs/root/simple_plan-c1nffcyk.txt'
+    // i.e. it made things worse, not better. Deciding this properly needs
+    // call-graph reachability, not a syntactic look-back, so the conservative
+    // answer stands.
+    //
+    // (b) A bare path CONSTANT. The hazard is the CALL, not the string: the
+    //     module that named the very first missing asset holds
+    //       var i = '/$bunfs/root/plugin-eval-quickref-…md.zst';
+    //       var JSt = et(i, import.meta.dirname);
+    //     where `et` is a real `fs.readFileSync` + zstd decode (see
+    //     `_unmatched/0207_h4t.js`), NOT `import.meta.require`. That form works
+    //     once the asset is embedded -- it is the whole point of the asset
+    //     pass -- so treating the string literal as a hazard would keep a
+    //     module unhoistable for a load that now succeeds.
+    if (/(?:^|[;{}\s])(?:var|let|const)\s+[A-Za-z_$][\w$]*\s*=$/.test(before))
+      continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Convert resolved-relative `import.meta.require(spec)` into a hoisted
+ * `import * as NS from spec` plus a reference to NS at the call site.
+ *
+ * WHY THIS IS NEEDED AT ALL. `import.meta.require` resolves at RUNTIME against
+ * the real filesystem. bun therefore never adds the target to the bundle, and a
+ * single-file executable has no filesystem to resolve against — so the call
+ * throws at the moment it runs. MEASURED on 2.1.259: the binary builds, reports
+ * the right `--version`, and dies on the first real turn with
+ *   Cannot find module '../_unmatched/0569_udsInboxShape.js' from '/$bunfs/root/…'
+ * The path is CORRECT and the file EXISTS in the tree — retargeting already did
+ * its job. It is the CALL FORM that cannot survive compilation.
+ *
+ * WHY A NAMESPACE IMPORT IS THE RIGHT TARGET FORM. Every site was inventoried
+ * rather than assumed. On 2.1.259 there are 132 relative sites over 102 distinct
+ * specifiers (87 distinct files), in exactly three shapes:
+ *   - 81 bare namespace bindings — `var r_ = import.meta.require('…')`, whose
+ *     members are read later (`r_.createCronScheduler`, verified present as a
+ *     named export of the target);
+ *   - 51 single-member reads — `… = import.meta.require('…').udsInboxShape`;
+ *   - 35 destructures — `let { setOnEnqueue: p } = import.meta.require('…')`
+ *     (a subset of the bare form: nothing follows the closing paren).
+ * All three consume the result as a MODULE NAMESPACE OBJECT, and every target is
+ * real ESM with a matching `export { … }`. So substituting the namespace binding
+ * for the call preserves the semantics of all 132 without touching the
+ * surrounding syntax — the member access, the destructuring pattern and the
+ * comma-separated `var` list are all left byte-for-byte alone, which is why this
+ * does not need to understand any of them.
+ *
+ * 🔴 THE COST, MEASURED AND ACCEPTED: THIS MAKES THE EDGE EAGER.
+ * A static import is hoisted and its module evaluates at load, whereas
+ * `import.meta.require` evaluated only when the line ran. Probed directly with
+ * `bun build --compile` and positive-controlled both ways: a module whose top
+ * level prints a side effect prints it BEFORE the entry's first line under
+ * `import * as ns`, and NOT AT ALL under `await import()` when the branch is not
+ * taken. So the timing change is real and is not hypothetical.
+ *
+ * That matters because bundler.ts documents a probe build that crashed by
+ * eagerly invoking a native image-processor `.node` load. So the 87 target files
+ * were checked for that specific hazard instead of being assumed benign: exactly
+ * ONE (`_tentative/1260_modifiers.js`) mentions a `.node` at all, and its load
+ * sits inside a lazily-called function that is wrapped in `try { … } catch {
+ * return null }` — it does not run on import, and it cannot throw if it did.
+ *
+ * The alternative — rewriting to `await import()` to keep it lazy — is NOT
+ * available: 132 of these sites are synchronous expressions in `var`
+ * initialisers and destructuring patterns, and making them async would require
+ * making every enclosing function async and every caller await it, which changes
+ * far more behaviour than eager evaluation does.
+ *
+ * ⚠️ BOUND: this establishes that no target performs a native load ON IMPORT. It
+ * does NOT establish that every target's top level is side-effect-free in
+ * general. If a chunked binary ever misbehaves in a way that smells like
+ * too-early initialisation, this eager-ing is the first suspect.
+ *
+ * SENTINEL SITES ARE DELIBERATELY LEFT ALONE. The 135 sites quoting
+ * `claudiverse-unresolved-chunk:` name chunks that were never identified, so
+ * there is nothing to import them FROM. They keep the call form on purpose: a
+ * call runs only if its line runs, so they throw a named error on the one path
+ * that needs them instead of at load. That reasoning was CHECKED here rather
+ * than carried over — the same sentinel on a STATIC import killed `--version`
+ * outright, because a hoisted import always evaluates. It is safe here for the
+ * opposite reason it was fatal there: this population stays a call.
+ */
+function bindStaticRequires(projectDir: string, mapping: Mapping): void {
+  let sitesRewritten = 0;
+  let filesRewritten = 0;
+  let missingTargets = 0;
+  const missingSpecs = new Set<string>();
+  let assetGuarded = 0;
+  const assetGuardedSpecs = new Set<string>();
+
+  // Memo for loadsEmbeddedAsset, keyed by absolute path. The walk below is
+  // transitive and the graph has ~1650 nodes with heavy sharing, so without
+  // this the check is quadratic.
+  const assetMemo = new Map<string, boolean>();
+
+  /**
+   * Does this module, or anything it STATICALLY imports, load an embedded
+   * binary asset?
+   *
+   * 🔴 THIS GUARD EXISTS BECAUSE ITS ABSENCE WAS MEASURED, NOT PREDICTED.
+   * Binding every relative `import.meta.require` made
+   * `_unmatched/0965_AUTONOMOUS_LOOP_PREAMBLE.js` a static import in 5 files —
+   * it had ZERO static importers before — and that module does
+   * `var g = ve('/$bunfs/root/loopAutonomousPreamble-07qcyhv4.md')` at TOP
+   * LEVEL. Eager evaluation therefore ran a load that upstream only ever ran
+   * lazily, and the binary died on the first turn with
+   *   Cannot find module '/$bunfs/root/loopAutonomousPreamble-07qcyhv4.md'
+   * This is exactly the eager-evaluation hazard bindStaticRequires documents as
+   * accepted-but-unproven; it turned out to be real, so it is now bounded here
+   * rather than left as a caveat.
+   *
+   * TRANSITIVE, not direct: the importing module need not touch an asset itself
+   * for eager evaluation to reach one through its own static imports.
+   *
+   * A module that cannot be read, or an import that cannot be resolved, counts
+   * as UNSAFE. The failure mode of a false "safe" is a binary that dies at
+   * startup; the failure mode of a false "unsafe" is one call site left as a
+   * runtime `import.meta.require`, which is where it started.
+   */
+  function loadsEmbeddedAsset(absPath: string, seen = new Set<string>()): boolean {
+    const memo = assetMemo.get(absPath);
+    if (memo !== undefined) return memo;
+    // A cycle is not evidence of an asset. Return false WITHOUT memoising: this
+    // answer is only valid for the branch that is mid-walk, and caching it
+    // would leak that assumption to unrelated callers.
+    if (seen.has(absPath)) return false;
+    seen.add(absPath);
+
+    let text: string;
+    try {
+      text = fs.readFileSync(absPath, "utf-8");
+    } catch {
+      assetMemo.set(absPath, true);
+      return true;
+    }
+    // 🔴 RECOVERING THE ASSET DOES NOT MAKE THE LOAD SAFE TO HOIST, and this is
+    // the second time that assumption has been tested here. The load form is
+    // `ve(path)` where `ve = import.meta.require`, and MEASURED with a
+    // two-file probe: `import.meta.require` on an embedded `.md` does not
+    // return its text, it PARSES IT AS JAVASCRIPT --
+    //   SyntaxError: Invalid character: '#'  at <parse> (/$bunfs/root/doc.md:1:1)
+    // -- and on a `.txt`, "Unexpected identifier". Embedding the bytes under
+    // the right name (which tools/extract_assets.py now does) changes the error
+    // from "Cannot find module" to a parse error; it does not make the call
+    // work. Making these edges eager was tried and produced exactly that.
+    //
+    // Upstream never hits it because the sites stay LAZY: the real 2.1.259
+    // binary completes a turn with these modules unevaluated. So the guard is
+    // unconditional on purpose, and `recoveredAssets` is deliberately NOT
+    // consulted here.
+    // An asset load only matters if it runs AT IMPORT TIME. A reference inside
+    // a CJS lazy wrapper does not: `w = (a,b) => () => (b || a(...), b.exports)`
+    // returns a THUNK, so `w(function(_,m){ m.exports = ve('…') })` runs its
+    // body on first require, never on module evaluation. Treating those as
+    // hazards left whole modules unhoistable for a load that cannot fire --
+    // and that is what kept `_unmatched/0899_MonitorTool.js` unresolvable, via
+    // a transitive edge to three such wrappers in
+    // services/compact/precomputedCompact.js.
+    //
+    // MEASURED before narrowing: of 175 asset references in the 2.1.259 tree,
+    // 12 are this `exports =` form and 163 are not, so this exempts a small,
+    // specific population rather than gutting the guard.
+    if (importTimeAssetRef(text)) {
+      assetMemo.set(absPath, true);
+      return true;
+    }
+
+    const dir = path.dirname(absPath);
+    const importRe = /\bfrom\s*['"](\.[^'"]*)['"]|\bimport\s*['"](\.[^'"]*)['"]/g;
+    let m: RegExpExecArray | null;
+    while ((m = importRe.exec(text)) !== null) {
+      const spec = m[1] ?? m[2];
+      if (!spec) continue;
+      const child = path.resolve(dir, spec);
+      if (loadsEmbeddedAsset(child, seen)) {
+        assetMemo.set(absPath, true);
+        return true;
+      }
+    }
+    assetMemo.set(absPath, false);
+    return false;
+  }
+
+  for (const section of mapping.sections) {
+    const fullPath = path.join(projectDir, section.output_path);
+    if (!fs.existsSync(fullPath)) continue;
+    const code = fs.readFileSync(fullPath, "utf-8");
+    RELATIVE_META_REQUIRE_RE.lastIndex = 0;
+    if (!RELATIVE_META_REQUIRE_RE.test(code)) continue;
+
+    // One namespace binding per DISTINCT specifier in this file. A specifier
+    // quoted at several sites (measured: up to 5 in one file) must not produce
+    // several `import * as` of the same module under different names — legal,
+    // but it bloats the file and obscures the diff.
+    const specToNs = new Map<string, string>();
+    const fileDir = path.dirname(path.join(projectDir, section.output_path));
+
+    RELATIVE_META_REQUIRE_RE.lastIndex = 0;
+    const rewritten = code.replace(
+      RELATIVE_META_REQUIRE_RE,
+      (whole, spec: string) => {
+        // The specifier must name a file that actually exists, resolved the
+        // same way the runtime would have. If it does not, converting the call
+        // into a static import turns a runtime failure on one path into a
+        // BUILD failure for the whole binary — strictly worse. Leave it as a
+        // call and report it.
+        const targetAbs = path.resolve(fileDir, spec);
+        if (!fs.existsSync(targetAbs)) {
+          missingTargets++;
+          missingSpecs.add(spec);
+          return whole;
+        }
+        // Leave the call alone when hoisting it would drag an embedded-asset
+        // load into module-load time. Staying a call is the STATUS QUO for
+        // this site, not a regression: it fails only if its own path runs,
+        // which is what it did before this pass existed.
+        if (loadsEmbeddedAsset(targetAbs)) {
+          assetGuarded++;
+          assetGuardedSpecs.add(spec);
+          return whole;
+        }
+        let ns = specToNs.get(spec);
+        if (!ns) {
+          // Name derived from the specifier, so two different specifiers in one
+          // file cannot collide. The `__cvReq` prefix is not a name the
+          // minified upstream code can produce, so it cannot shadow a real
+          // binding.
+          ns = "__cvReq" + spec.replace(/[^A-Za-z0-9_$]/g, "_");
+          specToNs.set(spec, ns);
+        }
+        sitesRewritten++;
+        return ns;
+      },
+    );
+
+    if (specToNs.size === 0) {
+      if (rewritten !== code) fs.writeFileSync(fullPath, rewritten);
+      continue;
+    }
+
+    // Imports are PREPENDED. ESM hoists declarations regardless of position, so
+    // placement is not a correctness question, but putting them at the top
+    // keeps the emitted file readable and matches what the rest of the tree
+    // looks like.
+    const header =
+      [...specToNs].map(([spec, ns]) => `import * as ${ns} from '${spec}';`)
+        .join("\n") + "\n";
+    fs.writeFileSync(fullPath, header + rewritten);
+    filesRewritten++;
+  }
+
+  console.log(
+    `  Bound ${sitesRewritten} relative import.meta.require sites to static ` +
+      `namespace imports in ${filesRewritten} files`,
+  );
+  if (assetGuarded > 0) {
+    // Reported, because these are the sites that will still throw at runtime if
+    // their path runs — and because a sudden change in this count between
+    // versions means the embedded-asset surface moved.
+    console.log(
+      `  ⚠️  ${assetGuarded} sites left as calls (${assetGuardedSpecs.size} distinct ` +
+        `specifiers) — hoisting them would eagerly load an embedded /$bunfs asset`,
+    );
+  }
+  if (missingTargets > 0) {
+    // Left as calls on purpose (see above). Listed by specifier because the
+    // remedy is per-specifier, and because a target that is missing from the
+    // tree is a retargeting bug, not a bundling one.
+    console.log(
+      `  🔴 ${missingTargets} relative import.meta.require sites name a file ` +
+        `that does not exist (${missingSpecs.size} distinct) — left as calls`,
+    );
+    for (const s of [...missingSpecs].sort()) console.log(`       ${s}`);
   }
 }
 
@@ -432,6 +934,10 @@ export function reconstructModules(projectDir: string): void {
         `native ESM graph present, retargeting specifiers instead of synthesising`,
     );
     retargetChunkImports(projectDir, mapping, resolved);
+    // AFTER retargeting, never before: retargeting is what turns a /$bunfs
+    // specifier into the relative path this pass keys on, so running it first
+    // would see almost nothing to bind.
+    bindStaticRequires(projectDir, mapping);
     return;
   }
 

@@ -29,3 +29,12 @@ HANDOFF.md
 # TS lock
 tools-ts/bun.lock
 .DS_Store
+
+# Assets extracted from the upstream binary (2.1.242+ chunked builds embed .md/
+# .txt/.node in a bun VFS). Same status as versionref/: copyrighted upstream
+# content, reproducible from the source binary via tools/extract_assets.py, so
+# never committed.
+*.node
+*-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].md
+*-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].txt
+*.txt.zst

@@ -96,6 +96,15 @@ if [[ "$FORMAT" = "chunked" ]]; then
         "$SCRIPT_DIR/.deob_cache/modules" \
         --manifest "$SCRIPT_DIR/.deob_cache/chunk-graph.json" \
         --splitter-compat
+
+    # The chunks are only the CODE. The `.md`/`.txt` assets upstream embeds with
+    # `import ... with { type: "file" }` survive into the tree as bare path
+    # literals, so without this the rebuilt binary loads, prints --version, and
+    # then dies on the first real turn with "embedded text asset is missing or
+    # corrupt". --verify makes a wrong name->payload pairing fatal HERE rather
+    # than silently shipping one asset's bytes under another asset's name.
+    ASSET_DIR="$SCRIPT_DIR/.deob_cache/assets"
+    python3 "$TOOLS_PY/extract_assets.py" "$BINARY" -o "$ASSET_DIR" --verify
 elif [[ -f "${SOURCE_CLI:-}" ]]; then
     # versionref cli.js is the raw extracted function (no trailing invocation);
     # append the same call the binary-extraction path adds.
@@ -168,6 +177,18 @@ cd "$SCRIPT_DIR"
 # /$bunfs/root/chunk-*.js specifiers onto the emitted filenames instead of
 # synthesising a second, duplicate set of bindings. CHUNK_GRAPH is passed
 # explicitly because $DEOB is relocatable via DEOB_DIR and the cache is not.
+#
+# Runs BEFORE 2.5 on purpose. `ve('/$bunfs/root/x.md')` is
+# `import.meta.require`, which PARSES the asset as JavaScript rather than
+# returning its text (measured: SyntaxError at <parse> on both .md and .txt), so
+# a module containing one cannot be safely hoisted. Turning those calls into
+# embedded-file reads first is what lets 2.5's guard stop firing for them.
+if [[ -d "${ASSET_DIR:-}" ]]; then
+    echo ""
+    echo "=== Step 2.4: Rewrite embedded-asset loads ==="
+    python3 "$TOOLS_PY/rewrite_asset_loads.py" "$DEOB" "$ASSET_DIR"
+fi
+
 echo ""
 echo "=== Step 2.5: Module reconstruction ==="
 cd "$TOOLS_TS"
@@ -222,7 +243,7 @@ cd "$SCRIPT_DIR"
 echo ""
 echo "=== Step 3: Apply patches ==="
 PATCH_FAILURES=()
-if [ "${SKIP_PATCHES:-}" = "1" ]; then
+if [ "${SKIP_PATCHES:-}" = "1" ] && [ "${ALLOW_UNPATCHED_BUILD:-}" != "1" ]; then
     # SKIP_PATCHES means "materialise the tree for inspection", NOT "build".
     # It MUST stop here. Falling through to steps 4-5 would compile an UNPATCHED
     # bundle — no sidecar, no session hooks, no trust skip — and write it to
@@ -232,7 +253,34 @@ if [ "${SKIP_PATCHES:-}" = "1" ]; then
     echo "  SKIP_PATCHES=1 — clean unpatched baseline left at: $DEOB"
     echo ""
     echo "Stopping before reassemble/compile (an unpatched build must never be produced)."
+    echo "To build one deliberately (bringing up a new bundle FORMAT, where the"
+    echo "question is whether the pipeline produces a running binary at all, and"
+    echo "patches are a separate lane), set ALLOW_UNPATCHED_BUILD=1 and an OUT_BIN."
     exit 0
+elif [ "${SKIP_PATCHES:-}" = "1" ]; then
+    # Deliberately unpatched. The guard above is NOT weakened: it still fires for
+    # every caller that does not ask for this by name, and the ONE thing it
+    # exists to prevent — an unpatched build reaching the fleet — is enforced
+    # here instead of by refusing to build, because the danger was never the
+    # compile, it was the DESTINATION.
+    #
+    # So an unpatched build may not be written to $SCRIPT_DIR/claude, and an
+    # explicit OUT_BIN is mandatory: defaulting to the live path is exactly the
+    # accident the guard was written for. An unpatched binary reports a correct
+    # --version and starts normally, so nothing downstream would notice.
+    OUT_BIN_CHECK="${OUT_BIN:-claude}"
+    case "$OUT_BIN_CHECK" in /*) OUT_PATH_CHECK="$OUT_BIN_CHECK";; *) OUT_PATH_CHECK="$SCRIPT_DIR/$OUT_BIN_CHECK";; esac
+    if [ "$OUT_PATH_CHECK" = "$SCRIPT_DIR/claude" ]; then
+        echo "🔴 ALLOW_UNPATCHED_BUILD=1 requires an explicit OUT_BIN that is not 'claude'."
+        echo "   $SCRIPT_DIR/claude is the LIVE fleet binary — every new seat spawns from it."
+        echo "   An unpatched build there is silently missing the whole claudiverse"
+        echo "   integration while still reporting the right version."
+        exit 1
+    fi
+    echo "  SKIP_PATCHES=1 + ALLOW_UNPATCHED_BUILD=1 — building an UNPATCHED binary."
+    echo "  ⚠️  This binary has NO claudiverse integration (no sidecar, no session"
+    echo "     hooks, no trust skip). It is for format bring-up only."
+    echo "  tree: $DEOB   ->   $OUT_PATH_CHECK"
 elif [ -d "$SCRIPT_DIR/patches.d" ]; then
     # Init git so git apply works
     cd "$DEOB"
@@ -270,11 +318,44 @@ if [ "${#PATCH_FAILURES[@]}" -gt 0 ]; then
     exit 1
 fi
 
-# Step 4: Reassemble
+# Step 4: Reassemble (monolithic) or bundle (chunked)
+#
+# TWO TREE SHAPES NEED TWO DIFFERENT STEP 4s, and the difference is not cosmetic.
+#
+# A MONOLITHIC tree came from one CJS bundle where every declaration really did
+# share one global scope, so reassembler.ts strips the imports/exports that
+# module-reconstruct.ts synthesised and concatenates the sections back. That is
+# a faithful inverse of how the tree was made.
+#
+# A CHUNKED tree is a genuine ESM graph of ~1650 separately-scoped modules, and
+# upstream's bundler reused top-level names freely across them because it never
+# had to place them in one scope. Concatenating THAT is not an inverse of
+# anything — MEASURED on 2.1.259, it yields 9,585 "X has already been declared"
+# errors, an identical count with side-effect imports stripped and with them
+# left in, so the collisions come from the concatenation itself and no better
+# strip regex can remove them. Bundling the same tree gives zero collisions.
+#
+# The dispatch is on a MEASURED property of the tree (presence of a
+# preamble/tail section pair in _mapping.json), never a version number — the
+# studio calls these tools with no version context, the same reason build.sh
+# step 1, module-reconstruct.ts and renamer.ts all measure instead of being told.
 echo ""
-echo "=== Step 4: Reassemble ==="
 cd "$TOOLS_TS"
-bun run src/reassembler.ts "$DEOB" "$SCRIPT_DIR/cli-runnable.js"
+if bun run src/bundler.ts --is-chunked "$DEOB"; then
+    echo "=== Step 4: Bundle (chunked tree) ==="
+    bun run src/bundler.ts "$DEOB" "$SCRIPT_DIR/cli-runnable.js"
+    cd "$SCRIPT_DIR"
+    # Turn the surviving asset PATH LITERALS back into real file imports, so
+    # step 5 embeds the bytes. Nothing else can do this: by the time the tree
+    # exists the `with { type: "file" }` imports are already gone.
+    if [[ -d "${ASSET_DIR:-}" ]]; then
+        python3 "$TOOLS_PY/inject_assets.py" \
+            "$SCRIPT_DIR/cli-runnable.js" "$ASSET_DIR"
+    fi
+else
+    echo "=== Step 4: Reassemble ==="
+    bun run src/reassembler.ts "$DEOB" "$SCRIPT_DIR/cli-runnable.js"
+fi
 cd "$SCRIPT_DIR"
 
 # Step 5: Compile
@@ -298,7 +379,28 @@ if [ "$OUT_PATH" = "$SCRIPT_DIR/claude" ]; then
 else
     echo "  output: $OUT_PATH (live fleet binary untouched)"
 fi
-BUN_CONFIG_FILE="" bun build "$SCRIPT_DIR/cli-runnable.js" --compile --outfile "$OUT_PATH" 2>&1
+# --external is scoped to the ONE made-up protocol module-reconstruct.ts uses to
+# mark a chunk specifier it could not resolve (UNRESOLVED_CHUNK_PREFIX). Step 4's
+# bundler declares the same thing, but this compile re-resolves the bundle's
+# imports, so the flag is needed in BOTH places or the build fails here instead.
+#
+# Deliberately NOT a blanket external rule: only specifiers carrying that prefix
+# are exempted, so a genuinely missing dependency still fails loudly. The import
+# throws "Cannot find module 'claudiverse-unresolved-chunk:…'" naming the
+# original chunk, and only on the code path that needs it. Harmless on a
+# monolithic build, which contains no such specifier.
+#
+# --asset-naming is LOAD-BEARING, not cosmetic. bun's default is
+# "[name]-[hash].[ext]", which would embed
+#   plugin-eval-quickref-7cde824c.md.zst
+# as
+#   plugin-eval-quickref-7cde824c.md-<bunhash>.zst
+# while the code still calls readFileSync("/$bunfs/root/<the original name>").
+# MEASURED with a two-file probe: the default rewrote a test asset's name and
+# "[name].[ext]" reproduced the upstream path byte-for-byte.
+BUN_CONFIG_FILE="" bun build "$SCRIPT_DIR/cli-runnable.js" --compile \
+    --asset-naming='[name].[ext]' \
+    --external 'claudiverse-unresolved-chunk:*' --outfile "$OUT_PATH" 2>&1
 
 echo ""
 echo "Done! Patched binary: $OUT_PATH"

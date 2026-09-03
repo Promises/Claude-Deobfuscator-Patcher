@@ -103,6 +103,90 @@ SIDE_EFFECT_IMPORT_RE = re.compile(
 )
 EXPORT_RE = re.compile(r"export\s*\{([^}]*)\}\s*;?\s*$")
 
+# Shared by destructured_names() and module_names().
+IDENT_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
+
+# ---------------------------------------------------------------------------
+# DYNAMIC specifiers: `import(...)` and `import.meta.require(...)`.
+#
+# These are the LAZY-LOAD edges. The app is lazily loaded — the entry chunk
+# reaches `main` through a dynamic import, so the static closure is only 6 of
+# 1649 chunks — and they must STAY dynamic in the rebuilt bundle: a probe build
+# that forced all 1649 chunks to evaluate eagerly printed the right version and
+# then crashed, because a chunk that is lazy upstream eagerly invoked a native
+# image-processor.node load.
+#
+# They resolve by the SAME exported-symbol intersection as clause imports,
+# because a dynamic site usually names symbols too:
+#     let{profileCheckpoint:m}=await import("/$bunfs/root/chunk-z8bmvqx9.js")
+# Each shape below is a different way a site names them. All of them feed one
+# intersection per specifier, so several weak sites can pin a chunk no single
+# site could.
+#
+# ⚠️ A dynamic specifier and a static one are DISJOINT populations here.
+# MEASURED on 2.1.259: of 757 distinct dynamic specifiers, ZERO also appear as a
+# static import, so the bundle-wide static table contributes NOTHING to them —
+# they must be resolved on their own evidence. (That also means the two tables
+# cannot contradict each other, and measured they do not: 0 conflicts.)
+# ---------------------------------------------------------------------------
+_SPEC = r"/\$bunfs/root/[^\"']+"
+
+# NOTE: these are built by CONCATENATION, not str.format — the patterns contain
+# regex braces (`\{`, `{2}`) that .format() would try to interpret as fields.
+#
+# `let{a:x,b:y} = await import("spec")` / `= import.meta.require("spec")`
+DYN_DESTRUCTURE_RE = re.compile(
+    r"\{([^{}]*)\}\s*=\s*(?:await\s+)?(?:import|import\.meta\.require)"
+    r"\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)"
+)
+# `import("spec").then(({a:x}) => ...)`
+DYN_THEN_DESTRUCTURE_RE = re.compile(
+    r"(?:import|import\.meta\.require)\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)"
+    r"\s*\.then\s*\(\s*(?:async\s*)?\(?\{([^{}]*)\}"
+)
+# `import("spec").then(m => m.sym)` — backreference ties the param to its use.
+DYN_THEN_MEMBER_RE = re.compile(
+    r"(?:import|import\.meta\.require)\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)"
+    r"\s*\.then\s*\(\s*(?:async\s*)?\(?([\w$]+)\)?\s*=>\s*\2\.([\w$]+)"
+)
+# `(await import("spec")).sym`
+DYN_AWAIT_MEMBER_RE = re.compile(
+    r"\(\s*await\s+import\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)\s*\)\s*\.([\w$]+)"
+)
+# `import.meta.require("spec").sym`
+DYN_DIRECT_MEMBER_RE = re.compile(
+    r"(?:import\.meta\.require|import)\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)"
+    r"\s*\.([\w$]+)"
+)
+# `let[{a},{b}] = await Promise.all([import(s1), import(s2)])` — positional.
+DYN_PROMISE_ALL_RE = re.compile(
+    r"\[([^\[\]]*)\]\s*=\s*await\s+Promise\.all\(\s*\[([^\[\]]*)\]\s*\)"
+)
+# `X = import.meta.require("spec")` binding a NAMESPACE, whose members are then
+# read as `X.sym` elsewhere in the same chunk.
+# `X = import.meta.require("spec")` and the THUNK form
+# `X = () => import.meta.require("spec")`, whose members are read as `X().sym`.
+# Both bind the namespace to X; only the read shape differs, and
+# namespace_members() understands both.
+DYN_NAMESPACE_RE = re.compile(
+    r"([\w$]+)\s*=\s*(?:\(\s*\)\s*=>\s*)?(?:await\s+)?"
+    r"(?:import\.meta\.require|import)"
+    r"\s*\(\s*[\"'](" + _SPEC + r")[\"']\s*\)"
+)
+# Every dynamic SITE, for the coverage denominator.
+DYN_SITE_RE = re.compile(
+    r"\b(?:import|import\.meta\.require)\s*\(\s*[\"'](" + _SPEC + r")[\"']"
+)
+# A bare quoted specifier, used to pick the specifier out of one Promise.all
+# element once the elements have been split positionally.
+QUOTED_SPEC_RE = re.compile(r"[\"'](" + _SPEC + r")[\"']")
+
+# A namespace variable whose members are read more than this many times is
+# almost certainly not a module namespace (it is a plain object being used
+# heavily), so only its first member is used as evidence rather than
+# intersecting a large set that would empty out on one false member.
+NAMESPACE_MEMBER_LIMIT = 8
+
 # The ONLY reliable monolithic/chunked discriminator.
 #
 # MEASURED 2026-09-03 on real upstream binaries: this marker is present in
@@ -157,6 +241,278 @@ def imported_names(clause):
             continue
         out.append(part.split(" as ")[0].strip())
     return out
+
+
+def destructured_names(clause):
+    """Source-side names from an object destructuring pattern.
+
+    `{a: x, b, c = 1}` READS a, b and c — the local aliases (x) are irrelevant,
+    because what pins the chunk is which symbols it EXPORTS. Anything that is
+    not a plain identifier (rest elements, nested patterns, computed keys) is
+    dropped rather than guessed: a wrong name would empty the intersection and
+    silently turn a resolvable specifier into an unresolved one.
+    """
+    out = []
+    for part in clause.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name = part.split(":")[0].strip().split("=")[0].strip()
+        if IDENT_RE.match(name):
+            out.append(name)
+    return out
+
+
+def split_top_level(text):
+    """Split on commas that are not nested inside (), [] or {}."""
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def namespace_members(text, var, owner):
+    """Symbols read off a variable that holds a module NAMESPACE.
+
+    `X = await import("spec")` (or a bare positional binding in a Promise.all)
+    names no symbols at the import itself — they appear later as `X.sym`. Those
+    member reads are the evidence.
+
+    Only members that SOME chunk exports are kept: a read of a plain property
+    would otherwise empty the intersection and lose an otherwise-resolvable
+    specifier. Above NAMESPACE_MEMBER_LIMIT reads the variable is more likely a
+    plain object than a namespace.
+
+    ⚠️ IN THAT CASE THE ANSWER IS "NO EVIDENCE", NOT "THE FIRST MEMBER".
+    Returning `members[:1]` looked conservative and was actively harmful: it is
+    the ALPHABETICALLY first surviving member of a variable already judged not
+    to be a namespace, so it contributes a chunk index chosen essentially at
+    random, and because every site's evidence is INTERSECTED, one such guess
+    empties the set and loses a specifier that other sites had pinned
+    correctly.
+
+    MEASURED on 2.1.259: `/$bunfs/root/chunk-jhsvw76x.js` is destructured at
+    real sites naming `getCoordinatorSystemPrompt` and `isCoordinatorMode`,
+    both owned by chunk 930 alone — a clean, unambiguous resolution. But the
+    same specifier is also assigned to a variable used as a plain object with
+    30 member reads (`abort`, `cursorOffset`, `signal`, …), of which exactly one
+    (`id`) happens to be exported by an unrelated chunk 778. The old rule
+    returned `['id']`, the intersection 930 ∩ 778 came out empty, and the
+    specifier stayed unresolved — which is what made the rebuilt binary die
+    with "Cannot find module 'claudiverse-unresolved-chunk:…chunk-jhsvw76x.js'"
+    on the first real turn.
+
+    ⚠️ THE LIMIT IS APPLIED TO THE RAW READ COUNT, BEFORE FILTERING. Applying
+    it after the `m in owner` filter measures the wrong thing: the poisoning
+    variable above has 30 member reads but only ONE of them (`id`) is exported
+    by any chunk, so the post-filter count is 1, the "not a namespace" test
+    never fires, and the single spurious member is returned as if it were
+    evidence. Judging plain-object-ness on how the variable is USED is the
+    whole point of the heuristic.
+
+    Two read shapes count, because both appear in this bundle:
+      `X.sym`   — X holds the namespace directly;
+      `X().sym` — X is a THUNK, `X = () => import.meta.require(spec)`, so the
+                  members are read off the call result.
+    The thunk form is not a stylistic variant to be tidied away: measured on
+    2.1.259, `/$bunfs/root/chunk-3tvkz7s9.js` has FOUR sites and every one is a
+    bare binding whose only evidence is `ihe().detectSurfaces`,
+    `ihe().engineFor`, `ihe().sinksFor`, `ihe().watchedForSurfaces` — all four
+    owned by chunk 923 alone. Matching only `X.sym` saw no evidence at all and
+    left the specifier unresolved, which is what made the rebuilt binary die
+    with "Cannot find module 'claudiverse-unresolved-chunk:…chunk-3tvkz7s9.js'".
+    """
+    direct = set(re.findall(r"\b" + re.escape(var) + r"\.([\w$]+)\b", text))
+    thunk = set(re.findall(r"\b" + re.escape(var) + r"\(\)\.([\w$]+)\b", text))
+    # `X().sym` also matches the `X.sym`-style scan? No: the `\.` there is
+    # preceded by `)`, not by the identifier, so the two sets are disjoint and
+    # the counts below do not double-count.
+    raw = direct | thunk
+    if len(raw) > NAMESPACE_MEMBER_LIMIT:
+        return []
+    members = sorted(m for m in raw if m in owner)
+    return members
+
+
+def symbol_origin(chunk, sym):
+    """Where does `chunk` get the value it exports as `sym`?
+
+    Returns ("import", source_spec, source_name) when the exported local binding
+    is one this chunk IMPORTED — i.e. the chunk is a re-export facade for that
+    symbol and the real definition lives elsewhere — or None when the binding is
+    defined locally (or cannot be traced), which is deliberately NOT treated as
+    equivalent to anything.
+    """
+    m = EXPORT_RE.search(chunk["text"].rstrip())
+    if not m:
+        return None
+    local = None
+    for part in m.group(1).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        bits = part.split(" as ")
+        if bits[-1].strip() == sym:
+            local = bits[0].strip()
+            break
+    if local is None:
+        return None
+    for clause, spec in IMPORT_RE.findall(chunk["text"]):
+        for part in clause.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            bits = part.split(" as ")
+            if bits[-1].strip() == local:
+                return ("import", spec, bits[0].strip())
+    return None
+
+
+def equivalent_reexporters(chunks, indices, syms):
+    """Do all `indices` re-export the SAME definition for every symbol in `syms`?
+
+    WHY THIS EXISTS. A specifier whose owner set has more than one chunk is
+    normally unresolvable and is dropped, because picking one would silently
+    load the wrong module. But some ambiguity is not a real choice: upstream
+    emits several small FACADE chunks that re-export one definition, so two
+    candidates can be provably interchangeable *for the symbols actually read*.
+
+    MEASURED case on 2.1.259, which is why this is here rather than a
+    hypothetical: `chunk-yb117e5b.js` is read at 3 sites and every one of them
+    reads only `END_CONVERSATION_TOOL_NAME`. Its owner set is chunks 827 and
+    948 — different export sets overall (11 symbols vs 2), so they are NOT the
+    same module — but BOTH obtain that one symbol by `import{Ab}from
+    "/$bunfs/root/chunk-kc9zg8bj.js"`. The value handed to the call site is
+    therefore identical whichever is chosen.
+
+    The test is per-SYMBOL and requires an IMPORTED origin from an identical
+    (specifier, source-name) pair in every candidate. A locally DEFINED binding
+    returns None from symbol_origin and fails the check, because two chunks
+    defining their own `Ab` would be two different values that merely share a
+    name — exactly the silent-wrong-module case this whole resolver refuses.
+
+    BOUND: this establishes equivalence only for `syms` — the symbols some site
+    was observed to read. It does NOT claim the candidates are interchangeable
+    in general, and they usually are not.
+    """
+    if not syms:
+        return False
+    for sym in syms:
+        origins = set()
+        for idx in indices:
+            o = symbol_origin(chunks[idx], sym)
+            if o is None:
+                return False
+            origins.add(o)
+        if len(origins) != 1:
+            return False
+    return True
+
+
+def resolve_dynamic(chunks, owner):
+    """Resolve dynamic/import.meta.require specifiers to chunk indices.
+
+    Returns (spec -> index, stats). Evidence from EVERY site naming a specifier
+    is intersected together, so two sites that each leave several candidates can
+    still pin one chunk between them.
+
+    A specifier is emitted ONLY when the intersection is exactly one chunk.
+    Ambiguous (>1) and empty (0) intersections are counted and dropped — an
+    unresolved lazy edge degrades to the specifier being left alone, which is
+    recoverable, whereas a WRONG edge silently loads the wrong module at
+    runtime and is not.
+    """
+    candidates = defaultdict(list)
+    # Every symbol any site reads off a specifier, kept alongside the candidate
+    # sets so an ambiguous specifier can be re-examined per-symbol below.
+    needed_syms = defaultdict(set)
+
+    def observe(spec, syms):
+        syms = [s for s in syms if s]
+        if not syms:
+            return
+        needed_syms[spec].update(syms)
+        inter = None
+        for sym in syms:
+            owners = owner.get(sym, set())
+            inter = set(owners) if inter is None else (inter & owners)
+        candidates[spec].append(inter or set())
+
+    for c in chunks:
+        text = c["text"]
+        for clause, spec in DYN_DESTRUCTURE_RE.findall(text):
+            observe(spec, destructured_names(clause))
+        for spec, clause in DYN_THEN_DESTRUCTURE_RE.findall(text):
+            observe(spec, destructured_names(clause))
+        for spec, _param, sym in DYN_THEN_MEMBER_RE.findall(text):
+            observe(spec, [sym])
+        for spec, sym in DYN_AWAIT_MEMBER_RE.findall(text):
+            observe(spec, [sym])
+        for spec, sym in DYN_DIRECT_MEMBER_RE.findall(text):
+            observe(spec, [sym])
+
+        # Positional Promise.all destructuring. The left and right sides must
+        # have the SAME element count or the positions do not correspond — the
+        # right side may hold non-bunfs entries such as import("path"), and
+        # dropping those would shift every position after them.
+        for lhs, rhs in DYN_PROMISE_ALL_RE.findall(text):
+            targets = split_top_level(rhs)
+            bindings = split_top_level(lhs)
+            if len(targets) != len(bindings):
+                continue
+            for binding, target in zip(bindings, targets):
+                spec_m = QUOTED_SPEC_RE.search(target)
+                if not spec_m:
+                    continue
+                binding = binding.strip()
+                pattern = re.match(r"^\{(.*)\}$", binding, re.S)
+                if pattern:
+                    observe(spec_m.group(1), destructured_names(pattern.group(1)))
+                elif IDENT_RE.match(binding):
+                    # A BARE positional binding — `let[o,{a},{b}] = await
+                    # Promise.all([...])` — binds the whole namespace, so the
+                    # symbols are the members read off it later.
+                    observe(spec_m.group(1), namespace_members(text, binding, owner))
+
+        # Namespace binding: X = import.meta.require("spec"), read later as X.sym.
+        for var, spec in DYN_NAMESPACE_RE.findall(text):
+            observe(spec, namespace_members(text, var, owner))
+
+    resolved = {}
+    stats = {
+        "evidenced": len(candidates),
+        "ambiguous": 0,
+        "empty": 0,
+        "facade_tiebreak": 0,
+    }
+    for spec, sets in candidates.items():
+        inter = None
+        for s in sets:
+            if not s:
+                continue
+            inter = set(s) if inter is None else (inter & s)
+        if not inter:
+            stats["empty"] += 1
+        elif len(inter) == 1:
+            resolved[spec] = next(iter(inter))
+        elif equivalent_reexporters(chunks, inter, needed_syms[spec]):
+            # Not a guess: every surviving candidate was shown to hand back the
+            # SAME binding, from the same chunk, for every symbol any site
+            # actually reads off this specifier. See equivalent_reexporters.
+            stats["facade_tiebreak"] += 1
+            resolved[spec] = min(inter)
+        else:
+            stats["ambiguous"] += 1
+    return resolved, stats
 
 
 def extract(binary_path):
@@ -241,10 +597,46 @@ def extract(binary_path):
                 stats["side_effect_unresolved"] += 1
                 missing.add(spec)
     stats["side_effect_unresolved_specs"] = len(missing)
-    return chunks, stats
 
+    # Dynamic (lazy) edges, resolved on their OWN symbol evidence — the static
+    # table cannot help, since the two specifier populations are disjoint.
+    dynamic, dyn_stats = resolve_dynamic(chunks, owner)
+    stats["dyn_sites"] = 0
+    for c in chunks:
+        stats["dyn_sites"] += len(DYN_SITE_RE.findall(c["text"]))
+    dyn_specs = set()
+    for c in chunks:
+        dyn_specs.update(DYN_SITE_RE.findall(c["text"]))
+    stats["dyn_specs"] = len(dyn_specs)
+    stats["dyn_resolved_specs"] = len(dynamic)
+    stats["dyn_resolved_sites"] = 0
+    for c in chunks:
+        for spec in DYN_SITE_RE.findall(c["text"]):
+            if spec in dynamic:
+                stats["dyn_resolved_sites"] += 1
+    stats["dyn_ambiguous"] = dyn_stats["ambiguous"]
+    stats["dyn_empty"] = dyn_stats["empty"]
 
-IDENT_RE = re.compile(r"^[A-Za-z_$][\w$]*$")
+    # A dynamic specifier resolving differently from the static table would mean
+    # the content hash is not a stable identity. Measured: the populations are
+    # disjoint, so this is vacuously true today — it is checked anyway so that a
+    # future release which DOES share a specifier between the two cannot pick a
+    # silent winner.
+    for spec, target in dynamic.items():
+        if spec in resolved_specs:
+            static_target = next(
+                imp["target"]
+                for c in chunks
+                for imp in c["imports"]
+                if imp["path"] == spec and imp["target"] is not None
+            )
+            if static_target != target:
+                raise SystemExit(
+                    f"{spec} resolves to chunk {target} dynamically but "
+                    f"{static_target} statically — specifier identity is not stable."
+                )
+
+    return chunks, stats, dynamic
 
 
 def module_names(chunks):
@@ -382,7 +774,7 @@ def main():
             "build. Use the fetch-versionref.sh slicer, not this extractor."
         )
 
-    chunks, stats = extract(binary)
+    chunks, stats, dynamic = extract(binary)
     os.makedirs(outdir, exist_ok=True)
 
     total = 0
@@ -407,6 +799,15 @@ def main():
     if manifest_path:
         with open(manifest_path, "w") as fh:
             json.dump(manifest, fh, indent=1)
+        # Dynamic edges go in a SIBLING file, not a new key on the manifest:
+        # the manifest is a bare JSON LIST indexed positionally by
+        # module-reconstruct.ts, so it has nowhere to put a bundle-wide table
+        # without changing its shape and breaking that consumer.
+        dyn_path = manifest_path.replace(".json", "-dynamic.json")
+        if dyn_path == manifest_path:
+            dyn_path = manifest_path + ".dynamic"
+        with open(dyn_path, "w") as fh:
+            json.dump(dynamic, fh, indent=1, sort_keys=True)
 
     print(f"  chunks written : {len(chunks)}")
     print(f"  total source   : {total:,} bytes")
@@ -433,9 +834,19 @@ def main():
         f"  ({stats['side_effect_unresolved_specs']} specifiers never named"
         f" with symbols anywhere)"
     )
+    # Dynamic edges are reported on their OWN denominator and are NOT folded
+    # into the static total. They are a different population (disjoint
+    # specifiers) resolved by different evidence, and an unresolved dynamic
+    # edge has a different consequence: the specifier is simply left alone,
+    # and the lazy import fails only if that code path is taken.
+    print(
+        f"  dynamic import : {stats['dyn_resolved_sites']:,}/{stats['dyn_sites']:,}"
+        f" sites  ({stats['dyn_resolved_specs']}/{stats['dyn_specs']} specifiers;"
+        f" {stats['dyn_ambiguous']} ambiguous, {stats['dyn_empty']} no-evidence)"
+    )
     total_resolved = stats["resolved"] + se_resolved
     pct = (100.0 * total_resolved / all_imports) if all_imports else 0.0
-    print(f"  TOTAL COVERAGE : {total_resolved:,}/{all_imports:,} = {pct:.1f}%")
+    print(f"  TOTAL COVERAGE : {total_resolved:,}/{all_imports:,} = {pct:.1f}% (static)")
     # A partially-resolved graph is worse than a loud failure: downstream stages
     # would silently treat unresolved edges as absent dependencies. Checked
     # BEFORE the splitter-compat emission so a bad graph cannot produce a
