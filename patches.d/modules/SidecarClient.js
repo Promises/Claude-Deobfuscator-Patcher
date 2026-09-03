@@ -7,6 +7,7 @@
 // Env vars:
 //   CLAUDIVERSE_TOKEN  — API bearer token (required)
 //   CLAUDIVERSE_URL    — Server base URL (default: http://localhost:4000)
+//   CLAUDIVERSE_TITLE  — Stable session name (e.g. "decomper"); default: timestamp
 //   CLAUDIVERSE_DEBUG  — "1" for debug logging to /tmp/claudiverse.log
 
 var __claudiverse = (function() {
@@ -28,6 +29,14 @@ var __claudiverse = (function() {
   var channelJoined = false;
   var sessionTopic = null;
   var serverSessionId = null;
+  // Claude's own session UUID (from the session hook). Stable across
+  // reconnects — the server uses it to reuse this session's row.
+  var claudeSessionId = null;
+  // Single pending reconnect. Without this, every orphaned socket's close
+  // handler schedules its own reconnect and sockets MULTIPLY instead of being
+  // replaced (observed: 16,000+ ESTABLISHED sockets, ephemeral-port
+  // exhaustion, all outbound TCP failing with EADDRNOTAVAIL).
+  var reconnectTimer = null;
   var structuredIO = null;
   var messageQueue = [];
   var heartbeatTimer = null;
@@ -68,14 +77,26 @@ var __claudiverse = (function() {
 
   // --- Connection ---
 
-  function autoConnect() {
+  function autoConnect(sessionId) {
+    // Remember Claude's session UUID on the first call that supplies it; later
+    // reconnects reuse it even if invoked without an argument.
+    if (sessionId) claudeSessionId = sessionId;
     if (!TOKEN || !http || connecting || connected) return;
     connecting = true;
     log("Creating session...");
 
-    var postData = JSON.stringify({
-      title: "Claude " + new Date().toLocaleTimeString()
-    });
+    // CLAUDIVERSE_TITLE gives this instance a stable, human-friendly name
+    // (e.g. "decomper" / "tester") so an orchestrator can resolve it by title
+    // via GET /api/sessions?title=. Falls back to a timestamp when unset.
+    // claude_session_id is Claude's OWN session UUID. The server matches on it
+    // and REUSES the existing row, so a reconnect/blip no longer inserts a new
+    // session every time (that churn grew the table to ~38k rows and left
+    // same-title zombies that title-resolution could wake).
+    var postBody = {
+      title: process.env.CLAUDIVERSE_TITLE || ("Claude " + new Date().toLocaleTimeString())
+    };
+    if (claudeSessionId) postBody.claude_session_id = claudeSessionId;
+    var postData = JSON.stringify(postBody);
     var parsed = new URL(BASE_URL + "/api/sessions");
     var mod = parsed.protocol === "https:" ? https : http;
 
@@ -121,6 +142,20 @@ var __claudiverse = (function() {
     sessionTopic = "session:" + sessionId;
     log("WS connecting...");
 
+    // A pending reconnect is now superseded — cancel it so we never end up with
+    // two reconnect chains running in parallel.
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+    // TEAR DOWN THE PREVIOUS SOCKET FIRST. Reassigning `ws` used to orphan the
+    // old socket while it was still OPEN, and its listeners stayed live — so the
+    // orphan's own close handler would schedule yet another reconnect. Removing
+    // the listeners before closing stops that chain.
+    if (ws) {
+      try { ws.removeAllListeners(); } catch (e) {}
+      try { ws.close(); } catch (e) {}
+      ws = null;
+    }
+
     try {
       var url = WS_URL + "?token=" + encodeURIComponent(TOKEN) + "&vsn=2.0.0";
       ws = new WebSocket(url);
@@ -155,12 +190,47 @@ var __claudiverse = (function() {
           }
 
           // Handle remote commands
-          if (topic === sessionTopic && channelJoined && structuredIO) {
+          if (topic === sessionTopic && channelJoined) {
             if (event === "remote_input" && payload && payload.content) {
               log("Remote input:", payload.content.substring(0, 50));
-              structuredIO.prependUserMessage(payload.content);
+              try {
+                if (typeof globalThis.__claudiverseSubmit === "function") {
+                  // Interactive Ink REPL: submit exactly like a local Enter
+                  // (idle -> starts a turn; busy -> enqueues and drains).
+                  globalThis.__claudiverseSubmit(payload.content);
+                } else if (structuredIO) {
+                  // stream-json / SDK input mode.
+                  structuredIO.prependUserMessage(payload.content);
+                } else {
+                  log("Remote input dropped: no submit hook / structuredIO yet");
+                }
+              } catch (e) {
+                log("Remote input error:", e.message);
+              }
             }
-            if (event === "remote_permission_response" && payload && payload.request_id) {
+            if (event === "remote_answer" && payload) {
+              // Resolve an interactive AskUserQuestion. payload: { tool_use_id?,
+              // response? | answer? }. response -> freeform "The user responded:";
+              // answer is a structured {answers,annotations,response} merge.
+              try {
+                var ap = payload.answer || (payload.response ? { response: payload.response } : {});
+                var ok = (typeof globalThis.__claudiverseAnswer === "function")
+                  ? globalThis.__claudiverseAnswer(payload.tool_use_id || null, ap)
+                  : false;
+                log("Remote answer:", ok, JSON.stringify(ap).substring(0, 80));
+              } catch (e) {
+                log("Remote answer error:", e.message);
+              }
+            }
+            if (event === "remote_decline" && payload) {
+              try {
+                if (typeof globalThis.__claudiverseDecline === "function")
+                  globalThis.__claudiverseDecline(payload.tool_use_id || null);
+              } catch (e) {
+                log("Remote decline error:", e.message);
+              }
+            }
+            if (event === "remote_permission_response" && payload && payload.request_id && structuredIO) {
               log("Remote permission:", payload.request_id, payload.decision);
               var resp;
               if (payload.decision === "allow") {
@@ -187,15 +257,21 @@ var __claudiverse = (function() {
         channelJoined = false;
         connected = false;
         if (heartbeatTimer) clearInterval(heartbeatTimer);
-        // Reconnect after 5s
-        setTimeout(function() {
-          if (TOKEN && serverSessionId) connectWs(serverSessionId);
-        }, 5000);
+        // Reconnect after 5s — but only ONE pending reconnect at a time.
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(function() {
+            reconnectTimer = null;
+            if (TOKEN && serverSessionId) connectWs(serverSessionId);
+          }, 5000);
+        }
       });
 
       ws.on("error", function(e) {
         log("WS error:", e.message);
         connecting = false;
+        // An errored socket may never emit "close"; close it explicitly so the
+        // fd is released rather than lingering as an ESTABLISHED orphan.
+        try { this.close(); } catch (e2) {}
       });
     } catch(e) {
       log("WS init error:", e.message);
@@ -235,5 +311,7 @@ var __claudiverse = (function() {
   };
 })();
 
-// Register with session hooks (runs on first getSessionId call)
-try { __sessionHooks.push(function() { __claudiverse.connect(); }); } catch(e) {}
+// Register with session hooks (runs on first getSessionId call).
+// The hook passes Claude's own session UUID; we forward it to the server so a
+// reconnect reuses this session's row rather than creating another.
+try { __sessionHooks.push(function(sessionId) { __claudiverse.connect(sessionId); }); } catch(e) {}

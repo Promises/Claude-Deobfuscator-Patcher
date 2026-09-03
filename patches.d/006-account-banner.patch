@@ -1,46 +1,48 @@
 # patch: 006-account-banner
 # depends: 004
-# generated: 2026-04-19
-# description: Account banner with failover indicator + version marker.
-#   - Shows active account label in prompt separator bar, with * on failover
-#   - Appends [claudiverse] to --version output as patch canary
-
-diff --git a/_tail.js b/_tail.js
-index 815131a..5965e82 100644
---- a/_tail.js
-+++ b/_tail.js
-@@ -2428,7 +2428,7 @@ Usage: claude --remote "your task description"`,
-                 }
-             })
-             .version(
--                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
-+                `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
-                 '-v, --version',
-                 'Output the version number',
-             ),
-@@ -3134,7 +3134,7 @@ async function mN5() {
-         (stats[0] === '--version' || stats[0] === '-v' || stats[0] === '-V')
-     ) {
-         console.log(
--            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code)`,
-+            `${{ ISSUES_EXPLAINER: 'report the issue at https://github.com/anthropics/claude-code/issues', PACKAGE_URL: '@anthropic-ai/claude-code', README_URL: 'https://code.claude.com/docs/en/overview', VERSION: '2.1.90', FEEDBACK_CHANNEL: 'https://github.com/anthropics/claude-code/issues', BUILD_TIME: '2026-04-01T22:53:45Z' }.VERSION} (Claude Code) [claudiverse]`,
-         );
-         return;
-     }
+# generated: 2026-08-21 (re-authored against 2.1.238, anchored + version-string-independent)
+# description: Account banner with failover indicator + version canary.
+#   - getVersionSuffix() returns " [claudiverse]" so every version readout is
+#     identifiably patched (--version fast path in _tail.js, the commander
+#     .version() in main.js, /status, /version, --print, doctor, logo).
+#   - useSwarmBanner shows the active multi-account label (with * on failover)
+#
+# VERSION-STRING-INDEPENDENT BY CONSTRUCTION.
+#   The 2.1.168 version of this patch rewrote the two banner template literals,
+#   each of which embeds a verbatim VERSION/BUILD_TIME/GIT_SHA blob. Those lines
+#   change on EVERY release, so the patch could never survive a version bump.
+#   It now edits the one-line body of getVersionSuffix() instead. That function
+#   is the common suffix hook already interpolated by all 7 version readouts, and
+#   its body (`return '';`) contains no build metadata. Context is held to 2 lines
+#   so the hunk does not reach the default-parameter blob above it; the retained
+#   `}.BUILD_REF_NAME,` context line occurs exactly once in _preamble.js and is a
+#   build-constant key, not a build-varying value.
+diff --git a/_preamble.js b/_preamble.js
+index ceb6ae9..ba979f6 100644
+--- a/_preamble.js
++++ b/_preamble.js
+@@ -299,5 +299,5 @@ function getVersionSuffix(
+     }.BUILD_REF_NAME,
+ ) {
+-    return '';
++    return ' [claudiverse]';
+ }
+ 
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
-index a24541f..e233ba4 100644
+index 8d0ed77..aef4090 100644
 --- a/components/PromptInput/useSwarmBanner.js
 +++ b/components/PromptInput/useSwarmBanner.js
-@@ -54,6 +54,17 @@ function Mp7() {
-         let Y = T.agentDefinitions.activeAgents.find((j) => j.agentType === q);
-         return { text: q, bgColor: Ma_(Y?.color, 'promptBorder') };
-     }
+@@ -77,4 +77,17 @@ function useSwarmBanner(e) {
+         };
+     if (n) return { text: n, bgColor: resolveBannerColor(f?.color, 'promptBorder') };
 +    try {
 +        if (typeof __multiAccount !== 'undefined' && __multiAccount.isMultiAccountEnabled()) {
 +            let __acc = __multiAccount.getActiveAccount();
 +            if (__acc) {
 +                let __status = __multiAccount.getStatus();
-+                let __primary = __status.accounts.find(function(a) { return a.isPrimary; });
++                let __primary = __status.accounts.find(function (a) {
++                    return a.isPrimary;
++                });
 +                let __isFailover = __primary && !__primary.isActive;
 +                return { text: __acc.label + (__isFailover ? '*' : ''), bgColor: 'promptBorder' };
 +            }
@@ -48,4 +50,3 @@ index a24541f..e233ba4 100644
 +    } catch (__e) {}
      return null;
  }
- 

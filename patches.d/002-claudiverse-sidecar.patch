@@ -1,41 +1,123 @@
 # patch: 002-claudiverse-sidecar
 # depends: 001
-# generated: 2026-04-07
+# generated: 2026-08-21 (re-authored against 2.1.238)
 # description: Sidecar hooks for structuredIO and query mirroring.
-#              connect() is now registered via __sessionHooks in the module.
-
+#              prependUserMessage registers the StructuredIO instance; the query
+#              entrypoint mirrors each inner-loop message to __claudiverse while
+#              preserving the loop's return value (the terminal `o`, consumed by
+#              the downstream reason handling). After a top-level turn drains
+#              (agentId absent, i.e. not a subagent) it emits a synthetic
+#              {type:"turn_complete"} marker so observers / orchestrators get an
+#              explicit end-of-turn signal.
+#
+# 2.1.238 UPSTREAM CHANGES HANDLED:
+#  1. The `query` anchor chain NO LONGER LANDS. Its root rule keys on a
+#     `switch (q.reason) { case 'completed': ... }` inside an async generator;
+#     2.1.238 replaced that switch with `if (tJn(o.reason)) logFeatureBad('turn',
+#     Mqf(o)); else logFeatureOk('turn');`. Because the root soft-skips, every
+#     dependent rule skips too, so `query`, `params`, `consumedCommandUuids`,
+#     `queryLoop` and `terminal` are ALL ABSENT from the built tree (verified:
+#     zero occurrences of any of them in /tmp/deob-238-nc/query.js). This hunk
+#     therefore has to use the minified names. See MINIFIED NAMES below.
+#  2. The single `yield* queryLoop(params, consumedCommandUuids)` became a
+#     TERNARY over two loop generators:
+#       `o = yield* C8n() ? r3v(e, t, n) : R6f(e, t, n);`
+#     (`r3v` is a new observer-tap wrapper around the real loop `R6f`.) The
+#     ternary is preserved verbatim as the iterator initializer.
+#  3. notifySubagentLifecycle (ex-AJ6) CHANGED ARITY 3 -> 5. It is now
+#     `notifySubagentLifecycle(e.toolUseContext.session.precompute, s,
+#     'subagent_exit', e.querySource)` — a precompute store is threaded through
+#     where module-level Maps used to be. That call is CONTEXT for this patch,
+#     so the context lines were re-taken from the 2.1.238 tree rather than
+#     carried over.
+#
+# LOAD-BEARING SHAPE (do not "simplify"):
+#     The manual-iteration rewrite `while (!(__s = await __it.next()).done)` is
+#     deliberate. An earlier `for await (... ) { yield ... }` attempt BROKE the
+#     generator protocol: the delegated return value was lost, so the terminal
+#     `o` came back undefined and the downstream reason handling faulted.
+#     Manual iteration is the only shape that both taps every yielded value and
+#     preserves `__s.value` on done.
+#     One-way `.next()` (no sent-value pass-through) is safe HERE because every
+#     caller of this entrypoint consumes it with `for await`, which never sends
+#     values (verified across QueryEngine.js, screens/REPL.js,
+#     tasks/LocalMainSessionTask.js, tools/AgentTool/runAgent.js,
+#     utils/forkedAgent.js, utils/hooks/execAgentHook.js).
+#
+# MINIFIED NAMES USED (unavoidable — see change 1):
+#     gce  = the query entrypoint (async generator; the module's exported query
+#            driver, imported by REPL/QueryEngine/AgentTool/tasks)
+#     e    = its sole parameter (ex-`params`)
+#     C8n  = git-operation-tracking predicate selecting the observer-tap arm
+#     r3v  = observer-tap loop wrapper;  R6f = the underlying query loop
+#     t, n = the two command-uuid accumulators;  o = the terminal result
+#     Because a wrong minified name on an ADDED line would silently stop
+#     mirroring with NO error, the query.js hunk is emitted with -U10 so that
+#     BOTH the defining line `async function* gce(e) {` AND the anchored
+#     `notifySubagentLifecycle(` call sit in CONTEXT. Any rename of the
+#     entrypoint, its parameter, or the lifecycle notifier makes the patch FAIL
+#     TO APPLY rather than apply-and-do-nothing.
+#
+# SUGGESTED NEW ANCHOR (not added here — anchor-rules.json is out of scope):
+#     Re-root the `query` rule on a shape that survived, e.g. the async
+#     generator in query.js containing the object literal
+#     `{ type: 'command_lifecycle', uuid: ..., state: 'completed' }`, or the one
+#     whose finally-block calls notifySubagentLifecycle with 'subagent_exit'.
+#     Either would restore `query`/`params` and let this hunk drop the minified
+#     names entirely.
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index 77fd6e6..ae75221 100644
+index 7cf6b57..4927d59 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -86,6 +86,9 @@ class StructuredIO {
+@@ -196,12 +196,15 @@ class StructuredIO {
+     }
+     get internalEventsPending() {
          return 0;
      }
-     prependUserMessage(H) {
+     repliesLeftForNextProcess = 0;
+     prependUserMessage(e) {
 +        try {
 +            __claudiverse.setStructuredIO(this);
-+        } catch (e) {}
-         this.prependedLines.push(
++        } catch (__e) {}
+         (this.prependedLines.push(
              jsonStringify({
                  type: 'user',
+                 session_id: '',
+                 message: { role: 'user', content: e },
+                 parent_tool_use_id: null,
 diff --git a/query.js b/query.js
-index de58360..c787351 100644
+index 73c7e87..db52490 100644
 --- a/query.js
 +++ b/query.js
-@@ -79,7 +79,15 @@ function isWithheldMaxOutputTokens(H) {
-
- async function* query(params) {
-     let consumedCommandUuids = [],
--        terminal = yield* queryLoop(params, consumedCommandUuids);
-+        __orig = queryLoop(params, consumedCommandUuids),
-+        terminal;
-+    for await (let __m of __orig) {
-+        try {
-+            __claudiverse.mirrorMessage(__m);
-+        } catch (__e) {}
-+        yield __m;
-+    }
-+    terminal = undefined;
-     for (let uuid of consumedCommandUuids) notifyCommandLifecycle(uuid, 'completed');
-     return terminal;
+@@ -398,21 +398,30 @@ function t3v(e, t) {
+ `)
+         : void 0;
  }
+ 
+ async function* gce(e) {
+     let t = [],
+         r = performance.now(),
+         n = [],
+         o;
+     try {
+-        o = yield* C8n() ? r3v(e, t, n) : R6f(e, t, n);
++        let __it = C8n() ? r3v(e, t, n) : R6f(e, t, n),
++            __s;
++        while (!(__s = await __it.next()).done) {
++            try {
++                __claudiverse.mirrorMessage(__s.value);
++            } catch (__e) {}
++            yield __s.value;
++        }
++        o = __s.value;
++        try { if (!e.toolUseContext.agentId) __claudiverse.mirrorMessage({ type: "turn_complete" }); } catch (__e) {}
+     } finally {
+         let s = e.toolUseContext.agentId;
+         if (s)
+             notifySubagentLifecycle(
+                 e.toolUseContext.session.precompute,
+                 s,
+                 'subagent_exit',
+                 e.querySource,
+             );
+     }

@@ -1,0 +1,79 @@
+# patch: 011-spawn-trust
+# depends: 002
+# generated: 2026-08-21 (re-authored against 2.1.238; orig 2026-06-21 vs 2.1.168)
+# description: Auto-accept the first-run "trust this folder?" security dialog for
+#              claudiverse-spawned instances ONLY, so server/tmux-spawned agents
+#              boot straight to the REPL instead of blocking on the trust gate.
+#
+#              CHOKEPOINT: checkHasTrustDialogAccepted in utils/config.js is the
+#              single source of truth for "is this path trusted?" — every startup
+#              gate funnels through it (interactiveHelpers.js, setup.js, the
+#              TrustDialog's own internal check, the prefetch/post-onboarding
+#              gates, performStartupChecks, worktree.js, and
+#              isProjectScopeTrustAccepted() which delegates straight to it).
+#              Returning true here short-circuits the dialog everywhere,
+#              atomically and consistently, with one surgical edit. isPathTrusted
+#              is a SEPARATE path-specific helper used for explicit dir/worktree
+#              trust prompts, NOT the startup boot gate — intentionally left alone.
+#
+#              UPSTREAM CHANGE 2.1.168 -> 2.1.238 (why this was re-authored, not
+#              merely re-contexted): the body of checkHasTrustDialogAccepted was
+#              restructured. It used to be a one-liner over a module-level boolean
+#              memo, `return (vo9 ||= kk5())`. Upstream replaced that memo with a
+#              session-state property plus an explicit setter, and split the
+#              uncached computation into its own function:
+#                  if ($i.trustAccepted) return !0;
+#                  let e = computeHasTrustDialogAccepted();
+#                  if (e) $i.setTrustAccepted(!0);
+#                  return e;
+#              The old hunk's `return (vo9 ||= kk5());` context line no longer
+#              exists in any form, so the patch is rebased onto the new shape.
+#              (This is also why the trustDialogAcceptedCache anchor deliberately
+#              does not land on 2.1.238 — there is no longer a module-level
+#              boolean for it to bind to.)
+#
+#              INSERTION POINT: first statement of the function, ABOVE the
+#              `$i.trustAccepted` cache read. Chosen deliberately over the
+#              alternative of editing computeHasTrustDialogAccepted, for two
+#              reasons:
+#                1. It references NO minified symbol. Every identifier in the
+#                   added lines (process.env) is a JS builtin; the enclosing
+#                   function name comes from the utils/config.js export map, i.e.
+#                   an original-source identifier that survives minification.
+#                   $i is minified and unanchored, but it appears only in an
+#                   unchanged CONTEXT line, where a rename breaks the apply
+#                   loudly rather than silently rebinding.
+#                2. It short-circuits BEFORE the caching side effects, so the
+#                   bypass never writes trustAccepted into session state. Nothing
+#                   observes a mutated cache; the override is purely a return
+#                   value.
+#
+#              SCOPING (security-critical): the bypass fires ONLY when
+#              process.env.CLAUDIVERSE_SKIP_TRUST is set — a DEDICATED opt-in env
+#              var the spawner sets per-instance (NOT CLAUDIVERSE_TITLE, so ordinary
+#              claudiverse instances that merely carry a title do NOT skip trust —
+#              only an explicit spawn opts in). When it is absent (any normal launch,
+#              incl. the existing fleet) the guard is a no-op and the original
+#              session-cache logic runs unchanged, so the trust dialog stays fully
+#              gated. The check is the first statement and is itself the gate (no
+#              try/catch needed — a bare env read cannot throw — but it is written
+#              defensively as a single short-circuit so it cannot alter the return
+#              value when the env is unset).
+#
+#              Does NOT touch ~/.claude.json: this is an in-memory return override,
+#              nothing is persisted (setPathTrusted is never called), so the shared
+#              global config is untouched and no --dangerously-skip-permissions is
+#              involved. The bypass evaporates the moment the process exits.
+diff --git a/utils/config.js b/utils/config.js
+--- a/utils/config.js
++++ b/utils/config.js
+@@ -201,6 +201,9 @@ function resetTrustDialogAcceptedCache() {
+ }
+
+ function checkHasTrustDialogAccepted() {
++    try {
++        if (process.env.CLAUDIVERSE_SKIP_TRUST) return !0;
++    } catch (e) {}
+     if ($i.trustAccepted) return !0;
+     let e = computeHasTrustDialogAccepted();
+     if (e) $i.setTrustAccepted(!0);

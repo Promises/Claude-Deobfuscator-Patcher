@@ -1,0 +1,82 @@
+# patch: 007-remote-answer
+# depends: 002
+# generated: 2026-08-21 (against 2.1.238; redesigned from the 2.1.168 version)
+# description: Let an orchestrator answer/decline an interactive AskUserQuestion
+#              remotely. Registers three globals, unchanged contract:
+#                __claudiverseListQuestions() -> [{toolUseId, questions}]
+#                __claudiverseAnswer(toolUseId|null, answerPayload) -> bool
+#                __claudiverseDecline(toolUseId|null) -> bool
+#              answerPayload merges into the tool input; pass {response:"text"}
+#              for a freeform answer (-> tool_result "The user responded: text"),
+#              or {answers:{[question]:"label,label"}} for structured selection.
+#              null toolUseId targets the most-recently-opened question.
+#
+# ARCHITECTURE CHANGE vs 2.1.168:
+#   The dialog system is no longer a module-level singleton. The old target was
+#   the module-scope store `DQ` in the bundler-numbered _tentative/5034_signal.js;
+#   BOTH are gone on 2.1.238. The store is now built by the factory
+#   `createDialogStore()`, called once via `useState(createDialogStore)` in
+#   AppStateProvider and distributed through React context
+#   (`DialogStoreContext` / `useDialogStore`). There is therefore NO module-scope
+#   binding to capture at module-init time.
+#
+# HOOK POINT: inside createDialogStore(), on the fully-built store object, just
+#   before `return r`. This runs exactly once (useState factory) at provider
+#   construction, outside React render, and needs no component to be mounted.
+#   Rejected alternatives:
+#     - hooking useDialogStore(): only runs during a component render, so the
+#       globals would not exist until some consumer mounts.
+#     - hooking the useState(createDialogStore) call site: it lives in the
+#       bundler-numbered _unmatched/3814__th.js -- the exact fragility that
+#       broke the 2.1.168 patch.
+#   File path is pinned (services/dialogs/dialogStore.js) and the hunk context
+#   is the anchored `createDialogStore` definition, so name drift fails loudly
+#   rather than silently no-op'ing.
+#
+# NOTE: the catch binding is `e2`, not `e`: `e` is already the inner state store
+#   in this scope and shadowing it would break the captured closures.
+diff --git a/services/dialogs/dialogStore.js b/services/dialogs/dialogStore.js
+index e2df440..49cb99f 100644
+--- a/services/dialogs/dialogStore.js
++++ b/services/dialogs/dialogStore.js
+@@ -41,6 +41,40 @@ function createDialogStore() {
+                 for (let o of e.getState().open) if (o.kind === n) r.dismiss(o.id);
+             },
+         };
++    try {
++        var __cvOpen = function () {
++            return r
++                .getState()
++                .open.filter((d) => d && d.kind === 'permission_ask_user_question');
++        };
++        var __cvPick = function (toolUseId) {
++            var open = __cvOpen();
++            return toolUseId
++                ? open.find((d) => d.payload && d.payload.requestId === toolUseId)
++                : open[open.length - 1];
++        };
++        globalThis.__claudiverseListQuestions = function () {
++            return __cvOpen().map((d) => ({
++                toolUseId: d.payload && d.payload.requestId,
++                questions: d.payload && d.payload.questions,
++            }));
++        };
++        globalThis.__claudiverseAnswer = function (toolUseId, answerPayload) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            r.answer(req.id, {
++                behavior: 'allow',
++                updatedInput: Object.assign({}, req.payload.input, answerPayload),
++            });
++            return true;
++        };
++        globalThis.__claudiverseDecline = function (toolUseId) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            r.answer(req.id, { behavior: 'deny' });
++            return true;
++        };
++    } catch (e2) {}
+     return r;
+ }
+ 

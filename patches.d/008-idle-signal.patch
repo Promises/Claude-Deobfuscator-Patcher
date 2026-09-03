@@ -1,0 +1,119 @@
+# patch: 008-idle-signal
+# depends: 002
+# generated: 2026-08-21 (re-authored against 2.1.238; was 2.1.168)
+# description: Emit a synthetic {type:"idle"} event when the REPL is at rest and
+#              READY FOR INSTRUCTION. "Ready" here means: no permission/dialog
+#              wait, no active turn/query in flight, and no queued message. This
+#              is the reliable readiness signal that turn_complete (patch 002) is
+#              NOT: turn_complete fires once per agentic run but still fires while
+#              a queued message will auto-continue, so events sent on it collide
+#              with in-flight work.
+#
+#              CRUCIAL — does NOT key on `status`/the task registry. See the
+#              2.1.238 mapping below: the hook's 'busy' status is
+#              (isLoading || delegatedActive), where delegatedActive is
+#              D3e(appState.tasks) — a non-terminal local_agent/
+#              in_process_teammate/remote_agent/local_workflow task. A LINGERING
+#              or ZOMBIE background subagent pins 'busy' forever, so the agent
+#              would look idle at the prompt (and /remote-control shows it idle —
+#              the bridge keys on the turn lifecycle, never on tasks) but never
+#              emit an idle frame. We deliberately match the bridge: readiness =
+#              "no turn actively processing", task-independent. Foreground
+#              subagents (the auditor, dispatch-and-wait) keep isLoading true
+#              through the whole turn, so they still register busy; only DETACHED
+#              background tasks stop pinning busy (the 010 cvstate heartbeat
+#              reports those separately so they stay visible).
+#
+#              DEBOUNCED: an agent can flicker between steps; arm a 400ms timer
+#              and emit only if still at rest when it fires (any dep change clears
+#              it via React cleanup). Queue length is re-checked at fire time.
+#
+# 2.1.168 -> 2.1.238 UPSTREAM REFACTOR (verified in this tree, not assumed):
+#   2.1.168 decided readiness with an inline ternary:
+#       I$ = Dk || gY ? 'waiting' : n7 || PD ? 'busy' : 'idle'
+#   2.1.238 replaced it with the `useReplReadiness` hook
+#   (hooks/useReplReadiness.js), called at screens/REPL.js:1001 with semantic
+#   props and returning { status, waitingFor, working }. Dk/gY/n7 have NO 1:1
+#   successors — they were decomposed into separate hook props.
+#
+#   TERM-BY-TERM MAPPING (each verified by reading the implementation):
+#     Dk (= mz||KH||OH, permission/worker/sandbox wait) and gY (local JSX dialog)
+#       -> both folded into getReplWaitingReason(), i.e. `status === 'waiting'`.
+#       2.1.238's waiting set is a strict SUPERSET of 2.1.168's: it adds
+#       workerSandboxPrompt, elicitationPrompt and a generalized
+#       topDialogWaitingFor. Strictly safer for a readiness predicate — more
+#       things that block the user now correctly report not-idle.
+#     n7 (= P1 || pT, query-stream store OR initial-prompt loading)
+#       -> `mi` (isLoading). MEASURED, not guessed: the query-engine store
+#       computes `isLoading = isQueryActive || isExternalLoading`
+#       (_unmatched/4640_jNg.js:837-838), which is precisely 2.1.168's P1 || pT.
+#     PD (= hE_(appState.tasks))  -> delegatedActive (= D3e(He), Task.js:5).
+#       hE_ and D3e are the SAME predicate body. DELIBERATELY UNUSED here.
+#     $z6()  -> z.getMainThreadQueueLength(). $z6 was literally
+#       getMainThreadQueueLength bound off a module-global queue; in 2.1.238 the
+#       queue is a component-local instance `z = $S()`. Same function, new
+#       receiver.
+#
+#   WHY NOT JUST USE THE HOOK'S RETURN VALUE:
+#     `status` is CONTAMINATED by delegatedActive and would silently reintroduce
+#       the exact zombie-task bug this patch was written to avoid. Not used.
+#     `working` (= isQueryActive) is task-independent but too NARROW: it drops
+#       the isExternalLoading half, so a seat with an injected initial prompt
+#       still loading would report idle. Not used.
+#     `status === 'waiting'` IS used — it is the clean, strictly-improved
+#       successor to (Dk || gY), and carries no task input.
+#   Net: readiness = (status !== 'waiting') && !isLoading && queueLength === 0.
+#
+#   CORROBORATION (independent of this patch): upstream's own "mainIsBusy" at
+#   screens/REPL.js:1511 is `mi || !!po || z.getMainThreadQueueLength() > 0` —
+#   isLoading plus queue length, and pointedly NOT tasks. Upstream arrived at the
+#   same task-independent basis by itself.
+#
+# ANCHOR STATUS (measured on the 2.1.238 build, 2026-08-21) — READ BEFORE BUMPING:
+#   React_REPL          ANCHORED. Lands (256 uses in screens/REPL.js). Safe.
+#   useReplReadiness    ANCHORED and lands — but appears only in the CONTEXT
+#                       region above this hunk, not on an added line.
+#   REPLComponent       ANCHOR DOES NOT LAND. /usr/bin/grep count in
+#                       screens/REPL.js is 0. The real component is the inner
+#                       `i_y` (REPL is a thin provider wrapper). `i_y` appears in
+#                       the @@ hunk-header function context, which is exactly the
+#                       right place: it pins the hunk to the REAL component body.
+#   appStateTasks       ANCHOR DOES NOT LAND (grep count 0). Not needed by 008.
+#
+#   MINIFIED NAMES ON ADDED LINES (`_h`, `mi`, `z`) and why that is contained:
+#     These three have no landing anchor, and a silent rebind is the dangerous
+#     failure mode for THIS patch specifically — it would mean the fleet believes
+#     a busy seat is idle. Mitigation: the hunk deliberately retains the
+#     defining/consuming context lines above it (`updateSessionActivity({ status:
+#     _l, waitingFor: wA }, Q)` and the `_h === 'busy'` effect), which pin `_h` to
+#     the readiness status. If upstream renames or re-shapes these bindings the
+#     hunk FAILS TO APPLY rather than binding the wrong value. A drifted-but-still
+#     -applying rebind of `mi`/`z` is the residual risk.
+#     PROPER FIX for the next bump: add anchor rules for the useReplReadiness
+#     destructure (`_h` -> replStatus, `mi` -> isLoading) and for `z` ->
+#     messageQueue in screens/REPL.js, then replace them here. NOTE the known
+#     trap: applyAnchorRules runs at build.sh step 2.6, BEFORE prettify at 2.7,
+#     so any new rule must be keyed on UNPRETTIFIED text or it will soft-skip
+#     during the real build and only resolve when replayed against a finished
+#     tree (this is why submitInputRef/handleSubmitInput are absent).
+diff --git a/screens/REPL.js b/screens/REPL.js
+index d4d9456..79b4a15 100644
+--- a/screens/REPL.js
++++ b/screens/REPL.js
+@@ -1022,6 +1022,16 @@ function i_y({
+         React_REPL.useEffect(() => {
+             updateSessionActivity({ status: _l, waitingFor: wA }, Q);
+         }, [_l, wA, Q]));
++    React_REPL.useEffect(() => {
++        if (_h === 'waiting' || mi) return;
++        let __cvIdleTimer = setTimeout(() => {
++            try {
++                if (_h !== 'waiting' && !mi && z.getMainThreadQueueLength() === 0)
++                    __claudiverse.mirrorMessage({ type: 'idle' });
++            } catch (e) {}
++        }, 400);
++        return () => clearTimeout(__cvIdleTimer);
++    }, [mi, _h, z]);
+     let bf =
+             getFeatureValue_CACHED_MAY_BE_STALE('tengu_terminal_sidebar', !1) &&
+             (getGlobalConfig().showStatusInTerminalTab ?? !1),

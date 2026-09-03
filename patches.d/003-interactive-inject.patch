@@ -1,0 +1,65 @@
+# patch: 003-interactive-inject
+# depends: 002
+# generated: 2026-08-21 (against 2.1.238)
+# description: Make remote_input work in the interactive Ink TTY REPL.
+#              The sidecar (002) injects via StructuredIO.prependUserMessage,
+#              which only the stream-json input loop drains — so injected prompts
+#              never executed in interactive mode. Register globalThis
+#              .__claudiverseSubmit on REPL mount, pointing at the live submit
+#              handler via the submit ref. Calling it behaves exactly like the
+#              local user pressing Enter: idle -> starts a turn; busy -> enqueues
+#              and drains when the agent loops. SidecarClient prefers this hook
+#              and falls back to prependUserMessage for stream-json sessions.
+#
+# ANCHOR STATUS (measured on the 2.1.238 build, 2026-08-21) — READ BEFORE BUMPING:
+#   React_REPL  ANCHORED. Lands (256 uses in screens/REPL.js). Safe.
+#   Sut         MINIFIED — this is `submitInputRef`, but the anchor DOES NOT LAND.
+#
+#   The `submitInputRef` and `handleSubmitInput` anchor rules resolve CORRECTLY
+#   (verified: `anchor-dev resolve` reports `Sut -> submitInputRef` and
+#   `vse -> handleSubmitInput`, both 95%) but their renames are ABSENT from the
+#   built tree. Cause: both rules key on PRETTIFIED formatting — the
+#   handleSubmitInput regex requires `.useRef(X);\s*` + `.current = X;` with
+#   spaces — yet applyAnchorRules runs inside renamer.ts at build.sh step 2.6,
+#   BEFORE prettify at step 2.7. They soft-skip during the real build and only
+#   resolve when replayed against the finished tree. Rules were not touched here
+#   (out of scope for this patch); fixing them is a tools-ts change.
+#
+#   RISK OF `Sut` IN AN ADDED LINE: if a future bundle reassigns `Sut` to some
+#   other ref, this patch still APPLIES (the context line `Sut = React_REPL
+#   .useRef(vse);` pins it) but __claudiverseSubmit would bind the wrong
+#   function. The context line is the mitigation: it forces `Sut` to be the ref
+#   initialised from the submit handler, so a silent rebind cannot pass.
+#   Independently corroborated: `Sut.current(...)` is the submitter for
+#   '/compact', '/rate-limit-options' and '/pro-trial-expired' in this file.
+#   PROPER FIX for the next bump: make the submitInputRef anchor land (run the
+#   rules post-prettify, or re-key them on unprettified text), then replace
+#   `Sut` with `submitInputRef` here.
+#
+# STRUCTURE NOTE: in 2.1.238 `REPL` is a thin provider wrapper (jsx(i_y) inside
+#   jsx(queueProvider)); the real component body is the inner `i_y`, which is
+#   what the REPLComponent anchor binds. VERIFIED: the submit ref and this mount
+#   effect are both inside `i_y`, so the effect runs on the real component's
+#   mount, not the wrapper's.
+diff --git a/screens/REPL.js b/screens/REPL.js
+index d4d9456..87eef8d 100644
+--- a/screens/REPL.js
++++ b/screens/REPL.js
+@@ -3148,6 +3148,17 @@ ${xu}
+         ),
+         Sut = React_REPL.useRef(vse);
+     Sut.current = vse;
++    React_REPL.useEffect(() => {
++        globalThis.__claudiverseSubmit = (text) =>
++            Sut.current(text, {
++                setCursorOffset: () => {},
++                clearBuffer: () => {},
++                resetHistory: () => {},
++            });
++        return () => {
++            delete globalThis.__claudiverseSubmit;
++        };
++    }, []);
+     let QRr = React_REPL.useRef(null),
+         Z7t = React_REPL.useCallback(() => {
+             let nr = (QRr.current ??= new Set()),

@@ -1,0 +1,59 @@
+# patch: 009-compact-signal
+# depends: 002
+# generated: 2026-08-21 (re-authored against 2.1.238)
+# description: Emit a synthetic {type:"compact"} mirror event whenever the
+#              session compacts its context, so a watching orchestrator is told
+#              the worker may have DROPPED earlier context (its standing
+#              task/charter) and can re-brief it. markPostCompaction()
+#              (bootstrap/sessionState.js) is the single chokepoint every
+#              compaction path funnels through -- full auto-compact and manual
+#              /compact (both services/compact/compact.js) and the partial-
+#              compaction runner (_unmatched/2840_Fdr.js) all call it exactly
+#              once, right after the summary is in place and immediately before
+#              reAppendSessionMetadataAfterCompaction(). Emitting here fires once
+#              per real compaction with no duplication. Server routes it as a
+#              "compact" notification to the worker's watchers (Router), queued +
+#              delivered on the watcher's idle like other pings; it does NOT
+#              touch the worker's idle flag (compaction happens mid-turn).
+#
+# UPSTREAM CHANGE 2.1.168 -> 2.1.238: the flat mutable STATE object is GONE.
+#   Upstream split it into a composed root object of getters plus ~25
+#   private-field class instances. Consequences for this patch:
+#     - module moved: bootstrap/state.js -> bootstrap/sessionState.js
+#       (bootstrap/state.js STILL EXISTS on 2.1.238 but is a DIFFERENT module --
+#        OTel telemetry meters. Do not retarget this patch at it.)
+#     - the body is no longer a field assignment. STATE.pendingPostCompaction = !0
+#       became the accessor call
+#       ROOT_SESSION.requestJournal.replacePendingPostCompaction(!0).
+#   The chokepoint property was RE-VERIFIED on 2.1.238: still exactly three
+#   callsites, still one call each, still immediately before
+#   reAppendSessionMetadataAfterCompaction. Two of the three are now additionally
+#   guarded on the querySource/agentContext check, which only narrows the emit to
+#   compactions that actually persist post-compaction metadata -- the desired
+#   semantics.
+#
+# CAVEAT (known, accept for v1): markPostCompaction has no agentId in scope, so
+#   unlike turn_complete (query.js, guarded by !agentId) this also fires if a
+#   SUBAGENT compacts -- read by the watcher as "the worker compacted". Harmless:
+#   the watcher just holds a re-brief and reject-busy gates delivery. If it
+#   proves noisy, move the emit to the three callsites and guard on the local
+#   agentId var (compact.js t.agentId / r.agentId, 2840_Fdr.js d.agentId).
+#
+# All identifiers on ADDED lines are either anchored (none needed here) or
+# claudiverse-owned (__claudiverse) -- no bundler-minified symbols are
+# introduced. The two context lines pin the hunk to markPostCompaction's real
+# body, so a rename drift fails loudly at --check.
+diff --git a/bootstrap/sessionState.js b/bootstrap/sessionState.js
+index 647ecbf..1759932 100644
+--- a/bootstrap/sessionState.js
++++ b/bootstrap/sessionState.js
+@@ -874,6 +874,9 @@ function setLastApiCompletionTimestamp(e) {
+ 
+ function markPostCompaction() {
+     ROOT_SESSION.requestJournal.replacePendingPostCompaction(!0);
++    try {
++        __claudiverse.mirrorMessage({ type: 'compact' });
++    } catch (e) {}
+ }
+ 
+ function consumePostCompaction() {

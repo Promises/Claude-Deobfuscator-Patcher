@@ -1,23 +1,42 @@
 # patch: 001-session-hooks
 # depends: none
-# generated: 2026-04-07
-# description: Foundation patch — getSessionId() calls __sessionHooks.runAll()
-#              All other patches register callbacks via module .push() instead of
-#              patching getSessionId() directly.
-
-diff --git a/bootstrap/state.js b/bootstrap/state.js
-index 8825053..0000000 100644
---- a/bootstrap/state.js
-+++ b/bootstrap/state.js
-@@ -362,6 +362,11 @@ function getInitialState() {
+# generated: 2026-08-21 (re-authored against 2.1.238)
+# description: getSessionId() invokes __sessionHooks.runAll() (foundation hook point).
+#              Other patches (002 sidecar, 004 multi-account) push their init
+#              callbacks onto __sessionHooks rather than patching getSessionId()
+#              themselves; runAll() is idempotent (hasRun latch in
+#              modules/AAASessionHooks.js) so calling it on every getSessionId()
+#              fires the callbacks exactly once, on the first call.
+#
+# UPSTREAM CHANGE 2.1.168 -> 2.1.238: the flat mutable STATE object is GONE.
+#   Upstream split it into a composed root object of getters plus ~25
+#   private-field class instances (costLedger, requestJournal, userPresence, ...).
+#   Consequences for this patch:
+#     - module moved: bootstrap/state.js -> bootstrap/sessionState.js
+#       (bootstrap/state.js STILL EXISTS on 2.1.238 but is a DIFFERENT module --
+#        OTel telemetry meters. Do not retarget this patch at it.)
+#     - STATE.sessionId          -> ROOT_SESSION.id            (property renamed)
+#     - tV()                     -> getSessionOverrides()      (anchored name)
+#   The hook payload is unchanged in meaning: the effective session UUID, i.e.
+#   the session-override sessionId when one is installed, else the root session id.
+#
+# All identifiers on ADDED lines are anchored names (ROOT_SESSION,
+# getSessionOverrides, getSessionId) -- no bundler-minified symbols are
+# introduced, so a rename drift in the next bump fails loudly at --check rather
+# than silently binding something else.
+diff --git a/bootstrap/sessionState.js b/bootstrap/sessionState.js
+index 647ecbf..1307aa2 100644
+--- a/bootstrap/sessionState.js
++++ b/bootstrap/sessionState.js
+@@ -469,6 +469,11 @@ function setSessionOverridesGetter(e) {
  }
-
+ 
  function getSessionId() {
 +    try {
 +        if (typeof __sessionHooks !== 'undefined') {
-+            __sessionHooks.runAll();
++            __sessionHooks.runAll(getSessionOverrides()?.sessionId ?? ROOT_SESSION.id);
 +        }
 +    } catch (e) {}
-     return STATE.sessionId;
+     return getSessionOverrides()?.sessionId ?? ROOT_SESSION.id;
  }
-
+ 

@@ -1,17 +1,25 @@
 # patch: 005-command-hooks
 # depends: none
-# generated: 2026-04-07
+# generated: 2026-08-21 (re-authored against 2.1.238)
 # description: Injects __commandHooks custom commands into the slash command list.
-
+#
+# Upstream 2.1.238 restructured this area: the builtin command table used to be a
+# `memoize(() => [...])` (old `h6`) assigned to `getBuiltinCommandTable`. It is now a
+# `??=` state cache on the shared state holder, with the literal array extracted into
+# a separate builder function. We append at the tail of that array, anchored on
+# `...remoteWebCommands,` (anchored name) which is unique in the file.
+#
+# The array builder itself has no anchor rule, so the @@ hunk header names a minified
+# symbol. That is cosmetic only -- git apply matches on context lines, not the header.
 diff --git a/commands.js b/commands.js
-index 54907c6..cf041b6 100644
+index a3a1a4b..ce3c8bb 100644
 --- a/commands.js
 +++ b/commands.js
-@@ -509,6 +509,7 @@ var bT = R(() => {
-             ...(Wy7 ? [Wy7] : []),
-             ...(Ly7 ? [Ly7] : []),
-             ...[],
-+            ...(typeof __commandHooks !== 'undefined' ? __commandHooks.getCommands() : []),
-         ])),
-         (aF = z6(() => new Set(g48().flatMap((H) => [H.name, ...(H.aliases ?? [])])))));
-     Vy7 = z6(async (H) => {
+@@ -406,6 +406,7 @@ function ijT() {
+         ...(yRl ? [yRl] : []),
+         ...remoteWebCommands,
+         ...[],
++        ...(typeof __commandHooks !== 'undefined' ? __commandHooks.getCommands() : []),
+     ];
+ }
+ 

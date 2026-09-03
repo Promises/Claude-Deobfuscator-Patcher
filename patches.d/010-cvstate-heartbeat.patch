@@ -1,0 +1,102 @@
+# patch: 010-cvstate-heartbeat
+# depends: 002, 008
+# generated: 2026-08-21 (re-authored against 2.1.238; was 2.1.168)
+# description: Poll-based reconciler to complement the event-driven idle signal.
+#              Every 3s mirror a {type:"cvstate"} heartbeat carrying the LIVE
+#              readiness (same task-independent basis as patch 008: no
+#              wait/turn/queued) PLUS the EXACT non-terminal tasks from the
+#              appState.tasks registry — each task's id/type/status/description/
+#              age (startTime from the task factory, age = now - startTime). The
+#              server reconciles its idle flag from this (so a missed/lost idle
+#              frame self-heals within ~3s) and logs idle/task-set changes to
+#              cv_events with the full task list — making a zombie (e.g. a 13h-old
+#              in_process_teammate "auditor" still "running") unmistakable vs a
+#              live foreground auditor (seconds old). Reachability stays
+#              task-independent (008); this only SURFACES background tasks, it
+#              does not let them pin busy.
+#              Anchored after the 008 idle effect (depends:008). setInterval is
+#              cheap; recreated on [mi,_h,z,He] change so it closes over fresh
+#              values.
+#
+# 2.1.168 -> 2.1.238 UPSTREAM REFACTOR (verified in this tree, not assumed):
+#   The full term-by-term mapping of the old readiness expression is documented
+#   in 008-idle-signal.patch and is not repeated here. The three changes that
+#   affect THIS patch:
+#     Dk/gY/n7 -> the `useReplReadiness` hook (hooks/useReplReadiness.js), called
+#       at screens/REPL.js:1001. This patch consumes `status` only via
+#       `_h !== 'waiting'` and uses `mi` (isLoading) for the turn-in-flight term.
+#       It does NOT use `status === 'busy'`, which is contaminated by
+#       delegatedActive (= D3e(appState.tasks)) — using it would let a zombie
+#       background task pin the seat busy forever, the precise failure this
+#       heartbeat exists to make VISIBLE rather than to suffer from.
+#     $z6() -> z.getMainThreadQueueLength(). The free module-global queue function
+#       is GONE; the queue is now a component-local instance `z = $S()`.
+#     $H (appState.tasks) -> `He` (= _t((nr) => nr.tasks), screens/REPL.js:611).
+#       The task record shape is UNCHANGED — id/type/status/description/startTime
+#       all still present, and the terminal-status set
+#       (completed/failed/killed) still matches, so the filter and the emitted
+#       payload are byte-for-byte the same contract the server already parses.
+#
+# ANCHOR STATUS (measured on the 2.1.238 build, 2026-08-21) — READ BEFORE BUMPING:
+#   React_REPL          ANCHORED. Lands (256 uses in screens/REPL.js). Safe.
+#   REPLComponent       ANCHOR DOES NOT LAND. /usr/bin/grep count in
+#                       screens/REPL.js is 0. The real component is the inner
+#                       `i_y` (REPL is a thin provider wrapper); `i_y` appears in
+#                       the @@ hunk-header function context, pinning this effect
+#                       to the REAL component body, not the wrapper.
+#   appStateTasks       ANCHOR DOES NOT LAND (grep count 0) — so the tasks
+#                       registry is referenced by its minified name `He`.
+#   messageQueue /      Both anchors exist but neither lands as a binding in
+#   createMessageQueue  screens/REPL.js: `messageQueue` appears only as an object
+#                       KEY (line 3938) and the local instance is `z`.
+#
+#   MINIFIED NAMES ON ADDED LINES (`_h`, `mi`, `z`, `He`) and why that is
+#   contained: a silent rebind would corrupt the heartbeat's idle flag or its task
+#   list. Mitigation: this hunk is anchored on the 008 idle effect immediately
+#   above it (all of `_h`, `mi` and `z` appear in those retained context lines
+#   with their readiness meaning intact), so drift in those three FAILS TO APPLY
+#   rather than binding silently. `He` is the weakest link — it is NOT pinned by
+#   any context line in this hunk; its mitigation is structural instead: the
+#   Object.values(...).filter(status) shape means a wrong binding yields an empty
+#   or malformed task list (loud, visible in cv_events), not a wrong idle flag.
+#   PROPER FIX for the next bump: make the `appStateTasks` anchor land and replace
+#   `He`, and add rules for the readiness destructure (`_h`, `mi`) and `z` ->
+#   messageQueue. NOTE the known trap: applyAnchorRules runs at build.sh step 2.6,
+#   BEFORE prettify at 2.7, so a new rule keyed on prettified text will soft-skip
+#   during the real build and only resolve when replayed against a finished tree.
+diff --git a/screens/REPL.js b/screens/REPL.js
+index 79b4a15..6e5bfb1 100644
+--- a/screens/REPL.js
++++ b/screens/REPL.js
+@@ -1032,6 +1032,31 @@ function i_y({
+         }, 400);
+         return () => clearTimeout(__cvIdleTimer);
+     }, [mi, _h, z]);
++    React_REPL.useEffect(() => {
++        let __cvHb = setInterval(() => {
++            try {
++                __claudiverse.mirrorMessage({
++                    type: 'cvstate',
++                    idle: _h !== 'waiting' && !mi && z.getMainThreadQueueLength() === 0,
++                    tasks: Object.values(He)
++                        .filter(
++                            (t) =>
++                                t.status !== 'completed' &&
++                                t.status !== 'failed' &&
++                                t.status !== 'killed',
++                        )
++                        .map((t) => ({
++                            id: t.id,
++                            type: t.type,
++                            status: t.status,
++                            desc: t.description,
++                            ageMs: Date.now() - t.startTime,
++                        })),
++                });
++            } catch (e) {}
++        }, 3000);
++        return () => clearInterval(__cvHb);
++    }, [mi, _h, z, He]);
+     let bf =
+             getFeatureValue_CACHED_MAY_BE_STALE('tengu_terminal_sidebar', !1) &&
+             (getGlobalConfig().showStatusInTerminalTab ?? !1),
