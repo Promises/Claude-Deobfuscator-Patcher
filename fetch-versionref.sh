@@ -68,6 +68,8 @@ fi
 
 for VER in $VERSIONS; do
     OUT="$VERSIONREF/${VER}-cli.js"
+    # A chunked version is captured as <ver>-chunks.tar.gz instead; skip if present.
+    [ -f "$VERSIONREF/${VER}-chunks.tar.gz" ] && { echo "== $VER: already captured (chunked) — skipping"; continue; }
     if [ -f "$OUT" ]; then
         echo "== $VER: already captured ($(wc -c <"$OUT" | tr -d ' ') bytes) — skipping"
         continue
@@ -86,6 +88,29 @@ for VER in $VERSIONS; do
 
     tar xzf "$TGZ" -C "$WORK" package/claude || {
         echo "   FAILED: no package/claude in tarball for $VER" >&2; rm -rf "$WORK"; trap - EXIT; continue; }
+
+    # CHUNKED (>=2.1.242): no single bundle to slice. Extract the chunks and keep
+    # them as <ver>-chunks.tar.gz — the analogue of <ver>-cli.js for this format.
+    # We store the extracted SOURCE, not the 200-360 MB native binary, for the
+    # same reason the monolithic path stores cli.js: the source is what gets
+    # diffed across versions, and 12 binaries would be ~3 GB.
+    if python3 -c "import sys; sys.path.insert(0,'$SCRIPT_DIR/tools'); from extract_chunks import is_chunked; sys.exit(0 if is_chunked('$WORK/package/claude') else 1)"; then
+        CH_OUT="$VERSIONREF/${VER}-chunks.tar.gz"
+        if [ -f "$CH_OUT" ]; then
+            echo "   chunked: already captured — skipping"
+            rm -rf "$WORK"; trap - EXIT; continue
+        fi
+        echo "== $VER: chunked format — extracting chunks"
+        if python3 "$SCRIPT_DIR/tools/extract_chunks.py" "$WORK/package/claude" "$WORK/chunks" \
+                --manifest "$WORK/chunk-graph.json" 2>&1 | sed 's/^/   /'; then
+            tar czf "$CH_OUT" -C "$WORK" chunks chunk-graph.json
+            echo "   wrote $(wc -c <"$CH_OUT" | tr -d ' ') bytes -> $(basename "$CH_OUT")"
+        else
+            echo "   FAILED: chunk extraction for $VER" >&2
+            FAILED_VERSIONS="$FAILED_VERSIONS $VER"
+        fi
+        rm -rf "$WORK"; trap - EXIT; continue
+    fi
 
     echo "== $VER: slicing"
     # `|| SLICE_FAILED=1` is load-bearing: this script runs under `set -e`, and the
