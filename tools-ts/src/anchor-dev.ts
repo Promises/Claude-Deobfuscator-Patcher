@@ -32,7 +32,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
 import { execSync } from "child_process";
-import { applyAnchorRules } from "./anchor-rules";
+import { applyAnchorRules, getNodeName, scopeMatches, type Scope } from "./anchor-rules";
 import type { MatchResult } from "./constraint-renamer";
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -98,18 +98,11 @@ function loadFile(file: string): { code: string; sf: ts.SourceFile } | null {
     return { code, sf };
 }
 
-function getNodeName(node: ts.Node): string | null {
-    if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) return node.name?.text ?? null;
-    if (ts.isFunctionExpression(node) || ts.isClassExpression(node)) {
-        if (node.name) return node.name.text;
-        if (node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name))
-            return node.parent.name.text;
-    }
-    if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
-    if (ts.isArrowFunction(node) && node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name))
-        return node.parent.name.text;
-    return null;
-}
+// getNodeName is imported from the engine (anchor-rules.ts) — see the import at
+// the top of this file. It used to be duplicated here, and the copy drifted:
+// this one had an ArrowFunction case the engine lacked, so `scope: "arrow"`
+// rules reported RESOLVED in the dev tool while the real build renamed nothing.
+// Never re-add a local copy.
 
 function findNodeByName(sf: ts.SourceFile, name: string): ts.Node | null {
     let found: ts.Node | null = null;
@@ -134,23 +127,11 @@ function findNodeAtPosition(sf: ts.SourceFile, start: number, end: number): ts.N
     return best;
 }
 
-type Scope = "function" | "async_generator" | "generator" | "async_function" | "method" | "class" | "arrow";
-
-function scopeMatches(node: ts.Node, scope: Scope): boolean {
-    const isFn = ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node);
-    const isAsync = isFn && !!(node as ts.FunctionDeclaration).modifiers?.some(m => m.kind === ts.SyntaxKind.AsyncKeyword);
-    const isGen = isFn && !!(node as ts.FunctionDeclaration).asteriskToken;
-
-    switch (scope) {
-        case "function": return isFn;
-        case "async_generator": return isFn && isAsync && isGen;
-        case "generator": return isFn && isGen;
-        case "async_function": return isFn && isAsync;
-        case "method": return ts.isMethodDeclaration(node);
-        case "class": return ts.isClassDeclaration(node) || ts.isClassExpression(node);
-        case "arrow": return ts.isArrowFunction(node);
-    }
-}
+// Scope and scopeMatches are imported from the engine (anchor-rules.ts) — see
+// the import at the top of this file. A local FORK previously lived here and
+// lacked the engine's newer scope kinds, so a rule using one would resolve in
+// the dev tool and rename NOTHING in the real build (the same class of drift
+// that already burned `scope: "arrow"`). Do not re-add a copy.
 
 function findContainingScope(sf: ts.SourceFile, pos: number, scope: Scope): ts.Node | null {
     let deepest: ts.Node = sf;
@@ -249,6 +230,9 @@ function resolveInternally(rules: any[]) {
     // Import the walk and find helpers from anchor-rules dynamically
     // Since we can't easily import internals, we do a mini-resolve here
     for (const rule of rules.filter((r: any) => !isWalk(r))) {
+        // Comment-only entries (just __note keys) are not rules — mirrors the
+        // guard in the engine, where the missing `file` used to throw.
+        if (!rule.file || !rule.find) continue;
         const loaded = loadFile(rule.file);
         if (!loaded) continue;
         const { code, sf } = loaded;
@@ -260,7 +244,23 @@ function resolveInternally(rules: any[]) {
         if (!node) continue;
 
         const minifiedName = getNodeName(node);
-        if (!minifiedName) continue;
+        if (!minifiedName) {
+            // POSITIONAL ANCHOR — mirrors applyAnchorRulesFromRules in the
+            // engine. Without this the dev tool would silently drop every
+            // anchor_positional rule and report chains as unresolvable that
+            // resolve fine in the real build.
+            if (rule.anchor_positional && rule.anchor_only && (rule.id ?? rule.rename)) {
+                const posId = rule.id ?? rule.rename;
+                resolvedById.set(posId, {
+                    id: posId,
+                    file: rule.file,
+                    minifiedName: `__unnamed_${ts.SyntaxKind[node.kind]}`,
+                    nodeStart: node.getStart(sf),
+                    nodeEnd: node.end,
+                });
+            }
+            continue;
+        }
 
         const id = rule.id ?? rule.rename ?? minifiedName;
         resolvedById.set(id, { id, file: rule.file, minifiedName });

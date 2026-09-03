@@ -1,359 +1,939 @@
 [
-    {
-        "id": "query",
-        "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
-        "file": "query.js",
-        "find": {
-            "string_literal": "completed",
-            "filter": [
-                {
-                    "not": {
-                        "property_assignment": {
-                            "key": "reason"
-                        }
-                    }
-                },
-                {
-                    "include": {
-                        "case": "completed"
-                    }
-                }
-            ]
-        },
-        "scope": "async_generator",
-        "rename": "query"
-    },
-    {
-        "from": "query",
-        "walk": "param:0",
-        "rename": "params",
-        "description": "first param of query"
-    },
-    {
-        "from": "query",
-        "walk": "local:array_init",
-        "rename": "consumedCommandUuids",
-        "description": "empty array accumulator in query"
-    },
-    {
-        "from": "query",
-        "walk": "local:for_of_binding",
-        "rename": "uuid",
-        "description": "for-of loop variable in query"
-    },
-    {
-        "from": "query",
-        "walk": "yield_star_callee",
-        "rename": "queryLoop",
-        "description": "queryLoop — called via yield* from query",
-        "id": "queryLoop"
-    },
-    {
-        "from": "query",
-        "walk": "local:yield_star_result",
-        "rename": "terminal",
-        "description": "return value of yield* queryLoop in query"
-    },
-    {
-        "from": "query",
-        "walk": "call_string_arg:completed:callee",
-        "rename": "notifyCommandLifecycle",
-        "description": "notifyCommandLifecycle — called with 'completed' in query"
-    },
-    {
-        "id": "yieldMissingToolResultBlocks",
-        "description": "generator that yields tool_result error messages for unmatched tool uses",
-        "file": "query.js",
-        "find": {
+  {
+    "id": "query",
+    "description": "query wrapper \u2014 calls queryLoop via yield* and notifies 'completed'",
+    "file": "query.js",
+    "find": {
+      "string_literal": "completed",
+      "filter": [
+        {
+          "not": {
             "property_assignment": {
-                "key": "type",
-                "value": "tool_result"
+              "key": "reason"
             }
+          }
         },
-        "scope": "generator",
-        "rename": "yieldMissingToolResultBlocks"
+        {
+          "include": {
+            "case": "completed"
+          }
+        }
+      ]
     },
-    {
-        "from": "yieldMissingToolResultBlocks",
-        "walk": "param:0",
-        "rename": "assistantMessages"
+    "scope": "async_generator",
+    "rename": "query"
+  },
+  {
+    "from": "query",
+    "walk": "param:0",
+    "rename": "params",
+    "description": "first param of query"
+  },
+  {
+    "from": "query",
+    "walk": "local:array_init",
+    "rename": "consumedCommandUuids",
+    "description": "empty array accumulator in query"
+  },
+  {
+    "from": "query",
+    "walk": "local:for_of_binding",
+    "rename": "uuid",
+    "description": "for-of loop variable in query"
+  },
+  {
+    "from": "query",
+    "walk": "yield_star_callee",
+    "rename": "queryLoop",
+    "description": "queryLoop \u2014 called via yield* from query",
+    "id": "queryLoop"
+  },
+  {
+    "from": "query",
+    "walk": "local:yield_star_result",
+    "rename": "terminal",
+    "description": "return value of yield* queryLoop in query"
+  },
+  {
+    "from": "query",
+    "walk": "call_string_arg:completed:callee",
+    "rename": "notifyCommandLifecycle",
+    "description": "notifyCommandLifecycle \u2014 called with 'completed' in query"
+  },
+  {
+    "id": "yieldMissingToolResultBlocks",
+    "description": "generator that yields tool_result error messages for unmatched tool uses",
+    "file": "query.js",
+    "find": {
+      "property_assignment": {
+        "key": "type",
+        "value": "tool_result"
+      }
     },
-    {
-        "from": "yieldMissingToolResultBlocks",
-        "walk": "param:1",
-        "rename": "errorMessage"
+    "scope": "generator",
+    "rename": "yieldMissingToolResultBlocks"
+  },
+  {
+    "from": "yieldMissingToolResultBlocks",
+    "walk": "param:0",
+    "rename": "assistantMessages"
+  },
+  {
+    "from": "yieldMissingToolResultBlocks",
+    "walk": "param:1",
+    "rename": "errorMessage"
+  },
+  {
+    "from": "yieldMissingToolResultBlocks",
+    "walk": "local:for_of_binding",
+    "rename": "assistantMessage"
+  },
+  {
+    "from": "yieldMissingToolResultBlocks",
+    "walk": "local:call_result",
+    "rename": "toolUseBlocks"
+  },
+  {
+    "from": "yieldMissingToolResultBlocks",
+    "walk": "local:for_of_binding:1",
+    "rename": "toolUse"
+  },
+  {
+    "id": "getCustomApiKeyStatus",
+    "description": "getCustomApiKeyStatus \u2014 returns 'approved', 'rejected', or 'new'",
+    "file": "utils/config.js",
+    "find": {
+      "string_literal": "approved"
     },
-    {
-        "from": "yieldMissingToolResultBlocks",
-        "walk": "local:for_of_binding",
-        "rename": "assistantMessage"
+    "scope": "function",
+    "rename": "getCustomApiKeyStatus"
+  },
+  {
+    "from": "getCustomApiKeyStatus",
+    "walk": "param:0",
+    "rename": "truncatedApiKey",
+    "description": "truncatedApiKey \u2014 the API key to check status for"
+  },
+  {
+    "from": "getCustomApiKeyStatus",
+    "walk": "local:call_result",
+    "rename": "config",
+    "description": "config \u2014 local var set to getGlobalConfig()"
+  },
+  {
+    "from": "getCustomApiKeyStatus",
+    "walk": "local:call_result_callee",
+    "id": "getGlobalConfig",
+    "rename": "getGlobalConfig",
+    "description": "getGlobalConfig \u2014 the callee that provides config in getCustomApiKeyStatus"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "return:comma:4",
+    "id": "getGlobalConfig_returnExpr",
+    "description": "4-part comma return in getGlobalConfig"
+  },
+  {
+    "from": "getGlobalConfig_returnExpr",
+    "walk": "contains:Date.now():assign_target",
+    "rename": "globalConfigCache",
+    "id": "globalConfigCache",
+    "description": "globalConfigCache \u2014 the config cache object assigned with mtime defaulting to Date.now()"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "contains:mtimeMs:member_access_target",
+    "rename": "stats",
+    "description": "stats \u2014 local assigned from statSync, referenced as stats?.mtimeMs"
+  },
+  {
+    "from": "getGlobalConfig_returnExpr",
+    "walk": "contains:size:assign_target",
+    "rename": "lastReadFileStats",
+    "id": "lastReadFileStats",
+    "description": "lastReadFileStats \u2014 assigned { mtime, size } or null"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "method_arg_callee:statSync",
+    "rename": "getGlobalClaudeFile",
+    "description": "getGlobalClaudeFile \u2014 path function passed to statSync()"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "if:condition_refs:globalConfigCache",
+    "id": "getGlobalConfig_cacheHitBranch",
+    "description": "if-branch checking globalConfigCache.config (cache hit path)"
+  },
+  {
+    "from": "getGlobalConfig_cacheHitBranch",
+    "walk": "postfix_increment_operand",
+    "rename": "configCacheHits",
+    "description": "configCacheHits \u2014 incremented on cache hit"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "standalone_increment",
+    "rename": "configCacheMisses",
+    "description": "configCacheMisses \u2014 incremented at start of cache miss path"
+  },
+  {
+    "id": "getTotalCacheReadInputTokens",
+    "file": "bootstrap/sessionState.js",
+    "find": {
+      "regex": "(?:\"cacheReadInputTokens\"|\\.costLedger\\.totalCacheReadInputTokens\\(\\))"
     },
-    {
-        "from": "yieldMissingToolResultBlocks",
-        "walk": "local:call_result",
-        "rename": "toolUseBlocks"
+    "scope": "function",
+    "rename": "getTotalCacheReadInputTokens"
+  },
+  {
+    "from": "getTotalCacheReadInputTokens",
+    "walk": "contains:modelUsage:member_access_target",
+    "rename": "STATE",
+    "description": "STATE \u2014 the global state object"
+  },
+  {
+    "from": "getTotalCacheReadInputTokens",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "state_exports",
+    "description": "bulk rename all bootstrap/state.js exports from the export map"
+  },
+  {
+    "from": "getGlobalConfig",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "config_exports",
+    "description": "bulk rename all utils/config.js exports from the export map"
+  },
+  {
+    "from": "utils/config.js_fun_saveGlobalConfig",
+    "walk": "call_string_arg:tengu_config_auth_loss_prevented:callee",
+    "rename": "logEvent",
+    "description": "logEvent \u2014 telemetry event logger (Q), used across 247+ files"
+  },
+  {
+    "from": "utils/config.js_fun_saveGlobalConfig",
+    "find": {
+      "string_contains": "refusing to write"
     },
-    {
-        "from": "yieldMissingToolResultBlocks",
-        "walk": "local:for_of_binding:1",
-        "rename": "toolUse"
+    "walk": "closest_parent:call",
+    "id": "saveGlobalConfig_fallbackCall",
+    "description": "the logForDebugging(...) call in saveGlobalConfig's auth loss guard"
+  },
+  {
+    "from": "saveGlobalConfig_fallbackCall",
+    "walk": "callee",
+    "rename": "logForDebugging",
+    "description": "logForDebugging \u2014 debug logger (h)"
+  },
+  {
+    "from": "saveGlobalConfig_fallbackCall",
+    "walk": "closest_parent:if",
+    "id": "saveGlobalConfig_authLossIf",
+    "description": "if ($Z_(K)) block guarding the auth loss check"
+  },
+  {
+    "from": "saveGlobalConfig_authLossIf",
+    "walk": "condition_callee",
+    "rename": "wouldLoseAuthState",
+    "id": "wouldLoseAuthState_call",
+    "description": "wouldLoseAuthState \u2014 checks if saving would lose oauthAccount/hasCompletedOnboarding"
+  },
+  {
+    "from": "wouldLoseAuthState_call",
+    "walk": "param:0",
+    "rename": "currentConfig",
+    "description": "currentConfig \u2014 the re-read config passed to wouldLoseAuthState"
+  },
+  {
+    "id": "getInitialState",
+    "file": "bootstrap/sessionState.js",
+    "find": {
+      "regex": "realpathSync"
     },
-    {
-        "id": "getCustomApiKeyStatus",
-        "description": "getCustomApiKeyStatus — returns 'approved', 'rejected', or 'new'",
-        "file": "utils/config.js",
-        "find": {
-            "string_literal": "approved"
-        },
-        "scope": "function",
-        "rename": "getCustomApiKeyStatus"
+    "scope": "function",
+    "rename": "getInitialState"
+  },
+  {
+    "from": "bootstrap/state.js_fun_flushInteractionTime",
+    "walk": "only_bare_call",
+    "rename": "flushInteractionTime_inner",
+    "description": "flushInteractionTime_inner \u2014 the actual flush, guarded by flushInteractionTime"
+  },
+  {
+    "id": "hasAnthropicApiKeyAuth",
+    "description": "hasAnthropicApiKeyAuth \u2014 checks for API key auth, contains skipRetrievingKeyFromApiKeyHelper",
+    "file": "utils/auth.js",
+    "find": {
+      "text": "skipRetrievingKeyFromApiKeyHelper"
     },
-    {
-        "from": "getCustomApiKeyStatus",
-        "walk": "param:0",
-        "rename": "truncatedApiKey",
-        "description": "truncatedApiKey — the API key to check status for"
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "hasAnthropicApiKeyAuth",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "auth_exports",
+    "description": "bulk rename all utils/auth.js exports from the export map"
+  },
+  {
+    "id": "prependUserMessage",
+    "description": "prependUserMessage \u2014 method that calls jsonStringify with role:'user'",
+    "file": "cli/structuredIO.js",
+    "find": {
+      "property_assignment": {
+        "key": "role",
+        "value": "user"
+      }
     },
-    {
-        "from": "getCustomApiKeyStatus",
-        "walk": "local:call_result",
-        "rename": "config",
-        "description": "config — local var set to getGlobalConfig()"
+    "scope": "method",
+    "anchor_only": true
+  },
+  {
+    "from": "prependUserMessage",
+    "find": {
+      "property_assignment": {
+        "key": "role",
+        "value": "user"
+      }
     },
-    {
-        "from": "getCustomApiKeyStatus",
-        "walk": "local:call_result_callee",
-        "id": "getGlobalConfig",
-        "rename": "getGlobalConfig",
-        "description": "getGlobalConfig — the callee that provides config in getCustomApiKeyStatus"
+    "walk": "closest_parent:call",
+    "id": "jsonStringify_call"
+  },
+  {
+    "from": "jsonStringify_call",
+    "walk": "callee",
+    "rename": "jsonStringify",
+    "description": "jsonStringify \u2014 JSON serializer from slowOperations.js"
+  },
+  {
+    "from": "prependUserMessage",
+    "walk": "enclosing_class",
+    "rename": "StructuredIO",
+    "description": "StructuredIO \u2014 CLI structured I/O class"
+  },
+  {
+    "id": "LogoV2",
+    "description": "LogoV2 \u2014 main logo/header component with compact and horizontal layouts",
+    "file": "components/LogoV2/LogoV2.js",
+    "find": {
+      "string_literal": "theme"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "return:comma:4",
-        "id": "getGlobalConfig_returnExpr",
-        "description": "4-part comma return in getGlobalConfig"
+    "scope": "function",
+    "rename": "LogoV2"
+  },
+  {
+    "from": "LogoV2",
+    "walk": "contains:createElement:member_access_target",
+    "rename": "React",
+    "description": "React \u2014 imported as R8, used for createElement calls"
+  },
+  {
+    "id": "getLayoutMode",
+    "description": "getLayoutMode \u2014 returns 'horizontal' or 'compact' based on terminal width",
+    "file": "utils/logoV2Utils.js",
+    "find": {
+      "string_literal": "compact"
     },
-    {
-        "from": "getGlobalConfig_returnExpr",
-        "walk": "contains:Date.now():assign_target",
-        "rename": "globalConfigCache",
-        "id": "globalConfigCache",
-        "description": "globalConfigCache — the config cache object assigned with mtime defaulting to Date.now()"
+    "scope": "function",
+    "rename": "getLayoutMode"
+  },
+  {
+    "from": "getLayoutMode",
+    "walk": "param:0",
+    "rename": "columns",
+    "description": "columns \u2014 terminal width param"
+  },
+  {
+    "type": "pin",
+    "source": "components/PromptInput/useSwarmBanner.ts",
+    "find": {
+      "text": "View teammates"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "contains:mtimeMs:member_access_target",
-        "rename": "stats",
-        "description": "stats — local assigned from statSync, referenced as stats?.mtimeMs"
+    "description": "useSwarmBanner module -- prompt-input teammate banner hook. Low-confidence matched on 2.1.238 (lands in _tentative/), so pin it to the stable path the useSwarmBanner/resolveBannerColor rules key on."
+  },
+  {
+    "id": "REPLComponent",
+    "description": "the top-level REPL screen component (anchor only -- the component is named by other rules)",
+    "file": "screens/REPL.js",
+    "find": {
+      "regex": "isLocalJSXCommand === !0 && \\w+\\?\\.jsx != null"
     },
-    {
-        "from": "getGlobalConfig_returnExpr",
-        "walk": "contains:size:assign_target",
-        "rename": "lastReadFileStats",
-        "id": "lastReadFileStats",
-        "description": "lastReadFileStats — assigned { mtime, size } or null"
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "REPLComponent",
+    "walk": "contains:useRef:member_access_target",
+    "rename": "React_REPL",
+    "id": "React_REPL",
+    "description": "React namespace binding used inside screens/REPL.js (a file-local import binding, distinct from the `React` binding anchored in components/LogoV2/LogoV2.js). Keyed on the `.useRef` member access, which is a public React API name and cannot be minified."
+  },
+  {
+    "from": "REPLComponent",
+    "find": {
+      "regex": "(?<=Survey feedback request failed[\\s\\S]{0,400}?\\.useRef\\([\\w$]+\\);\\s*)[\\w$]+(?=\\.current = [\\w$]+;)"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "method_arg_callee:statSync",
-        "rename": "getGlobalClaudeFile",
-        "description": "getGlobalClaudeFile — path function passed to statSync()"
+    "walk": "binary_other_operand",
+    "rename": "handleSubmitInput",
+    "id": "handleSubmitInput",
+    "description": "The live prompt submit handler (the useCallback the PromptInput's onSubmit receives). Reached from the unique 'Survey feedback request failed' string: the survey callback is immediately followed by `ref = React.useRef(handler); ref.current = handler;`. The find lands on the ref identifier on the LHS of that assignment and binary_other_operand returns the RHS -- the handler."
+  },
+  {
+    "from": "REPLComponent",
+    "find": {
+      "string_literal": "/rate-limit-options"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "if:condition_refs:globalConfigCache",
-        "id": "getGlobalConfig_cacheHitBranch",
-        "description": "if-branch checking globalConfigCache.config (cache hit path)"
+    "walk": "closest_parent:call",
+    "id": "submitInputRefCall",
+    "description": "The `submitInputRef.current('/rate-limit-options', {...})` call. '/rate-limit-options' is a real slash-command name and is unique in the file."
+  },
+  {
+    "from": "submitInputRefCall",
+    "walk": "contains:current:member_access_target",
+    "rename": "submitInputRef",
+    "id": "submitInputRef",
+    "description": "The React ref that always holds the current submit handler (`submitInputRef.current = handleSubmitInput`). This is the ref patch 003 reads from inside its useEffect so the injected globalThis.__claudiverseSubmit never closes over a stale handler."
+  },
+  {
+    "from": "runningTeammateTasksCall",
+    "walk": "param:0",
+    "rename": "appStateTasks",
+    "id": "appStateTasks",
+    "description": "appState.tasks -- the background/subagent task registry read by patch 010's cvstate heartbeat. Recovered as argument 0 of the running-teammate-tasks call rather than from its own declarator, because the anchor DSL has no walk that names a plain local declarator by position."
+  },
+  {
+    "id": "createMessageQueue",
+    "description": "The message-queue factory in utils/messageQueueManager.js -- the function whose returned object literal exposes getMainThreadQueueLength/enqueue/dequeue/peek/... Anchored on the `getMainThreadQueueLength:` property key in that returned object; object keys are public API names of the queue and survive minification.",
+    "file": "utils/messageQueueManager.js",
+    "find": {
+      "property_assignment": {
+        "key": "getMainThreadQueueLength"
+      }
     },
-    {
-        "from": "getGlobalConfig_cacheHitBranch",
-        "walk": "postfix_increment_operand",
-        "rename": "configCacheHits",
-        "description": "configCacheHits — incremented on cache hit"
+    "scope": "function",
+    "rename": "createMessageQueue"
+  },
+  {
+    "from": "REPLComponent",
+    "walk": "contains:getMainThreadQueueLength:member_access_target",
+    "rename": "messageQueue",
+    "id": "messageQueue",
+    "description": "2.1.238 ONLY (resolves to `z`; does NOT resolve in 2.1.168). The message-queue instance held as a local in the REPL component. In 2.1.238 the queued-message count is read as `messageQueue.getMainThreadQueueLength()`, replacing 2.1.168's free imported `$z6()`. Patches 008/010 must be rewritten to call `messageQueue.getMainThreadQueueLength()` instead of `$z6()`."
+  },
+  {
+    "id": "withRetryGenerator",
+    "description": "withRetryGenerator (Ny6 @2.1.168 / ORi @2.1.238) -- the async generator implementing the API request retry loop in services/api/withRetry.js. This is the hunk location anchor for 004-multi-account-failover. Keyed on the telemetry event name emitted from its catch block when the computed retry delay exceeds the cap: an analytics string, unique in the file and absent from every other file in the tree.",
+    "file": "services/api/withRetry.js",
+    "find": {
+      "string_literal": "tengu_api_retry_after_too_long"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "standalone_increment",
-        "rename": "configCacheMisses",
-        "description": "configCacheMisses — incremented at start of cache miss path"
+    "scope": "async_generator",
+    "rename": "withRetryGenerator"
+  },
+  {
+    "id": "getRetryAfterHeader",
+    "description": "getRetryAfterHeader (dIK @2.1.168 / jLf @2.1.238) -- reads the 'retry-after' header off an APIError, tolerating both plain-object indexing and Headers-style .get(). Called as dIK(P) in the patched hunk. Keyed on the 'retry-after' HTTP header name, which occurs only inside this function in the whole file.",
+    "file": "services/api/withRetry.js",
+    "find": {
+      "string_literal": "retry-after"
     },
-    {
-        "id": "getTotalCacheReadInputTokens",
-        "description": "getTotalCacheReadInputTokens — sumBy on STATE.modelUsage",
-        "file": "bootstrap/state.js",
-        "find": {
-            "string_literal": "cacheReadInputTokens"
-        },
-        "scope": "function",
-        "rename": "getTotalCacheReadInputTokens"
+    "scope": "function",
+    "rename": "getRetryAfterHeader"
+  },
+  {
+    "id": "getUnifiedRateLimitResetMs",
+    "description": "getUnifiedRateLimitResetMs (vw3 @2.1.168 / Kxv @2.1.238) -- converts the 'anthropic-ratelimit-unified-reset' epoch-seconds response header into a milliseconds-from-now delay clamped to the max backoff, returning null when the header is absent, non-finite or already past. Keyed on that header name: an API wire-protocol constant, unique in the file.",
+    "file": "services/api/withRetry.js",
+    "find": {
+      "string_literal": "anthropic-ratelimit-unified-reset"
     },
-    {
-        "from": "getTotalCacheReadInputTokens",
-        "walk": "contains:modelUsage:member_access_target",
-        "rename": "STATE",
-        "description": "STATE — the global state object"
+    "scope": "function",
+    "rename": "getUnifiedRateLimitResetMs"
+  },
+  {
+    "id": "isFastModeNotEnabledError",
+    "description": "isFastModeNotEnabledError (nIK @2.1.168 / qLf @2.1.238) -- guard predicate `if (!(e instanceof APIError)) return !1; return e.status === 400 && e.message?.includes('Fast mode is not enabled')`. Used only as a stepping stone to the APIError class: it is the smallest function in the file that contains exactly one `instanceof`, which makes the operand walk below unambiguous.",
+    "file": "services/api/withRetry.js",
+    "find": {
+      "string_literal": "Fast mode is not enabled"
     },
-    {
-        "from": "getTotalCacheReadInputTokens",
-        "walk": "export_map",
-        "rename": "__export_map",
-        "id": "state_exports",
-        "description": "bulk rename all bootstrap/state.js exports from the export map"
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "isFastModeNotEnabledError",
+    "find": {
+      "regex": "[A-Za-z_$][A-Za-z0-9_$]*(?= instanceof )"
     },
-    {
-        "from": "getGlobalConfig",
-        "walk": "export_map",
-        "rename": "__export_map",
-        "id": "config_exports",
-        "description": "bulk rename all utils/config.js exports from the export map"
+    "walk": "binary_other_operand",
+    "rename": "APIError",
+    "description": "APIError (cq @2.1.168 / Ls @2.1.238) -- the Anthropic SDK base API error class carrying .status/.headers/.requestID/.error/.type. This is the class the failover hunk tests with `P instanceof cq && P.status === 429`. It is NOT declared in withRetry.js; it is imported from an _unmatched/ chunk whose FILENAME changes between versions (_unmatched/0131_d0.js @2.1.168 -> _unmatched/0165_sD.js @2.1.238), so it deliberately is not anchored by a root rule on that file. Anchoring it from inside withRetry.js and letting the TS Language Service propagate the rename globally is what makes it version-stable. The lookahead regex positions the find strictly inside the LEFT operand so binary_other_operand returns the RIGHT one (the class); a find on the `instanceof` token itself lands on the BinaryExpression and returns the left operand instead."
+  },
+  {
+    "from": "withRetryGenerator",
+    "find": {
+      "string_literal": "anthropic-ratelimit-unified-overage-disabled-reason"
     },
-    {
-        "from": "utils/config.js_fun_saveGlobalConfig",
-        "walk": "call_string_arg:tengu_config_auth_loss_prevented:callee",
-        "rename": "logEvent",
-        "description": "logEvent — telemetry event logger (Q), used across 247+ files"
+    "walk": "closest_parent:call",
+    "id": "withRetryGenerator_overageHeaderRead",
+    "description": "the `<caughtError>.headers?.get('anthropic-ratelimit-unified-overage-disabled-reason')` call inside the retry loop's catch block -- an intermediate positional anchor whose only purpose is to pin the next walk to this one call expression rather than searching the whole generator body"
+  },
+  {
+    "from": "withRetryGenerator_overageHeaderRead",
+    "walk": "contains:headers:member_access_target",
+    "rename": "apiError",
+    "description": "apiError (P @2.1.168 / C @2.1.238) -- the catch-clause binding for the error thrown by an API attempt inside withRetryGenerator's retry loop. The failover hunk references it as `P` on added lines. Reached as the object of the `.headers` access pinned by the intermediate anchor above; this is a scoped rename, applied within the generator body only."
+  },
+  {
+    "id": "recoverFromOAuth401",
+    "description": "recoverFromOAuth401 (2.1.168 _W5 / 2.1.238 J1b) -- async 401 recovery: clears the OAuth token cache, then tries the SDK refresh callback, disk, and env-token rotation. Patch 004 anchors its first hunk on the clearOAuthTokenCache() call at the top of this function.",
+    "file": "utils/auth.js",
+    "find": {
+      "string_literal": "tengu_oauth_401_sdk_callback_refreshed"
     },
-    {
-        "from": "utils/config.js_fun_saveGlobalConfig",
-        "find": {
-            "string_contains": "refusing to write"
-        },
-        "walk": "closest_parent:call",
-        "id": "saveGlobalConfig_fallbackCall",
-        "description": "the logForDebugging(...) call in saveGlobalConfig's auth loss guard"
+    "scope": "async_function",
+    "rename": "recoverFromOAuth401"
+  },
+  {
+    "id": "refreshOAuthTokenWithLock",
+    "description": "refreshOAuthTokenWithLock (2.1.168 _M8 / 2.1.238 Gua) -- the locked OAuth token-refresh worker behind checkAndRefreshOAuthTokenIfNeeded. Patch 004 has TWO hunks in this function (success path + catch path).",
+    "file": "utils/auth.js",
+    "find": {
+      "string_literal": "tengu_oauth_token_refresh_lock_retry_limit_reached"
     },
-    {
-        "from": "saveGlobalConfig_fallbackCall",
-        "walk": "callee",
-        "rename": "logForDebugging",
-        "description": "logForDebugging — debug logger (h)"
+    "scope": "async_function",
+    "rename": "refreshOAuthTokenWithLock"
+  },
+  {
+    "from": "refreshOAuthTokenWithLock",
+    "walk": "contains:refreshOAuthToken:assign_target",
+    "rename": "refreshedTokens",
+    "description": "refreshedTokens (2.1.238 h) -- the token bundle returned by refreshOAuthToken(). This is the object patch 004 passes to __multiAccount.saveRefreshedTokens(). NOTE: resolves in 2.1.238 only; in 2.1.168 it is a `let j = await refreshOAuthToken(...)` DECLARATION and assign_target only matches `X = ...` BinaryExpressions."
+  },
+  {
+    "id": "resetCredentialFileReadCache_v168",
+    "description": "resetCredentialFileReadCache (2.1.168 WE, utils/authFileDescriptor.js) -- resets the credentials-file read cache: cache={data:null,cachedAt:0}, generation++, readInFlight=null. 2.1.168 path only; the file moved in 2.1.238 (see the _v238 rule).",
+    "file": "utils/authFileDescriptor.js",
+    "find": {
+      "regex": "generation\\+\\+"
     },
-    {
-        "from": "saveGlobalConfig_fallbackCall",
-        "walk": "closest_parent:if",
-        "id": "saveGlobalConfig_authLossIf",
-        "description": "if ($Z_(K)) block guarding the auth loss check"
+    "scope": "function",
+    "rename": "resetCredentialFileReadCache"
+  },
+  {
+    "id": "resetCredentialFileReadCache_v238",
+    "description": "resetCredentialFileReadCache (2.1.238 xre, utils/secureStorage/macOsKeychainHelpers.js) -- same function as the _v168 rule; the module was relocated under utils/secureStorage/ in 2.1.238 and gained a lastReadFailure reset. Only one of the two path rules matches per tree; the other is skipped as 'file not found'.",
+    "file": "utils/secureStorage/macOsKeychainHelpers.js",
+    "find": {
+      "regex": "generation\\+\\+"
     },
-    {
-        "from": "saveGlobalConfig_authLossIf",
-        "walk": "condition_callee",
-        "rename": "wouldLoseAuthState",
-        "id": "wouldLoseAuthState_call",
-        "description": "wouldLoseAuthState — checks if saving would lose oauthAccount/hasCompletedOnboarding"
+    "scope": "function",
+    "rename": "resetCredentialFileReadCache"
+  },
+  {
+    "id": "isSimpleMode",
+    "description": "isSimpleMode (2.1.168 Y1 / 2.1.238 cg) -- true when CLAUDE_CODE_SIMPLE is set or --bare was passed. Patch 004 uses it as the gate for the non-Anthropic auth paths it wraps.",
+    "file": "utils/envUtils.js",
+    "find": {
+      "string_literal": "--bare"
     },
-    {
-        "from": "wouldLoseAuthState_call",
-        "walk": "param:0",
-        "rename": "currentConfig",
-        "description": "currentConfig — the re-read config passed to wouldLoseAuthState"
+    "scope": "function",
+    "rename": "isSimpleMode"
+  },
+  {
+    "id": "isExpectedApiError",
+    "description": "isExpectedApiError (2.1.168 iY / 2.1.238 isExpectedApiError) -- axios-error predicate: true for undefined/401/403/429 statuses, or when the caller-supplied predicate matches. Used by patch 004's context lines in the refresh catch block.",
+    "file": "utils/errors.js",
+    "find": {
+      "regex": "===\\s401\\s\\|\\|\\s\\w+\\s===\\s403"
     },
-    {
-        "id": "getInitialState",
-        "description": "getInitialState — creates the initial STATE object with defaults",
-        "file": "bootstrap/state.js",
-        "find": {
-            "string_literal": "userSettings"
-        },
-        "scope": "function",
-        "rename": "getInitialState"
+    "scope": "function",
+    "rename": "isExpectedApiError"
+  },
+  {
+    "id": "formatErrorMessage",
+    "description": "errorMessage (2.1.168 ZH / 2.1.238 ce) -- error-to-string formatter: `e instanceof Error ? e.message : String(e)`. Used by patch 004's context lines in the refresh catch block.",
+    "file": "utils/errors.js",
+    "find": {
+      "regex": "instanceof\\sError\\s\\?\\s\\w+\\.message\\s:\\sString"
     },
-    {
-        "from": "bootstrap/state.js_fun_flushInteractionTime",
-        "walk": "only_bare_call",
-        "rename": "flushInteractionTime_inner",
-        "description": "flushInteractionTime_inner — the actual flush, guarded by flushInteractionTime"
+    "scope": "function",
+    "rename": "formatErrorMessage"
+  },
+  {
+    "id": "getTotalCacheReadInputTokens_split",
+    "description": "getTotalCacheReadInputTokens \u2014 split state module (>= 2.1.238): delegates to Sr.costLedger.totalCacheReadInputTokens()",
+    "file": "_unmatched/0136_nt.js",
+    "find": {
+      "function_name": "getTotalCacheReadInputTokens"
     },
-    {
-        "id": "hasAnthropicApiKeyAuth",
-        "description": "hasAnthropicApiKeyAuth — checks for API key auth, contains skipRetrievingKeyFromApiKeyHelper",
-        "file": "utils/auth.js",
-        "find": {
-            "text": "skipRetrievingKeyFromApiKeyHelper"
-        },
-        "scope": "function",
-        "anchor_only": true
+    "scope": "function",
+    "rename": "getTotalCacheReadInputTokens"
+  },
+  {
+    "from": "getTotalCacheReadInputTokens_split",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "state_exports_split",
+    "description": "bulk rename all split state-module exports from the export map"
+  },
+  {
+    "id": "getInitialState_split",
+    "description": "getInitialState \u2014 split state module (>= 2.1.238): builds the root session, resolving cwd via realpathSync",
+    "file": "_unmatched/0136_nt.js",
+    "find": {
+      "regex": "realpathSync"
     },
-    {
-        "from": "hasAnthropicApiKeyAuth",
-        "walk": "export_map",
-        "rename": "__export_map",
-        "id": "auth_exports",
-        "description": "bulk rename all utils/auth.js exports from the export map"
+    "scope": "function",
+    "rename": "getInitialState"
+  },
+  {
+    "id": "getSessionId_legacy",
+    "description": "getSessionId \u2014 legacy monolithic bootstrap/state.js (<= 2.1.168)",
+    "file": "bootstrap/sessionState.js",
+    "find": {
+      "function_name": "getSessionId"
     },
-    {
-        "id": "prependUserMessage",
-        "description": "prependUserMessage — method that calls jsonStringify with role:'user'",
-        "file": "cli/structuredIO.js",
-        "find": {
-            "property_assignment": {
-                "key": "role",
-                "value": "user"
-            }
-        },
-        "scope": "method",
-        "anchor_only": true
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "getSessionId_legacy",
+    "walk": "only_bare_call",
+    "rename": "getSessionOverrides",
+    "description": "getSessionOverrides (tV) \u2014 session-overrides getter, the sole bare call in getSessionId (legacy)"
+  },
+  {
+    "from": "getSessionId_split",
+    "walk": "only_bare_call",
+    "rename": "getSessionOverrides",
+    "description": "getSessionOverrides (hM) \u2014 session-overrides getter, the sole bare call in getSessionId (split)"
+  },
+  {
+    "type": "pin",
+    "source": "services/dialogs/dialogStore.ts",
+    "find": {
+      "regex": "onClosed: ?[A-Za-z_$][A-Za-z0-9_$]*\\.subscribe"
     },
-    {
-        "from": "prependUserMessage",
-        "find": {
-            "property_assignment": {
-                "key": "role",
-                "value": "user"
-            }
-        },
-        "walk": "closest_parent:call",
-        "id": "jsonStringify_call"
+    "description": "dialogStore module -- the dialog queue (ordered list of open dialogs) plus an answered/dismissed emitter. Bundler-numbered (_tentative/5034_signal.js as uuH on 2.1.168, _unmatched/3800_O2e.js as O2e on 2.1.238), so it is pinned to a stable path for 007-remote-answer.patch. VERIFIED via resolvePinRules against the raw module cache on 2.1.238."
+  },
+  {
+    "id": "useTopDialogVariant",
+    "description": "anchor-only stepping stone: the named hook in the permission-request renderer that subscribes to the 2.1.168 dialog store singleton. Anchored on its sole useSyncExternalStore call. This indirection is NOT cosmetic and is retained deliberately: on 2.1.168 the singleton is assigned inside an ANONYMOUS module-init arrow, and the engine hard-stops on an unnameable scope (`anchor UNNAMED SCOPE ... resolves to nothing`, anchor-rules.ts:1225 `continue`s BEFORE registering the anchor) -- so even an anchor_only rule scoped to that arrow registers nothing and cannot be walked from. MEASURED: rules scoping to the arrow, and declarator_name/closest_parent walks out of _resetForTests, all fail (declarator_name intentionally stops at function boundaries, anchor-rules.ts:679). Reaching DQ therefore REQUIRES a named consumer in another file. UNCHANGED from signal-banner.json.",
+    "file": "components/permissions/PermissionRequest.js",
+    "find": {
+      "text": "useSyncExternalStore"
     },
-    {
-        "from": "jsonStringify_call",
-        "walk": "callee",
-        "rename": "jsonStringify",
-        "description": "jsonStringify — JSON serializer from slowOperations.js"
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "dialogStore",
+    "from": "useTopDialogVariant",
+    "walk": "contains:subscribe:member_access_target",
+    "rename": "dialogStore",
+    "description": "dialogStore (minified DQ on 2.1.168) -- the module-level dialog store SINGLETON that 007-remote-answer.patch drives via .getState()/.answer(). Reached as the object of `X.subscribe` inside useSyncExternalStore(X.subscribe, ...). Binds the WRAPPER store (getState/subscribe/onClosed/open/update/answer/dismiss), never the sibling raw dialogQueueStore, because consumers only ever subscribe through the wrapper. VERIFIED resolving to DQ on the real 2.1.168 tree. 2.1.168-only: 2.1.238 removed the module-level singleton entirely in favour of createDialogStore + DialogStoreContext, so this soft-skips there. UNCHANGED from signal-banner.json -- it was already correct, and it resolves because it keys on a NON-pinned path."
+  },
+  {
+    "id": "createDialogStore",
+    "description": "createDialogStore (minified qLl on 2.1.238) -- factory building ONE dialog store instance {getState,subscribe,onClosed,open,update,answer,dismiss,dismissKind}. Called once as useState(createDialogStore) in AppStateProvider and shared via DialogStoreContext. VERIFIED resolving to qLl on a genuinely PINNED 2.1.238 tree. 2.1.238-only: on 2.1.168 the store is a module-level object literal (DQ), not a factory, so `scope: function` finds no enclosing function declaration and the rule soft-skips. Replaces the createDialogStore rule in signal-banner.json (same rule, now verified against a real pinned emit rather than a hand-placed file).",
+    "file": "services/dialogs/dialogStore.js",
+    "find": {
+      "regex": "onClosed: ?[A-Za-z_$][A-Za-z0-9_$]*\\.subscribe"
     },
-    {
-        "from": "prependUserMessage",
-        "walk": "enclosing_class",
-        "rename": "StructuredIO",
-        "description": "StructuredIO — CLI structured I/O class"
+    "scope": "function",
+    "rename": "createDialogStore"
+  },
+  {
+    "id": "useDialogStore",
+    "description": "useDialogStore (minified UV on 2.1.238) -- reads the single dialog store instance out of DialogStoreContext and throws if used outside the provider. Keyed on the invariant error prose, which is source-level and survives minification. VERIFIED resolving to UV on a genuinely PINNED 2.1.238 tree. 2.1.238-only: 2.1.168 has no context indirection, so the string is absent and the rule soft-skips. Replaces the useDialogStore rule in signal-banner.json.",
+    "file": "services/dialogs/dialogStore.js",
+    "find": {
+      "string_contains": "DialogStoreContext provider"
     },
-    {
-        "id": "LogoV2",
-        "description": "LogoV2 — main logo/header component with compact and horizontal layouts",
-        "file": "components/LogoV2/LogoV2.js",
-        "find": {
-            "text": "sandboxed"
-        },
-        "scope": "function",
-        "rename": "LogoV2"
+    "scope": "function",
+    "rename": "useDialogStore"
+  },
+  {
+    "id": "getVersionSuffix_module",
+    "description": "getVersionSuffix (minified bC on 2.1.168) -- returns the version-banner suffix appended after `(Claude Code)`. Keyed on the BUILD_REF_NAME default-parameter destructure, a build-constant key stable across releases. Covers the 2.1.168 location (a numbered module); soft-skips when the function lives in the preamble instead.",
+    "file": "_unmatched/0006_vDq.js",
+    "find": {
+      "text": "BUILD_REF_NAME"
     },
-    {
-        "from": "LogoV2",
-        "walk": "contains:createElement:member_access_target",
-        "rename": "React",
-        "description": "React — imported as R8, used for createElement calls"
+    "scope": "function",
+    "rename": "getVersionSuffix"
+  },
+  {
+    "id": "getVersionSuffix_preamble",
+    "description": "getVersionSuffix (minified o_e on 2.1.238) -- same function, hoisted into _preamble.js on 2.1.238. Exactly one of this rule and getVersionSuffix_module resolves per version; the other soft-skips on a missing file.",
+    "file": "_preamble.js",
+    "find": {
+      "text": "BUILD_REF_NAME"
     },
-    {
-        "id": "getLayoutMode",
-        "description": "getLayoutMode — returns 'horizontal' or 'compact' based on terminal width",
-        "file": "utils/logoV2Utils.js",
-        "find": {
-            "string_literal": "compact"
-        },
-        "scope": "function",
-        "rename": "getLayoutMode"
+    "scope": "function",
+    "rename": "getVersionSuffix"
+  },
+  {
+    "id": "useSwarmBanner",
+    "description": "useSwarmBanner (minified ap6 on 2.1.168, fAo on 2.1.238) -- prompt-input banner hook returning {text,bgColor,gradient} or null. Keyed on the 'View teammates' banner string.",
+    "file": "components/PromptInput/useSwarmBanner.js",
+    "find": {
+      "text": "View teammates"
     },
-    {
-        "from": "getLayoutMode",
-        "walk": "param:0",
-        "rename": "columns",
-        "description": "columns — terminal width param"
+    "scope": "function",
+    "rename": "useSwarmBanner"
+  },
+  {
+    "from": "useSwarmBanner",
+    "walk": "call_string_arg:promptBorder:callee",
+    "rename": "resolveBannerColor",
+    "id": "resolveBannerColor",
+    "description": "resolveBannerColor (minified op6 on 2.1.168, Sws on 2.1.238) -- maps an agent colour name to a theme colour, defaulting to 'cyan_FOR_SUBAGENTS_ONLY'. Keyed on the single call site passing the 'promptBorder' fallback, which avoids the ambiguity of the twice-occurring 'cyan_FOR_SUBAGENTS_ONLY' literal."
+  },
+  {
+    "from": "REPLComponent",
+    "walk": "local:declarator_named_init:isLocalJSXCommand === !0 &&",
+    "rename": "isShowingLocalJSXCommand",
+    "id": "isShowingLocalJSXCommand",
+    "description": "REPL-local readiness flag: a local-JSX slash command is on screen and owns the input, so the REPL is waiting on the user rather than idle. 2.1.168 -> gY (screens/REPL.js:1057), 2.1.238 -> Uf (screens/REPL.js:988). Key `isLocalJSXCommand === !0 &&` is an original-source property name plus the conjunction that separates this declarator from the two other isLocalJSXCommand === !0 sites in the file, neither of which is a declarator initializer. In 2.1.238 the SAME name is the semantic prop key passed to useReplReadiness, so the key is now doubly attested in the source."
+  },
+  {
+    "from": "REPLComponent",
+    "walk": "local:declarator_named_init:.getSnapshot)",
+    "rename": "isQueryGuardActive",
+    "id": "isQueryGuardActive",
+    "description": "2.1.168 ONLY -- the QueryGuard useSyncExternalStore subscription, first operand of the busy flag `n7 = P1 || pT` (screens/REPL.js:954, resolves to P1). Key `.getSnapshot)` is the React useSyncExternalStore contract method in call-final position; it is unique in 2.1.168 screens/REPL.js and ABSENT from 2.1.238, so this rule self-disables on 238 rather than binding a wrong node. (A looser `useSyncExternalStore` key was tried first and mis-bound to the sessionTitle subscription on 238 -- it resolved, and was wrong.) NOTE: this is P1, NOT n7. n7 itself is unanchorable -- see the note rule at the end of this file."
+  },
+  {
+    "from": "REPLComponent",
+    "find": {
+      "text": "isShowingLocalJSXCommand"
     },
-    {
-        "type": "pin",
-        "source": "components/PromptInput/useSwarmBanner.ts",
-        "find": {
-            "text": "View teammates"
-        },
-        "description": "useSwarmBanner — swarm banner hook"
-    }
+    "walk": "closest_parent:call",
+    "id": "readinessHookCall",
+    "description": "2.1.238 ONLY -- positional anchor on the useReplReadiness({...}) call inside the REPL component, located by the isShowingLocalJSXCommand prop key introduced by the 238 refactor. Emits no rename (positional intermediate)."
+  },
+  {
+    "from": "readinessHookCall",
+    "walk": "callee",
+    "rename": "useReplReadiness",
+    "id": "useReplReadiness",
+    "description": "2.1.238 ONLY -- the readiness hook. Maps { topDialogWaitingFor, workerSandboxPrompt, elicitationPrompt, pendingWorkerRequest, pendingSandboxRequest, isShowingLocalJSXCommand, isLoading, isQueryActive, delegatedActive } to { status: 'waiting'|'busy'|'idle', waitingFor, working }. Resolves to KHg (_unmatched/4626_XHg.js:10). No counterpart on 2.1.168 -- the logic was inline there."
+  },
+  {
+    "id": "getReplWaitingReason",
+    "file": "hooks/useReplReadiness.js",
+    "find": {
+      "string_literal": "worker request"
+    },
+    "scope": "function",
+    "rename": "getReplWaitingReason"
+  },
+  {
+    "from": "getReplWaitingReason",
+    "walk": "param:0",
+    "rename": "readinessInputs",
+    "description": "2.1.238 ONLY -- the readiness input bag examined by getReplWaitingReason (its .workerSandboxPrompt / .elicitationPrompt / .topDialogWaitingFor / .pendingWorkerRequest / .pendingSandboxRequest / .isShowingLocalJSXCommand fields)."
+  },
+  {
+    "id": "__repl_flags_unanchored_note",
+    "file": "screens/REPL.js",
+    "find": {
+      "regex": "isLocalJSXCommand === !0 && \\w+\\?\\.jsx != null"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "DialogStoreContext",
+    "from": "useDialogStore",
+    "find": {
+      "regex": "useContext\\("
+    },
+    "walk": "call_arg:0",
+    "rename": "DialogStoreContext",
+    "description": "DialogStoreContext (minified VVi on 2.1.238) -- the React context carrying the dialog store instance; created as createContext(null) at module init and provided by AppStateProvider. Reached as the sole bare-identifier argument of the ONLY useContext call inside useDialogStore, so the key is semantic (the context this hook reads), not positional. VERIFIED resolving to VVi on a genuinely PINNED 2.1.238 tree. 2.1.238-only -- soft-skips on 2.1.168 because its parent anchor useDialogStore does not resolve there. NEW: not present in signal-banner.json, which could not reach a bare identifier call argument before the engine gained call_arg:N."
+  },
+  {
+    "id": "removeDialogById",
+    "description": "removeDialogById (minified gf4 on 2.1.168, neh on 2.1.238) -- removes a dialog from the open queue by id and returns whether it was actually present; the guard both answer() and dismiss() run before emitting. Keyed on `open.filter`, which occurs exactly ONCE in the whole module on BOTH versions (verified by grep), so the anchor is unambiguous. One rule covers both versions because the pin gives the module the same path on each. VERIFIED resolving to neh on the pinned 2.1.238 tree and to gf4 on 2.1.168.",
+    "file": "services/dialogs/dialogStore.js",
+    "find": {
+      "regex": "open\\.filter"
+    },
+    "scope": "function",
+    "rename": "removeDialogById"
+  },
+  {
+    "id": "resetDialogsForTests",
+    "description": "anchor-only stepping stone: the _resetForTests() method on the 2.1.168 dialog store singleton, whose whole body is a single `rawStore.setState(() => ({open: []}))`. Anchored via its method name because that name is a SOURCE-level identifier (a property key, not a minified binding) and, critically, it is 2.1.168-ONLY -- 2.1.238 dropped _resetForTests entirely. That makes it the version discriminator that keeps the dialogQueueStore walk below from firing on 2.1.238, where the equivalent store is a function PARAMETER and naming it would wrongly rename a local.",
+    "file": "services/dialogs/dialogStore.js",
+    "find": {
+      "regex": "_resetForTests"
+    },
+    "scope": "method",
+    "anchor_only": true
+  },
+  {
+    "id": "dialogQueueStore",
+    "from": "resetDialogsForTests",
+    "walk": "contains:setState:member_access_target",
+    "rename": "dialogQueueStore",
+    "description": "dialogQueueStore (minified fKH on 2.1.168) -- the RAW backing store holding {open: [...]}, which the wrapper dialogStore delegates getState/subscribe to and mutates through setState. This is the sibling store the task flagged as previously unanchorable by any non-order-dependent key. The key IS semantic: it names the receiver of `.setState` inside _resetForTests, and .setState is the one property only the raw store has -- the wrapper exposes getState/subscribe/onClosed/open/update/answer/dismiss and deliberately no setState. _resetForTests contains exactly ONE statement and exactly ONE member access, so `first in traversal order` and `the only one` coincide; reordering the module's declarations cannot rebind it, which is precisely what made the earlier order-based walk unacceptable. VERIFIED resolving to fKH on the real 2.1.168 tree and VERIFIED renaming NOTHING on the pinned 2.1.238 tree. 2.1.168-only by construction, via the _resetForTests discriminator."
+  },
+  {
+    "from": "getModelUsage_split",
+    "walk": "contains:costLedger:member_access_target",
+    "rename": "ROOT_SESSION",
+    "description": "ROOT_SESSION (Sr) - the root Session object; successor of the 2.1.168 module-level STATE"
+  },
+  {
+    "id": "resetTrustDialogAcceptedCache_anchor",
+    "description": "anchor-only stepping stone: resetTrustDialogAcceptedCache, the one-line cache invalidator. Already named via the utils/config.js export map; used here only to reach the memo variable it clears.",
+    "file": "utils/config.js",
+    "find": {
+      "function_name": "resetTrustDialogAcceptedCache"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "resetTrustDialogAcceptedCache_anchor",
+    "walk": "contains:!1:assign_target",
+    "rename": "trustDialogAcceptedCache",
+    "description": "trustDialogAcceptedCache (vo9 @2.1.168) -- the module-level boolean memo behind checkHasTrustDialogAccepted (`return (vo9 ||= kk5())`). Reached as the assignment target of the ONLY statement in resetTrustDialogAcceptedCache, whose entire body is `vo9 = !1`. 2.1.168 ONLY, BY DESIGN: 2.1.238 replaced the module-level boolean with a session-state object, so the body became the method call `$i.setTrustAccepted(!1)` -- not an assignment -- and this walk correctly finds nothing and soft-skips rather than binding the wrong node. VERIFIED: resolves to vo9 on 2.1.168, emits nothing on 2.1.238."
+  },
+  {},
+  {
+    "id": "getModelUsage_split",
+    "file": "bootstrap/sessionState.js",
+    "find": {
+      "regex": "\\.costLedger\\.modelUsage\\(\\)"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "getSessionId_split",
+    "file": "bootstrap/sessionState.js",
+    "find": {
+      "regex": "\\(\\)\\?\\.sessionId ?\\?\\?"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "getBuiltinCommandTable",
+    "description": "getBuiltinCommandTable (K9i @2.1.238) -- returns the full built-in slash-command list, memoised onto the session-state object via `session.builtinCommandTable ??= buildTable()`. This is the accessor 005-command-hooks.patch names on its context lines. Keyed on the `.builtinCommandTable ??=` memo assignment: `builtinCommandTable` is an original-source property name, so it survives minification. Root rule (global rename), so every reference across the tree is covered.",
+    "file": "commands.js",
+    "find": {
+      "regex": "\\.builtinCommandTable ?\\?\\?="
+    },
+    "scope": "function",
+    "rename": "getBuiltinCommandTable"
+  },
+  {
+    "id": "computeHasTrustDialogAccepted",
+    "description": "computeHasTrustDialogAccepted (hNb @2.1.238) -- the UNCACHED trust computation: sandbox env, session trust, background session, then the persisted per-project hasTrustDialogAccepted flag walked up the directory tree. Keyed on the CLAUDE_CODE_SANDBOXED env guard, which is its first statement and is unique in utils/config.js in both versions. Root rule (global rename), so call sites outside utils/config.js are covered.",
+    "file": "utils/config.js",
+    "find": {
+      "regex": "CLAUDE_CODE_SANDBOXED"
+    },
+    "scope": "function",
+    "rename": "computeHasTrustDialogAccepted"
+  },
+  {
+    "id": "runningTeammateTasksCall",
+    "from": "REPLComponent",
+    "find": {
+      "regex": "[\\w$]+\\(\\s*[\\w$]+\\s*\\)\\.some\\(\\s*\\(\\s*[\\w$]+\\s*\\)\\s*=>\\s*[\\w$]+\\.status === ['\"]running['\"]\\s*\\)"
+    },
+    "walk": "closest_parent:call",
+    "description": "The `getAllInProcessTeammateTasks(tasks).some(t => t.status === 'running')` memo. Keyed on the literal 'running' status compare plus the .some() shape -- both authored in the original source. NOTE the [\\w$] character classes: minified identifiers routinely contain '$'. NOTE the ['\"] quote class: anchors run BEFORE prettify, so the tree still has the bundle's double quotes."
+  },
+  {
+    "type": "pin",
+    "source": "bootstrap/sessionState.ts",
+    "find": {
+      "text": "NOTIF_ACTIVE_THRESHOLD_MS"
+    },
+    "description": "The session-state module. Upstream split the monolithic bootstrap/state.js into private-field classes (>= ~2.1.238), so the successor fails signature matching and lands in _unmatched/0136_nt.js. Keyed on the exported constant NOTIF_ACTIVE_THRESHOLD_MS -- an ORIGINAL-SOURCE identifier carried in the module's export map, so it survives minification and the refactor. MEASURED tree-unique (exactly 1 module) on 168/200/215/238; present exactly once bundle-wide on all 16 sweep versions. Pinning this ONE module fixes FIVE symbols at once and additionally lets the existing __export_map rule fire on it."
+  },
+  {
+    "type": "pin",
+    "source": "commands/remoteCommands.ts",
+    "find": {
+      "string_literal": "Find and verify bugs in your branch using Claude Code on the web"
+    },
+    "description": "The module-init arrow populating the remote/web slash-command array. Keyed on the ultrareview command's user-visible description string (original source copy). MEASURED tree-unique on 168/200/215/238 and exactly 1 bundle-wide across all 16 sweep versions."
+  },
+  {
+    "type": "pin",
+    "source": "hooks/useReplReadiness.ts",
+    "find": {
+      "regex": "isShowingLocalJSXCommand\\)return\"dialog open\""
+    },
+    "description": "The REPL waiting-reason resolver, EXTRACTED out of screens/REPL.js at 2.1.215. DELIBERATELY keyed on the cascade tail rather than on the 'worker request' literal: that literal also occurs inside screens/REPL.js on 168-210, where a pin would STEAL the correctly-matched screens/REPL.js path away from the REPLComponent rule (measured: 2 rules key on that path). This key matches ZERO modules on 168-210 (pin soft-misses, entirely inert) and exactly the extracted module from 215 on."
+  },
+  {
+    "type": "pin",
+    "source": "services/compact/precomputedCompact.ts",
+    "find": {
+      "string_literal": "tengu_precomputed_compact_discarded"
+    },
+    "description": "The subagent-lifecycle notifier's module. NOT keyed on 'subagent_exit': that literal is AMBIGUOUS (measured: 2 modules on every version -- the notifier AND query.js), and resolvePinRules takes the first match, so it would be an index-order coin flip. This telemetry event name is the notifier's own and is MEASURED tree-unique on 168/200/215/238, 1 bundle-wide on all 16."
+  },
+  {
+    "type": "pin",
+    "source": "vendor/lodash/memoizeCapped.ts",
+    "find": {
+      "regex": "\\.size\\s*===\\s*[\\w$]+\\)\\s*[\\w$]+\\.clear\\(\\)"
+    },
+    "description": "lodash memoizeCapped -- the only reachable anchor for the shared `memoize` helper. Keyed on the capped-memoize eviction SHAPE (exact-size test immediately followed by a whole-cache clear). Note the cap is compared against a MINIFIED VARIABLE (`var lGy=500`), never the literal 500, so a `=== 500` key does NOT work (measured: 0 hits). MEASURED tree-unique on 168/200/215/238. Positive control: the LOOSER form `.size === X)[^;]{0,20}.clear()` returns 3 modules on each version, so the tight regex genuinely discriminates."
+  },
+  {
+    "id": "remoteCommandsModule",
+    "file": "commands/remoteCommands.js",
+    "find": {
+      "string_literal": "Find and verify bugs in your branch using Claude Code on the web"
+    },
+    "scope": "module_init",
+    "anchor_only": true,
+    "anchor_positional": true
+  },
+  {
+    "id": "notifySubagentLifecycle",
+    "file": "services/compact/precomputedCompact.js",
+    "find": {
+      "string_literal": "subagent_exit"
+    },
+    "scope": "function",
+    "rename": "notifySubagentLifecycle"
+  },
+  {
+    "id": "memoizeCapped",
+    "file": "vendor/lodash/memoizeCapped.js",
+    "find": {
+      "regex": "=\\s*[\\w$]+\\.cache[;,]"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "memoizeCapped",
+    "walk": "local:call_result_callee",
+    "rename": "memoize",
+    "description": "memoize -- lodash memoize, the shared memo helper used across commands.js and utils/auth.js."
+  },
+  {
+    "from": "remoteCommandsModule",
+    "walk": "contains:Find and verify bugs in your branch using Claude Code on the web:assign_target",
+    "rename": "remoteWebCommands",
+    "id": "remoteWebCommands",
+    "description": "remoteWebCommands -- the array of Claude-Code-on-the-web slash commands (ultraplan, ultrareview, teleport, remote-control, schedule, autofix-pr)."
+  }
 ]

@@ -50,14 +50,19 @@ type FindCriteria =
     | ({ regex: string } & ContextFilters)
     | (NodeCriterion & ContextFilters);
 
-type Scope =
+export type Scope =
     | "function"
     | "async_generator"
     | "generator"
     | "async_function"
     | "method"
     | "class"
-    | "arrow";
+    | "arrow"
+    // The bundler's module-init arrow: `var sT = L(() => { ...module body... })`
+    // at the top level of a file. It has no derivable name of its own (its
+    // parent is the CallExpression, not the declarator), which is exactly why
+    // it needs its own scope kind — see POSITIONAL ANCHORS below.
+    | "module_init";
 
 interface RootRule {
     id?: string;
@@ -68,6 +73,28 @@ interface RootRule {
     rename?: string;
     anchor_only?: boolean; // resolve anchor but emit no rename
     class?: string; // also rename enclosing class (scope=method)
+    /**
+     * POSITIONAL ANCHOR (requires anchor_only).
+     *
+     * Normally a root rule registers its anchor under the minified NAME of the
+     * scope node, and a scope with no derivable name (`getNodeName` → null) is
+     * dead: the rule warns UNNAMED SCOPE and emits nothing. That skip made every
+     * symbol living inside the bundler's anonymous module-init arrow
+     * (`var sT = L(() => { ... })`) unreachable, because the arrow's parent is a
+     * CallExpression rather than a VariableDeclaration.
+     *
+     * With `anchor_positional: true` the rule instead registers the resolved
+     * scope by its AST SPAN (nodeStart/nodeEnd) — the same addressing walk rules
+     * already use for intermediate anchors — so walks can chain from an unnamed
+     * scope. The span is recomputed from the rule's own `find` on every run
+     * against whichever tree is being processed; it is never persisted, so this
+     * is NOT a line-number or offset key baked into the ruleset. The stable key
+     * remains the rule's `find` criterion plus `file` + `scope`.
+     *
+     * Positional anchors emit no rename themselves (there is no name to rename),
+     * hence the anchor_only requirement.
+     */
+    anchor_positional?: boolean;
 }
 
 interface WalkRule {
@@ -283,7 +310,13 @@ function findPatternPos(code: string, find: FindCriteria | string, sf: ts.Source
 
 // ── Scope Detection ──────────────────────────────────────────────────────────
 
-function scopeMatches(node: ts.Node, scope: Scope): boolean {
+/**
+ * SINGLE SOURCE OF TRUTH for scope matching — anchor-dev.ts imports this rather
+ * than keeping its own copy. It previously had a forked `Scope` union and a
+ * forked `scopeMatches`, the same drift that once made `scope: "arrow"` resolve
+ * in the dev tool and rename nothing in the real build. Do not fork it.
+ */
+export function scopeMatches(node: ts.Node, scope: Scope): boolean {
     const isFn = ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node);
     const isAsync = isFn && !!(node as ts.FunctionDeclaration).modifiers?.some(
         (m) => m.kind === ts.SyntaxKind.AsyncKeyword,
@@ -305,10 +338,50 @@ function scopeMatches(node: ts.Node, scope: Scope): boolean {
             return ts.isClassDeclaration(node) || ts.isClassExpression(node);
         case "arrow":
             return ts.isArrowFunction(node);
+        case "module_init":
+            return isModuleInitArrow(node);
     }
 }
 
-function getNodeName(node: ts.Node): string | null {
+/**
+ * True for the bundler's module-init arrow: the block-bodied arrow that is the
+ * SOLE argument of a call initializing a TOP-LEVEL variable declarator —
+ *
+ *     var sT = L(() => { ...entire module body... });
+ *
+ * Measured on commands.js: exactly ONE such arrow in 2.1.168 (`L`, decl `sT`,
+ * 131 statements) and exactly one in 2.1.238 (`E`, decl `pg`, 147 statements),
+ * so within a file the shape is unambiguous. Neither the wrapper callee (`L` /
+ * `E`) nor the declarator (`sT` / `pg`) is used as a key — both are minified and
+ * both drift between versions. The shape alone identifies it.
+ *
+ * Deliberately excludes non-top-level arrows and expression-bodied arrows, so a
+ * nested `h6(() => [...])` memo callback does NOT match; reach those with
+ * `scope: "arrow"` + `anchor_positional` instead.
+ */
+function isModuleInitArrow(node: ts.Node): boolean {
+    if (!ts.isArrowFunction(node)) return false;
+    if (!ts.isBlock(node.body)) return false;
+    const call = node.parent;
+    if (!call || !ts.isCallExpression(call)) return false;
+    if (call.arguments.length !== 1 || call.arguments[0] !== node) return false;
+    const decl = call.parent;
+    if (!decl || !ts.isVariableDeclaration(decl) || decl.initializer !== call) return false;
+    // Top level: VariableDeclaration < VariableDeclarationList < VariableStatement < SourceFile
+    const list = decl.parent;
+    const stmt = list?.parent;
+    return !!stmt && !!stmt.parent && ts.isSourceFile(stmt.parent);
+}
+
+/**
+ * Resolve the minified name a scope node should be renamed under.
+ *
+ * THIS IS THE SINGLE SOURCE OF TRUTH. anchor-dev.ts imports it rather than
+ * keeping its own copy: a second implementation previously drifted (it had an
+ * ArrowFunction case this one lacked), so `scope: "arrow"` rules RESOLVED in
+ * the dev tool and silently renamed NOTHING in the real build. Do not fork it.
+ */
+export function getNodeName(node: ts.Node): string | null {
     if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) return node.name?.text ?? null;
     if (ts.isFunctionExpression(node) || ts.isClassExpression(node)) {
         if (node.name) return node.name.text;
@@ -316,6 +389,10 @@ function getNodeName(node: ts.Node): string | null {
             return node.parent.name.text;
     }
     if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
+    // An arrow function has no name of its own; it is named by the declarator
+    // it initializes (`let Foo = () => {...}`). Required for scope: "arrow".
+    if (ts.isArrowFunction(node) && node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name))
+        return node.parent.name.text;
     return null;
 }
 
@@ -428,7 +505,7 @@ function walkFromNode(
         }
 
         case "local": {
-            return { name: walkLocal(fn, parts.slice(1).join(":")) };
+            return { name: walkLocal(fn, parts.slice(1).join(":"), sf) };
         }
 
         case "yield_star_callee": {
@@ -648,6 +725,58 @@ function walkFromNode(
             return { name: null };
         }
 
+        // declarator_name — from a node positioned anywhere inside a variable
+        // declarator's INITIALIZER (typically via `find`), walk up to the
+        // enclosing VariableDeclaration and return the declared name.
+        //
+        // Closes the gap where a readiness flag is a plain declarator in a long
+        // `let a = ..., b = ..., c = ...;` list:
+        //     let Dk = mz || KH || OH,
+        //         gY = a1?.isLocalJSXCommand === !0 && a1?.jsx != null;
+        // Neither `contains:*:assign_target` (needs a BinaryExpression `=`) nor
+        // `binary_other_operand` (returns the other operand, e.g. `!0`) can name
+        // `gY`; the declarator name lives on an ancestor, not a sibling.
+        case "declarator_name": {
+            let cur: ts.Node | undefined = node;
+            // Stop at a function boundary so we cannot escape into an outer
+            // declarator (e.g. `let Foo = () => { ...find lands here... }`)
+            // and mistakenly return the enclosing function's own name.
+            while (cur && !ts.isVariableDeclaration(cur)) {
+                if (ts.isFunctionDeclaration(cur) || ts.isFunctionExpression(cur) || ts.isArrowFunction(cur) || ts.isMethodDeclaration(cur))
+                    return { name: null };
+                cur = cur.parent;
+            }
+            if (cur && ts.isVariableDeclaration(cur) && ts.isIdentifier(cur.name))
+                return { name: cur.name.text, nodeStart: cur.name.getStart(sf), nodeEnd: cur.name.end };
+            return { name: null };
+        }
+
+        // call_arg:N — from a node positioned at/inside a call expression, return
+        // the Nth argument when it is a bare identifier.
+        //
+        // Closes the gap where a value is distributed via a call argument rather
+        // than bound to a name, e.g. a React context read: `useContext(VVi)`.
+        // `param:N` already reads call arguments, but only when the walk landed
+        // exactly ON the CallExpression; a `find` on the callee text lands on an
+        // inner Identifier, so this walks UP to the nearest enclosing call first.
+        case "call_arg": {
+            const idx = parseInt(parts[1] ?? "0");
+            let cur: ts.Node | undefined = node;
+            while (cur && !ts.isCallExpression(cur)) cur = cur.parent;
+            if (!cur || !ts.isCallExpression(cur)) return { name: null };
+            const arg = cur.arguments[idx];
+            if (arg && ts.isIdentifier(arg))
+                return { name: arg.text, nodeStart: arg.getStart(sf), nodeEnd: arg.end };
+            return { name: null };
+        }
+
+        // catch_binding — from a try statement (or any node containing one),
+        // return the identifier bound by the first `catch (e)` clause.
+        case "catch_binding": {
+            const body = fn.body ?? node;
+            return { name: findCatchBinding(body, sf) };
+        }
+
         // binary_other_operand — from a node positioned inside a binary expression
         // (typically via find), walk up to the containing BinaryExpression and return
         // the identifier on the other side. Works for ===, !==, ==, !=, <, >, etc.
@@ -714,7 +843,13 @@ function findAssignTargetContaining(node: ts.Node, text: string, sf: ts.SourceFi
         const candidateText = candidate.getText(sf);
         if (!candidateText.includes(text)) continue;
 
-        // Look for assignment expression
+        // Look for an assignment expression OR a variable declarator.
+        //
+        // Both bind a name to a value; only the spelling differs, and which
+        // spelling a given release uses is a refactor away. Handling only
+        // `X = expr` meant a rule resolved on a build where the declaration had
+        // been split (`X = await fn()`) and silently failed on one where it had
+        // not (`let X = await fn()`) — same code, same intent, different node.
         let result: string | null = null;
         function findAssign(n: ts.Node) {
             if (result) return;
@@ -727,6 +862,15 @@ function findAssignTargetContaining(node: ts.Node, text: string, sf: ts.SourceFi
                 result = n.left.text;
                 return;
             }
+            if (
+                ts.isVariableDeclaration(n) &&
+                ts.isIdentifier(n.name) &&
+                n.initializer &&
+                n.initializer.getText(sf).includes(text)
+            ) {
+                result = n.name.text;
+                return;
+            }
             ts.forEachChild(n, findAssign);
         }
         findAssign(candidate);
@@ -736,6 +880,24 @@ function findAssignTargetContaining(node: ts.Node, text: string, sf: ts.SourceFi
         }
     }
     return null;
+}
+
+/** Find the identifier bound by the first `catch (e)` clause within a node.
+ *  The catch parameter is a declaration all of its own (CatchClause.variableDeclaration),
+ *  reachable by no other walk: it is not a declarator in a VariableDeclarationList,
+ *  not an assignment, and not a function parameter. */
+function findCatchBinding(body: ts.Node, sf: ts.SourceFile): string | null {
+    let result: string | null = null;
+    function visit(node: ts.Node) {
+        if (result) return;
+        if (ts.isCatchClause(node) && node.variableDeclaration && ts.isIdentifier(node.variableDeclaration.name)) {
+            result = node.variableDeclaration.name.text;
+            return;
+        }
+        ts.forEachChild(node, visit);
+    }
+    visit(body);
+    return result;
 }
 
 /** Within a node, find an identifier that has `.propertyName` accessed on it */
@@ -872,8 +1034,14 @@ function findStandaloneIncrement(body: ts.Node, sf: ts.SourceFile): string | nul
     return result;
 }
 
-function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | null {
-    if (!fn.body) return null;
+function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string, sf?: ts.SourceFile): string | null {
+    // Search the function body when we have one; otherwise search the node
+    // itself. A POSITIONAL anchor (from `return:comma`, `if:condition_refs`,
+    // `closest_parent`, …) is a plain expression/statement with no `.body`, and
+    // the old unconditional `if (!fn.body) return null` made every local:* walk
+    // unusable from one — a whole class of rules that could never fire.
+    const root: ts.Node | undefined = fn.body ?? (fn as unknown as ts.Node);
+    if (!root) return null;
     let result: string | null = null;
 
     function visit(node: ts.Node) {
@@ -951,11 +1119,60 @@ function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string): string | 
             }
         }
 
+        // call_result_named:FN — name the local whose INITIALIZER calls FN.
+        //   let X = await refreshOAuthToken(...)  →  X
+        // Unlike `call_result` (which takes the first call-initialized local it
+        // meets, wherever it is), this is selective: it identifies the local by
+        // WHICH function produced it, which is what makes it stable across
+        // releases that reorder or insert declarations. Matches both `fn()` and
+        // `obj.fn()`, and looks through `await`.
+        if (localType.startsWith("call_result_named:") && ts.isVariableDeclaration(node)) {
+            const target = localType.slice("call_result_named:".length);
+            if (target && ts.isIdentifier(node.name) && node.initializer) {
+                let init: ts.Expression = node.initializer;
+                if (ts.isAwaitExpression(init)) init = init.expression;
+                if (ts.isCallExpression(init)) {
+                    const callee = init.expression;
+                    const calleeName = ts.isIdentifier(callee)
+                        ? callee.text
+                        : ts.isPropertyAccessExpression(callee)
+                          ? callee.name.text
+                          : null;
+                    if (calleeName === target) {
+                        result = node.name.text;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // declarator_named_init:TEXT — name the local whose initializer text
+        // contains TEXT. The general form behind the readiness-flag case, where
+        // the value is an expression rather than a call:
+        //   let gY = a1?.isLocalJSXCommand === !0 && a1?.jsx != null  →  gY
+        if (localType.startsWith("declarator_named_init:") && ts.isVariableDeclaration(node)) {
+            const needle = localType.slice("declarator_named_init:".length);
+            if (needle && ts.isIdentifier(node.name) && node.initializer && sf) {
+                if (node.initializer.getText(sf).includes(needle)) {
+                    result = node.name.text;
+                    return;
+                }
+            }
+        }
+
+        // catch_binding — the identifier bound by the first catch clause.
+        if (localType === "catch_binding" && ts.isCatchClause(node)) {
+            if (node.variableDeclaration && ts.isIdentifier(node.variableDeclaration.name)) {
+                result = node.variableDeclaration.name.text;
+                return;
+            }
+        }
+
         ts.forEachChild(node, visit);
     }
 
     let forOfCount = 0;
-    visit(fn.body);
+    visit(root);
     return result;
 }
 
@@ -1048,6 +1265,15 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
     // ── Phase 1: Root rules ──────────────────────────────────────────────────
 
     for (const rule of rules.filter((r) => !isWalkRule(r) && !isPinRule(r)) as RootRule[]) {
+        // A comment-only entry (an object carrying just `__note`/`__note_*` keys,
+        // used to document a group of rules) is not a rule. Without this guard it
+        // fell through to path.join(deobDir, undefined), which THROWS and aborts
+        // the entire run — every rule in the file silently produces nothing.
+        if (!rule.file || !rule.find) {
+            if (verbose && (rule.id || rule.rename))
+                console.warn(`  anchor skip: entry has no file/find — ${rule.id ?? rule.rename}`);
+            continue;
+        }
         const filePath = path.join(deobDir, rule.file);
         if (!fs.existsSync(filePath)) {
             if (verbose) console.warn(`  anchor skip: file not found — ${rule.file}`);
@@ -1070,7 +1296,56 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
         }
 
         const minifiedName = getNodeName(node);
-        if (!minifiedName) continue;
+        if (!minifiedName) {
+            const ruleId = rule.id ?? rule.rename ?? rule.description ?? "(unnamed rule)";
+            const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
+
+            // POSITIONAL ANCHOR — an anchor_only rule may opt in to being
+            // registered by AST SPAN instead of by name, which is the only way
+            // to chain out of an unnamed scope (the bundler's module-init arrow,
+            // a memo callback, any anonymous function). The span is derived from
+            // this rule's own `find` against the tree currently being processed,
+            // so nothing position-shaped is persisted in the ruleset.
+            if (rule.anchor_positional && rule.anchor_only) {
+                const posId = rule.id ?? rule.rename;
+                if (!posId) {
+                    console.warn(
+                        `  anchor POSITIONAL: rule "${ruleId}" needs an explicit \`id\` — an unnamed ` +
+                        `scope has no name to fall back to as its anchor key.`,
+                    );
+                    continue;
+                }
+                resolvedById.set(posId, {
+                    id: posId,
+                    file: rule.file,
+                    // No name exists. Keep a diagnostic-only placeholder; lookup
+                    // goes through nodeStart/nodeEnd, never through this string.
+                    minifiedName: `__unnamed_${ts.SyntaxKind[node.kind]}`,
+                    nodeStart: node.getStart(sf),
+                    nodeEnd: node.end,
+                });
+                if (verbose)
+                    console.log(
+                        `  anchor positional: "${posId}" → ${ts.SyntaxKind[node.kind]} at ` +
+                        `${rule.file}:${line} (span ${node.getStart(sf)}..${node.end})`,
+                    );
+                continue;
+            }
+
+            // A scope node with no derivable name renames NOTHING. This used to
+            // `continue` silently — not even under ANCHOR_VERBOSE — so a dead
+            // rule was indistinguishable from a working one. Warn unconditionally
+            // and name the rule, the node kind, and why it has no name.
+            console.warn(
+                `  anchor UNNAMED SCOPE: rule "${ruleId}" matched a ${ts.SyntaxKind[node.kind]} ` +
+                `at ${rule.file}:${line} (scope: "${rule.scope}") that has no derivable name — ` +
+                `rule resolves to nothing and emits no rename. ` +
+                `Anonymous functions/classes are only nameable when directly assigned to a variable declarator. ` +
+                `Set "anchor_positional": true (with "anchor_only": true and an explicit "id") to register ` +
+                `it by AST span so walk rules can chain from it.`,
+            );
+            continue;
+        }
 
         const id = rule.id ?? rule.rename ?? minifiedName;
         resolvedById.set(id, { id, file: rule.file, minifiedName });
