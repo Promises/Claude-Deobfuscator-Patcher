@@ -161,10 +161,18 @@ bun run src/deob.ts "$SOURCE_FOR_DEOB" "$DEOB"
 cd "$SCRIPT_DIR"
 
 # Step 2.5: Module reconstruction (add import/export for scope-aware renaming)
+#
+# Monolithic trees have NO imports, so they get a synthesised import/export graph
+# — that is what makes step 2.6's renaming scope-aware. Chunked trees already ARE
+# an ESM graph, so module-reconstruct.ts detects that and retargets their
+# /$bunfs/root/chunk-*.js specifiers onto the emitted filenames instead of
+# synthesising a second, duplicate set of bindings. CHUNK_GRAPH is passed
+# explicitly because $DEOB is relocatable via DEOB_DIR and the cache is not.
 echo ""
 echo "=== Step 2.5: Module reconstruction ==="
 cd "$TOOLS_TS"
-bun run src/module-reconstruct.ts "$DEOB"
+CHUNK_GRAPH="$SCRIPT_DIR/.deob_cache/chunk-graph.json" \
+    bun run src/module-reconstruct.ts "$DEOB"
 cd "$SCRIPT_DIR"
 
 # Step 2.6: Rename minified identifiers (scope-aware via TS Language Service)

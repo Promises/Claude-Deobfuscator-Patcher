@@ -36,8 +36,25 @@ WHY THE MODULE GRAPH IS RESOLVED BY SYMBOLS, NOT BY FILENAME
   Instead each chunk is identified by WHAT IT EXPORTS. An import names several
   symbols from one chunk, so intersecting the owner sets pins it exactly.
   MEASURED on 2.1.259: 22,793 distinct exported symbols, 269 (1.2%) exported by
-  more than one chunk, and yet **13,317 of 13,317 import statements (100%)
-  resolve to exactly one chunk** — zero ambiguous, zero unresolved.
+  more than one chunk, and 13,317 of 13,317 CLAUSE imports resolve to exactly
+  one chunk — zero ambiguous, zero unresolved.
+
+  🔴 MIND THE DENOMINATOR. That "13,317 of 13,317" is a real measurement of a
+  SUBSET, and was originally reported as "100% of imports", which it is not.
+  IMPORT_RE requires a `{...}` clause, so BARE SIDE-EFFECT imports
+  (`import"/$bunfs/root/chunk-xxxx.js";`) were never matched, never counted, and
+  never reported as unresolved — they were invisible to both the numerator and
+  the denominator. MEASURED on 2.1.259: 13,317 clause imports vs **86,438
+  side-effect imports**, so true coverage is 13,317/99,755 = **13.3%**.
+
+  This is a STRUCTURAL limit, not a tuning one: a side-effect import names no
+  symbols, so there is nothing to intersect and this method cannot resolve it
+  even in principle. Resolving them needs a different key (the bunfs path table,
+  or emission order). Until then a chunked tree still contains ~86k specifiers
+  pointing at /$bunfs paths that do not exist in the output.
+  ⚠️ Such a tree still PARSES — a side-effect import of a missing path is
+  syntactically valid — so an ESM parse gate cannot catch this. It surfaces at
+  reassembly or at runtime.
 
 Usage:
   extract_chunks.py <claude-binary> <out-dir> [--manifest manifest.json]
@@ -55,6 +72,14 @@ from collections import defaultdict
 
 BANNER = b"// Claude Code is a Beta product"
 IMPORT_RE = re.compile(r'import\s*\{([^}]*)\}\s*from\s*"(/\$bunfs/root/[^"]+)"')
+
+# Bare side-effect imports. Counted SEPARATELY and reported, because they cannot
+# be resolved by symbol intersection (they name no symbols) — see the docstring.
+# They are counted at all so the coverage figure carries its true denominator;
+# leaving them unmatched is what made an earlier report claim 100%.
+SIDE_EFFECT_IMPORT_RE = re.compile(
+    r'import\s*["\'](/\$bunfs/root/chunk-[a-z0-9]+\.js)["\']'
+)
 EXPORT_RE = re.compile(r"export\s*\{([^}]*)\}\s*;?\s*$")
 
 # The ONLY reliable monolithic/chunked discriminator.
@@ -145,7 +170,15 @@ def extract(binary_path):
             owner[sym].add(idx)
 
     # Resolve every import to a chunk index by intersecting owner sets.
-    stats = {"imports": 0, "resolved": 0, "ambiguous": 0, "unresolved": 0}
+    stats = {
+        "imports": 0,
+        "resolved": 0,
+        "ambiguous": 0,
+        "unresolved": 0,
+        "side_effect": 0,
+    }
+    for c in chunks:
+        stats["side_effect"] += len(SIDE_EFFECT_IMPORT_RE.findall(c["text"]))
     for c in chunks:
         c["imports"] = []
         for clause, path in IMPORT_RE.findall(c["text"]):
@@ -336,10 +369,21 @@ def main():
 
     print(f"  chunks written : {len(chunks)}")
     print(f"  total source   : {total:,} bytes")
+    # Report the TRUE denominator. Printing only "resolved/clause-imports" reads
+    # as full coverage — it was reported as "100% of imports" once, when it was
+    # 13.3%. Side-effect imports are shown on the same line so the two numbers
+    # cannot be separated from each other.
+    all_imports = stats["imports"] + stats["side_effect"]
+    pct = (100.0 * stats["resolved"] / all_imports) if all_imports else 0.0
     print(
-        f"  import graph   : {stats['resolved']}/{stats['imports']} resolved"
+        f"  clause imports : {stats['resolved']}/{stats['imports']} resolved"
         f"  ambiguous={stats['ambiguous']}  unresolved={stats['unresolved']}"
     )
+    print(
+        f"  side-effect    : {stats['side_effect']:,} UNRESOLVABLE by symbol"
+        f" intersection (they name no symbols)"
+    )
+    print(f"  TOTAL COVERAGE : {stats['resolved']:,}/{all_imports:,} = {pct:.1f}%")
     # A partially-resolved graph is worse than a loud failure: downstream stages
     # would silently treat unresolved edges as absent dependencies. Checked
     # BEFORE the splitter-compat emission so a bad graph cannot produce a
