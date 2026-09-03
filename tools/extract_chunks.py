@@ -47,14 +47,35 @@ WHY THE MODULE GRAPH IS RESOLVED BY SYMBOLS, NOT BY FILENAME
   the denominator. MEASURED on 2.1.259: 13,317 clause imports vs **86,438
   side-effect imports**, so true coverage is 13,317/99,755 = **13.3%**.
 
-  This is a STRUCTURAL limit, not a tuning one: a side-effect import names no
-  symbols, so there is nothing to intersect and this method cannot resolve it
-  even in principle. Resolving them needs a different key (the bunfs path table,
-  or emission order). Until then a chunked tree still contains ~86k specifiers
-  pointing at /$bunfs paths that do not exist in the output.
   ⚠️ Such a tree still PARSES — a side-effect import of a missing path is
   syntactically valid — so an ESM parse gate cannot catch this. It surfaces at
   reassembly or at runtime.
+
+  📌 CORRECTED 2026-09-03. The limit is structural PER IMPORT SITE but NOT per
+  SPECIFIER, and the difference is almost the whole problem. A bunfs specifier is
+  a CONTENT-HASHED FILENAME, so it names the same chunk everywhere in the bundle.
+  Once any clause import anywhere has pinned `chunk-8nmvz1t1.js` to index N, that
+  binding holds for every bare `import"…8nmvz1t1.js"` too. So the per-chunk
+  tables collapse into ONE bundle-wide specifier->index table.
+  MEASURED on 2.1.259: 876 distinct specifiers are clause-resolved and ZERO
+  resolve to two different indices, so the collapse is lossless; it lifts
+  side-effect coverage from 0 to 85,563 of 86,438 SITES (98.99%). The table is
+  built and applied in module-reconstruct.ts retargetChunkImports(), which raises
+  the retarget count from 12,905 to 98,880.
+  The residue is 875 sites naming 5 specifiers that are referenced ONLY by bare
+  side-effect imports — no clause, no dynamic, no import.meta.require site names
+  them anywhere — so no symbol-bearing reference exists to intersect. Those 5 are
+  genuinely irreducible under this method and are listed by name at retarget time.
+
+  MEASURED AND REJECTED — the bunfs path table as an alternative key. The task of
+  zipping the table against body order fails because the two are uncorrelated:
+  taking each resolved specifier's FIRST occurrence outside any chunk body and
+  sorting by that offset yields a chunk-index sequence whose adjacent pairs are
+  increasing 528/875 = 60.3% of the time, against 49.8% for a shuffled control
+  and the ~100% a real correlation would give. Every one of the 107,806 name
+  occurrences in the binary is a full `/$bunfs/root/…` path (zero bare names), so
+  there is no separate ordered module table to read — what looks like one is a
+  string interning pool scattered across the bytecode blobs.
 
 Usage:
   extract_chunks.py <claude-binary> <out-dir> [--manifest manifest.json]
@@ -176,6 +197,8 @@ def extract(binary_path):
         "ambiguous": 0,
         "unresolved": 0,
         "side_effect": 0,
+        "side_effect_unresolved": 0,
+        "side_effect_unresolved_specs": 0,
     }
     for c in chunks:
         stats["side_effect"] += len(SIDE_EFFECT_IMPORT_RE.findall(c["text"]))
@@ -200,6 +223,24 @@ def extract(binary_path):
             c["imports"].append(
                 {"path": path, "clause": clause.strip(), "target": target}
             )
+
+    # Score the side-effect sites against the bundle-wide specifier table — the
+    # same table module-reconstruct.ts rebuilds from this manifest — so the
+    # coverage reported is the coverage step 2.5 will actually reach, not an
+    # optimistic or a pessimistic proxy for it.
+    resolved_specs = {
+        imp["path"]
+        for c in chunks
+        for imp in c["imports"]
+        if imp["target"] is not None
+    }
+    missing = set()
+    for c in chunks:
+        for spec in SIDE_EFFECT_IMPORT_RE.findall(c["text"]):
+            if spec not in resolved_specs:
+                stats["side_effect_unresolved"] += 1
+                missing.add(spec)
+    stats["side_effect_unresolved_specs"] = len(missing)
     return chunks, stats
 
 
@@ -379,11 +420,22 @@ def main():
         f"  clause imports : {stats['resolved']}/{stats['imports']} resolved"
         f"  ambiguous={stats['ambiguous']}  unresolved={stats['unresolved']}"
     )
+    # Side-effect sites are scored against the SAME bundle-wide specifier table
+    # module-reconstruct.ts builds, so the coverage printed here is the coverage
+    # step 2.5 will actually achieve. Reporting them as flatly "UNRESOLVABLE"
+    # (as this did) understated it by 85,563 sites: unresolvable by intersecting
+    # THIS site's symbols is not the same as unresolvable in the bundle, because
+    # a content-hashed specifier is pinned by any one clause import of it.
+    se_resolved = stats["side_effect"] - stats["side_effect_unresolved"]
     print(
-        f"  side-effect    : {stats['side_effect']:,} UNRESOLVABLE by symbol"
-        f" intersection (they name no symbols)"
+        f"  side-effect    : {se_resolved:,}/{stats['side_effect']:,} resolved via"
+        f" the bundle-wide specifier table"
+        f"  ({stats['side_effect_unresolved_specs']} specifiers never named"
+        f" with symbols anywhere)"
     )
-    print(f"  TOTAL COVERAGE : {stats['resolved']:,}/{all_imports:,} = {pct:.1f}%")
+    total_resolved = stats["resolved"] + se_resolved
+    pct = (100.0 * total_resolved / all_imports) if all_imports else 0.0
+    print(f"  TOTAL COVERAGE : {total_resolved:,}/{all_imports:,} = {pct:.1f}%")
     # A partially-resolved graph is worse than a loud failure: downstream stages
     # would silently treat unresolved edges as absent dependencies. Checked
     # BEFORE the splitter-compat emission so a bad graph cannot produce a

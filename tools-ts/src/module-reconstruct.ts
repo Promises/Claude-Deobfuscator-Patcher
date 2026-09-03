@@ -303,40 +303,72 @@ function retargetChunkImports(
     indexToOutput.set(section.index, section.output_path);
   }
 
-  // Per chunk, bunfs specifier -> resolved target output_path. Built from the
-  // manifest rather than re-parsed, so the resolution stays the measured one.
-  const targetsByChunk = new Map<number, Map<string, string>>();
+  // ONE GLOBAL specifier -> chunk index table, not a per-chunk one.
+  //
+  // WHY GLOBAL. A bunfs specifier is a CONTENT-HASHED FILENAME, so it names the
+  // same chunk everywhere it appears in the bundle — the mapping is a property of
+  // the bundle, not of the importing chunk. Symbol intersection resolves it only
+  // where a clause names symbols, but once ANY clause import in ANY chunk has
+  // pinned `chunk-8nmvz1t1.js` to index N, that binding holds for every other
+  // site quoting the same specifier, including bare side-effect ones that name no
+  // symbols at all.
+  //
+  // MEASURED on 2.1.259 (the check that makes this safe rather than plausible):
+  // 876 distinct specifiers are clause-resolved and ZERO of them resolve to two
+  // different chunk indices anywhere in the bundle. So collapsing the per-chunk
+  // tables into one loses no information and introduces no ambiguity — if a
+  // specifier ever DID disagree between chunks, `conflicts` below would be
+  // non-zero and this would be reported rather than silently picking a winner.
+  //
+  // This is what lifts side-effect coverage from 0: of 86,438 side-effect SITES,
+  // 85,563 (98.99%) quote a specifier some clause import already pinned. The
+  // remaining 875 sites are 5 specifiers naming chunks that export NOTHING, so no
+  // clause import can ever name a symbol from them — those stay unresolved and
+  // are reported, not guessed.
+  const specToOutput = new Map<string, string>();
+  const specToIndex = new Map<string, number>();
+  let conflicts = 0;
   for (const chunk of graph) {
-    const m = new Map<string, string>();
     for (const imp of chunk.imports) {
       if (imp.target === null) continue;
+      const prev = specToIndex.get(imp.path);
+      if (prev !== undefined && prev !== imp.target) {
+        conflicts++;
+        continue;
+      }
+      specToIndex.set(imp.path, imp.target);
       const out = indexToOutput.get(imp.target);
-      if (out) m.set(imp.path, out);
+      if (out) specToOutput.set(imp.path, out);
     }
-    targetsByChunk.set(chunk.index, m);
+  }
+  if (conflicts > 0) {
+    // A specifier resolving to two chunks would mean the content hash is not a
+    // stable identity, which would invalidate the global table entirely. Never
+    // observed; loud if it ever happens rather than resolved by last-write-wins.
+    throw new Error(
+      `${conflicts} /$bunfs specifiers resolve to more than one chunk index. ` +
+        `The global specifier table assumes a specifier names one chunk bundle-wide.`,
+    );
   }
 
   let filesRewritten = 0;
   let specifiersRewritten = 0;
   let unresolved = 0;
+  const unresolvedSpecs = new Set<string>();
 
   for (const section of mapping.sections) {
     const fullPath = path.join(projectDir, section.output_path);
     if (!fs.existsSync(fullPath)) continue;
     const code = fs.readFileSync(fullPath, "utf-8");
-    // Absent chunk == empty target map, so the replace below counts its
-    // specifiers as unresolved the same way as any other miss. Counting whole
-    // FILES here instead would mix two units in one total — that reported
-    // "18240 unresolved" against a graph holding only 13,317 imports.
-    const targets = targetsByChunk.get(section.index) ?? new Map<string, string>();
 
     let touched = false;
     const rewritten = code.replace(
       BUNFS_IMPORT_RE,
       (whole, head: string, spec: string) => {
-        const out = targets.get(spec);
+        const out = specToOutput.get(spec);
         if (!out) {
           unresolved++;
+          unresolvedSpecs.add(spec);
           return whole;
         }
         touched = true;
@@ -356,8 +388,15 @@ function retargetChunkImports(
   );
   // Loud, because a surviving bunfs specifier resolves to nothing: renames stop
   // propagating through it and the reassembled bundle carries a dead import.
+  // The distinct SPECIFIERS are listed, not just the site count — 875 sites
+  // reads like 875 problems when it is 5 chunks quoted many times, and the
+  // remedy (identify those chunks) is per-specifier.
   if (unresolved > 0) {
-    console.log(`  🔴 ${unresolved} /$bunfs specifiers could NOT be retargeted`);
+    console.log(
+      `  🔴 ${unresolved} /$bunfs sites could NOT be retargeted ` +
+        `(${unresolvedSpecs.size} distinct specifiers)`,
+    );
+    for (const s of [...unresolvedSpecs].sort()) console.log(`       ${s}`);
   }
 }
 
