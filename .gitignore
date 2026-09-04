@@ -43,3 +43,7 @@ tools-ts/bun.lock
 # include runner-scaffold-<hash>.mjs and build-report-lite-<hash>.mjs, which
 # had simply never been extracted before. Same provenance, same rule.
 *-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].mjs
+
+# Python bytecode from tools/
+__pycache__/
+*.pyc
