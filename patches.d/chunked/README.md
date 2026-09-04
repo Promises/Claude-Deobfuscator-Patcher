@@ -96,9 +96,23 @@ debounce, and the message-queue depth is NOT consulted. So both directions are
 degraded at once:
   false IDLE  (idle claimed while work is queued)  -> 238 checks queue depth; 260 does not
   missed IDLE (never clears)                       -> 238 self-heals in ~3s; 260 never does
-cv-runner.mjs reaps on idle, so a premature idle reaps a worker mid-flight, and a
-missed idle leaves a seat stuck busy — permanently, since cv_send is reject-busy
-and cv_status cannot diagnose it (polling makes the CALLER busy).
+⛔ CORRECTION: an earlier version of this note said "cv-runner.mjs reaps on idle,
+so a premature idle reaps a worker mid-flight". THAT IS FALSE. cv-runner.mjs:19-21
+states the opposite outright: "this runner NEVER reaps on idleness, elapsed time,
+or silence. It reaps on exactly one signal — the worker calling cv_task_done,
+which itself refuses without a handoff." No idle signal can reap anything.
+
+The real consequences, which are asymmetric:
+  premature IDLE -> cv_send (reject-busy) delivers to a seat that still has
+                    queued work. The message QUEUES BEHIND it rather than being
+                    lost. Degrades the watcher's progress view. Recoverable.
+  missed IDLE    -> the seat is marked busy with nothing to clear it. cv_send
+                    bounces forever and cv_status cannot diagnose it (polling
+                    makes the CALLER busy). UNRECOVERABLE without a restart.
+So the 010 absence (missed idle) is far more severe than the 008 reduction
+(premature idle). Note cv-runner's own header cites a seat that "reported busy
+for four and a half hours" as the reason it refuses to trust idleness at all —
+that is exactly the failure 010 exists to self-heal, and cv_send DOES trust it.
 
 ⚠️ NO AMOUNT OF SURFACE TESTING FINDS THIS. A live seat can only exercise what is
 compiled in; a missing patch is an ABSENCE. It was found by diffing the applied
