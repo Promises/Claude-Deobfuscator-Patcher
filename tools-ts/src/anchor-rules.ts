@@ -95,6 +95,15 @@ interface RootRule {
      * hence the anchor_only requirement.
      */
     anchor_positional?: boolean;
+    /**
+     * Opt OUT of the missing-file whole-tree fallback (see resolveByUniqueScan).
+     *
+     * Set this on a rule that is deliberately redundant with another rule — a
+     * `_split` / `_legacy` / `_v168` variant that is EXPECTED to miss on the tree
+     * it does not describe. Without it such a rule can win the unique-scan and
+     * bind a name its sibling rule already binds correctly.
+     */
+    no_tree_scan?: boolean;
 }
 
 interface WalkRule {
@@ -303,7 +312,7 @@ function collectFindPositions(code: string, find: FindCriteria | string, sf: ts.
     return positions;
 }
 
-function findPatternPos(code: string, find: FindCriteria | string, sf: ts.SourceFile): number {
+export function findPatternPos(code: string, find: FindCriteria | string, sf: ts.SourceFile): number {
     const positions = collectFindPositions(code, find, sf);
     return positions.length > 0 ? positions[0] : -1;
 }
@@ -396,7 +405,7 @@ export function getNodeName(node: ts.Node): string | null {
     return null;
 }
 
-function findContainingScope(sf: ts.SourceFile, pos: number, scope: Scope): ts.Node | null {
+export function findContainingScope(sf: ts.SourceFile, pos: number, scope: Scope): ts.Node | null {
     // Find deepest node containing pos
     let deepest: ts.Node = sf;
     function descend(node: ts.Node) {
@@ -1241,6 +1250,118 @@ function firstIdentStart(scope: ts.Node, name: string, sf: ts.SourceFile): numbe
     return found;
 }
 
+// ── Missing-file fallback: whole-tree scan under a UNIQUENESS invariant ──────
+//
+// WHY THIS EXISTS
+// A rule's `file` is how it says WHERE to look. On the monolithic tree that path
+// is a real module and the rule resolves there. On a CHUNKED tree bun's bundler
+// has hoisted and merged modules, so most of those paths do not exist at all:
+// measured on 2.1.259, 22 of 43 root rules name a file that is absent, and the
+// content they describe is sitting inside a mega-chunk named after ONE of its
+// many constituents (services/compact/precomputedCompact.js is 9.1 MB and holds
+// query.js's and withRetry.js's content). The module boundaries are erased, so
+// re-splitting is not available. The pattern is still there; only the address is
+// wrong.
+//
+// WHY `file` CANNOT SIMPLY BE DROPPED
+// `file` is not only a lookup, it is the SAFETY property: it stops a pattern
+// binding a same-looking node in an unrelated module. Deleting it and taking the
+// first whole-tree hit would bind confidently and wrongly. That is measured, not
+// feared — on 2.1.259 `formatErrorMessage`'s pattern resolves to a named scope in
+// 48 DIFFERENT files, `LogoV2`'s in 12, `getCustomApiKeyStatus`'s in 10, and in
+// every one of those cases the candidate names are all DISTINCT. "First match"
+// would have silently mis-bound all of them.
+//
+// THE REPLACEMENT INVARIANT
+// Uniqueness, not position. The fallback runs only when the declared `file` is
+// absent, and it BINDS ONLY IF the whole tree yields exactly ONE candidate — one
+// distinct minified name from a scope of the requested kind. Zero candidates or
+// two-or-more candidates DECLINE, and decline LOUDLY: an ambiguous rule reports
+// its candidates so it can be given a tighter key, rather than silently guessing.
+//
+// Candidates are deduplicated by resolved NAME, not by file, so a pattern that
+// legitimately appears several times in one mega-chunk but always resolves to the
+// same scope still counts as unique. This is what makes the fallback usable at
+// all on a tree whose files are megabytes wide.
+//
+// The fallback is INERT on monolithic trees: every `file` exists there, so the
+// missing-file branch is never taken and the resolved set is unchanged (verified
+// — 2.1.238 stays at 725 renames, same members).
+
+interface ScanCandidate {
+    name: string;
+    file: string;
+    pos: number;
+    nodeStart: number;
+    nodeEnd: number;
+}
+
+/** Lazily-parsed, cached view of every .js file in the tree. */
+class TreeIndex {
+    private files: string[] | null = null;
+    private cache = new Map<string, { code: string; sf: ts.SourceFile }>();
+    constructor(private deobDir: string) {}
+
+    list(): string[] {
+        if (this.files) return this.files;
+        const acc: string[] = [];
+        const rec = (d: string) => {
+            let entries: fs.Dirent[];
+            try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+            for (const e of entries) {
+                const p = path.join(d, e.name);
+                if (e.isDirectory()) rec(p);
+                else if (e.name.endsWith(".js")) acc.push(p);
+            }
+        };
+        rec(this.deobDir);
+        acc.sort();
+        this.files = acc;
+        return acc;
+    }
+
+    get(fp: string): { code: string; sf: ts.SourceFile } | null {
+        let c = this.cache.get(fp);
+        if (c) return c;
+        let code: string;
+        try { code = fs.readFileSync(fp, "utf-8"); } catch { return null; }
+        const rel = path.relative(this.deobDir, fp);
+        c = { code, sf: ts.createSourceFile(rel, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS) };
+        this.cache.set(fp, c);
+        return c;
+    }
+}
+
+/**
+ * Search the whole tree for `rule.find` and return the candidates whose
+ * enclosing scope is of the requested kind AND has a derivable name.
+ * Deduplicated by resolved name (see the uniqueness note above).
+ */
+function scanTreeForRule(rule: RootRule, index: TreeIndex): ScanCandidate[] {
+    const byName = new Map<string, ScanCandidate>();
+    for (const fp of index.list()) {
+        const entry = index.get(fp);
+        if (!entry) continue;
+        const { code, sf } = entry;
+        let pos: number;
+        try { pos = findPatternPos(code, rule.find, sf); } catch { continue; }
+        if (pos === -1) continue;
+        const node = findContainingScope(sf, pos, rule.scope);
+        if (!node) continue;
+        const name = getNodeName(node);
+        if (!name) continue;
+        if (!byName.has(name))
+            byName.set(name, {
+                name,
+                file: sf.fileName,
+                pos,
+                nodeStart: node.getStart(sf),
+                nodeEnd: node.end,
+            });
+    }
+    return [...byName.values()];
+}
+
 // ── Main Entry Point ─────────────────────────────────────────────────────────
 
 export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResult[] {
@@ -1262,6 +1383,11 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
 
     const verbose = !!process.env.ANCHOR_VERBOSE;
 
+    // Built lazily — a monolithic tree never takes the missing-file branch, so
+    // it must not pay to walk and parse 5,439 files.
+    const treeIndex = new TreeIndex(deobDir);
+    const scanStats = { attempted: 0, bound: 0, ambiguous: 0, absent: 0 };
+
     // ── Phase 1: Root rules ──────────────────────────────────────────────────
 
     for (const rule of rules.filter((r) => !isWalkRule(r) && !isPinRule(r)) as RootRule[]) {
@@ -1274,25 +1400,82 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
                 console.warn(`  anchor skip: entry has no file/find — ${rule.id ?? rule.rename}`);
             continue;
         }
+
+        // `resolvedFile` is what the rule ACTUALLY bound against. It equals
+        // rule.file on the normal path, and the mega-chunk that really contains
+        // the pattern when the fallback fires. Walk rules chain off
+        // Resolved.file, so recording the declared-but-wrong path here would
+        // strand every walk that depends on this anchor.
+        let resolvedFile = rule.file;
+        let code: string;
+        let sf: ts.SourceFile;
+        let node: ts.Node | null = null;
+
+        // Try the declared location first. It stays authoritative whenever it
+        // works, so a rule that resolves in its own file NEVER consults the tree
+        // and cannot be re-bound by a coincidental match elsewhere.
+        //
+        // The trigger is "the declared location did not yield a node", NOT merely
+        // "the file is missing". A path can SURVIVE into the chunked tree while
+        // holding entirely different content — measured on 2.1.259, utils/auth.js
+        // exists at the same path but is 17,949 bytes against 301,579 on 2.1.238,
+        // and its landmark string is absent from it while being present elsewhere
+        // in the tree. Gating on existence alone left exactly those rules — the
+        // parents of the export_map bulk renames, which are 673 of the monolithic
+        // tree's 725 — falling into the silent pattern-not-found skip.
         const filePath = path.join(deobDir, rule.file);
-        if (!fs.existsSync(filePath)) {
-            if (verbose) console.warn(`  anchor skip: file not found — ${rule.file}`);
-            continue;
+        const declaredExists = fs.existsSync(filePath);
+        if (declaredExists) {
+            code = fs.readFileSync(filePath, "utf-8");
+            sf = ts.createSourceFile(rule.file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+            const pos = findPatternPos(code, rule.find, sf);
+            if (pos !== -1) node = findContainingScope(sf, pos, rule.scope);
         }
 
-        const code = fs.readFileSync(filePath, "utf-8");
-        const sf = ts.createSourceFile(rule.file, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
-
-        const pos = findPatternPos(code, rule.find, sf);
-        if (pos === -1) {
-            if (verbose) console.warn(`  anchor skip: pattern not found — ${rule.description ?? rule.rename}`);
-            continue;
-        }
-
-        const node = findContainingScope(sf, pos, rule.scope);
         if (!node) {
-            if (verbose) console.warn(`  anchor skip: scope not found — ${rule.description ?? rule.rename}`);
-            continue;
+            // FALLBACK — see the block comment above scanTreeForRule.
+            // Binds only on a UNIQUE whole-tree candidate; declines loudly otherwise.
+            const ruleId = rule.id ?? rule.rename ?? rule.description ?? "(unnamed rule)";
+            const why = declaredExists ? "pattern absent from declared file" : "declared file does not exist";
+            if (rule.no_tree_scan) {
+                if (verbose) console.warn(`  anchor skip: ${why}, tree-scan opted out — ${rule.file} (${ruleId})`);
+                continue;
+            }
+            scanStats.attempted++;
+            const candidates = scanTreeForRule(rule, treeIndex);
+
+            if (candidates.length === 0) {
+                scanStats.absent++;
+                console.warn(
+                    `  anchor DECLINE (absent): rule "${ruleId}" — ${why} ("${rule.file}") ` +
+                    `and its find pattern matches no ${rule.scope} scope with a derivable name anywhere in the tree. ` +
+                    `Either the symbol is gone in this version, or the rule needs a different landmark.`,
+                );
+                continue;
+            }
+            if (candidates.length > 1) {
+                scanStats.ambiguous++;
+                const shown = candidates.slice(0, 5).map((c) => `${c.name} (${c.file})`).join(", ");
+                console.warn(
+                    `  anchor DECLINE (ambiguous): rule "${ruleId}" — ${why} ("${rule.file}") ` +
+                    `and its find pattern resolves to ${candidates.length} distinct ${rule.scope} scopes across the tree, ` +
+                    `so there is no unique node to bind. Give it a tighter \`find\`. Candidates: ${shown}` +
+                    `${candidates.length > 5 ? ", …" : ""}`,
+                );
+                continue;
+            }
+
+            const only = candidates[0];
+            const entry = treeIndex.get(path.join(deobDir, only.file));
+            if (!entry) continue;
+            code = entry.code;
+            sf = entry.sf;
+            resolvedFile = only.file;
+            node = findNodeAtPosition(sf, only.nodeStart, only.nodeEnd);
+            if (!node) continue;
+            scanStats.bound++;
+            if (verbose)
+                console.log(`  anchor tree-scan: "${ruleId}" ${rule.file} → ${only.file} (unique: ${only.name})`);
         }
 
         const minifiedName = getNodeName(node);
@@ -1317,7 +1500,7 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
                 }
                 resolvedById.set(posId, {
                     id: posId,
-                    file: rule.file,
+                    file: resolvedFile,
                     // No name exists. Keep a diagnostic-only placeholder; lookup
                     // goes through nodeStart/nodeEnd, never through this string.
                     minifiedName: `__unnamed_${ts.SyntaxKind[node.kind]}`,
@@ -1327,7 +1510,7 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
                 if (verbose)
                     console.log(
                         `  anchor positional: "${posId}" → ${ts.SyntaxKind[node.kind]} at ` +
-                        `${rule.file}:${line} (span ${node.getStart(sf)}..${node.end})`,
+                        `${resolvedFile}:${line} (span ${node.getStart(sf)}..${node.end})`,
                     );
                 continue;
             }
@@ -1338,7 +1521,7 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
             // and name the rule, the node kind, and why it has no name.
             console.warn(
                 `  anchor UNNAMED SCOPE: rule "${ruleId}" matched a ${ts.SyntaxKind[node.kind]} ` +
-                `at ${rule.file}:${line} (scope: "${rule.scope}") that has no derivable name — ` +
+                `at ${resolvedFile}:${line} (scope: "${rule.scope}") that has no derivable name — ` +
                 `rule resolves to nothing and emits no rename. ` +
                 `Anonymous functions/classes are only nameable when directly assigned to a variable declarator. ` +
                 `Set "anchor_positional": true (with "anchor_only": true and an explicit "id") to register ` +
@@ -1348,7 +1531,7 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
         }
 
         const id = rule.id ?? rule.rename ?? minifiedName;
-        resolvedById.set(id, { id, file: rule.file, minifiedName });
+        resolvedById.set(id, { id, file: resolvedFile, minifiedName });
 
         if (!rule.anchor_only && rule.rename) {
             const start = node.getStart(sf);
@@ -1357,7 +1540,7 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
                 original: rule.rename,
                 confidence: 100,
                 reason: `anchor: ${rule.description ?? rule.rename}`,
-                file: rule.file,
+                file: resolvedFile,
                 start,
                 line: sf.getLineAndCharacterOfPosition(start).line + 1,
             });
@@ -1488,6 +1671,15 @@ export function applyAnchorRulesFromRules(deobDir: string, rules: AnchorRule[]):
 
     if (results.length > 0)
         console.log(`  Anchor rules: ${results.length} renames from ${rules.length} rules`);
+
+    // Only printed when the fallback actually engaged, so a monolithic build's
+    // log is byte-identical to what it was before this mechanism existed.
+    if (scanStats.attempted > 0)
+        console.log(
+            `  Anchor tree-scan (declared location did not resolve): ${scanStats.attempted} attempted — ` +
+            `${scanStats.bound} bound uniquely, ${scanStats.ambiguous} declined ambiguous, ` +
+            `${scanStats.absent} declined absent`,
+        );
 
     return results;
 }

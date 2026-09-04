@@ -734,6 +734,10 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
   const missingSpecs = new Set<string>();
   let assetGuarded = 0;
   const assetGuardedSpecs = new Set<string>();
+  // Subset of the above whose asset was never recovered, so the site has to
+  // keep the call form rather than becoming a bundled lazy require.
+  let missingAssetGuarded = 0;
+  const missingAssetGuardedSpecs = new Set<string>();
   let cycleGuarded = 0;
   const cycleGuardedSpecs = new Set<string>();
 
@@ -777,7 +781,7 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
         i = end === -1 ? offset : end + 2;
         continue;
       }
-      if (ch === "/" && regexAllowedAfter(prev)) {
+      if (ch === "/" && regexAllowedAfter(prev, code, i)) {
         // Regex literal: scan to the unescaped closing slash, honouring
         // character classes (a `/` inside `[...]` does not end the literal).
         i++;
@@ -857,17 +861,63 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
   }
 
   /**
+   * Keywords after which a `/` starts a REGEX, not a division.
+   *
+   * 🔴 WITHOUT THIS THE SCANNER DESYNCHRONISES — MEASURED, and it is the same
+   * class of failure as the template-literal and regex-literal bugs above.
+   * `prev` is a single character, so `return /re/` ends in `n` and
+   * `typeof x / 2` ends in `f`; a bare "is it an identifier char" test cannot
+   * tell a KEYWORD (after which a value cannot have appeared, so `/` is a
+   * regex) from an IDENTIFIER (after which `/` is division).
+   *
+   * MEASURED on 2.1.260, services/compact/precomputedCompact.js offset
+   * 4,857,017:
+   *     return /[<>]\(|<&|&</.test(e.text) || …
+   * `prev` is the `n` of `return`, so the opening `/` was read as DIVISION.
+   * The scan then reached the literal's CLOSING `/` with `prev` = `<` — an
+   * operator, so a regex IS allowed there — and opened a bogus regex that ran
+   * 55 characters into `…AE(d.replace(/`, which in turn opened a bogus 5,441-
+   * character STRING. Total drift: final brace depth -1, and all three
+   * pathValidation sites scored depth 0 instead of a positive depth. The cycle
+   * guard therefore did not fire, the edge was hoisted, and the binary died on
+   * the first turn with the same TDZ read the guard exists to prevent:
+   *   TypeError: Object.entries requires that input parameter not be null or undefined
+   *
+   * Only keywords that can be FOLLOWED by an expression are listed. `this` and
+   * `super` are deliberately ABSENT: they are values, so `this / 2` is
+   * division, and listing them would reintroduce the bug in mirror image.
+   */
+  const REGEX_OK_KEYWORDS = new Set([
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "case", "do", "else", "yield", "await", "default",
+  ]);
+
+  /**
    * Can a regex literal start after this significant character?
    *
    * `/` is division after a value (identifier, literal, `)`, `]`) and a regex
    * after an operator, `(`, `,`, `{`, `}`, `;`, `:` or `=`. Closers are the
    * discriminating cases: `a / b` must NOT be read as a regex, or the scan
    * swallows real code.
+   *
+   * `code`/`at` are used ONLY to re-read the identifier ending at `prev`, so a
+   * keyword can be distinguished from a variable name (see REGEX_OK_KEYWORDS).
    */
-  function regexAllowedAfter(prev: string): boolean {
+  function regexAllowedAfter(prev: string, code?: string, at?: number): boolean {
     if (prev === "") return true;
     if (/[)\]}]/.test(prev)) return false;
-    return !/[A-Za-z0-9_$"'`]/.test(prev);
+    if (/[A-Za-z0-9_$]/.test(prev)) {
+      // An identifier-or-keyword character. Walk back over the whole word and
+      // decide on the WORD, not on its last letter. A numeric literal can
+      // never be a keyword, so `1 / 2` stays division.
+      if (code === undefined || at === undefined) return false;
+      let s = at;
+      while (s > 0 && /[\s]/.test(code[s - 1])) s--;
+      let e = s;
+      while (s > 0 && /[A-Za-z0-9_$]/.test(code[s - 1])) s--;
+      return REGEX_OK_KEYWORDS.has(code.slice(s, e));
+    }
+    return !/["'`]/.test(prev);
   }
 
   /**
@@ -1037,6 +1087,72 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
     return false;
   }
 
+  /**
+   * The assets tools/extract_assets.py actually recovered, by filename.
+   *
+   * Empty when the directory is absent (a monolithic build, or a chunked one
+   * built without the asset pass): every asset then counts as MISSING, which
+   * keeps such a build on the old call-form behaviour rather than newly
+   * bundling modules whose assets cannot possibly be present.
+   */
+  const recoveredAssets = (() => {
+    const dir =
+      process.env.ASSET_DIR ??
+      path.join(path.dirname(projectDir), ".deob_cache", "assets");
+    try {
+      return new Set(fs.readdirSync(dir));
+    } catch {
+      return new Set<string>();
+    }
+  })();
+
+  /**
+   * Does this module, or anything it statically imports, load an embedded asset
+   * that was NOT recovered?
+   *
+   * Such a module cannot be bundled: bun resolves the `/$bunfs/root/<asset>`
+   * specifier at build time and fails the whole binary. See the call site.
+   */
+  const missingAssetMemo = new Map<string, boolean>();
+  function loadsMissingAsset(absPath: string, seen = new Set<string>()): boolean {
+    const cached = missingAssetMemo.get(absPath);
+    if (cached !== undefined) return cached;
+    if (seen.has(absPath)) return false;
+    seen.add(absPath);
+
+    let text: string;
+    try {
+      text = fs.readFileSync(absPath, "utf-8");
+    } catch {
+      // Unreadable: treat as missing, matching loadsEmbeddedAsset's
+      // conservative branch for the same case.
+      missingAssetMemo.set(absPath, true);
+      return true;
+    }
+    EMBEDDED_ASSET_RE_ALL.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = EMBEDDED_ASSET_RE_ALL.exec(text)) !== null) {
+      const name = m[0].slice(1, -1).replace("/$bunfs/root/", "");
+      if (!recoveredAssets.has(name)) {
+        missingAssetMemo.set(absPath, true);
+        return true;
+      }
+    }
+    const dir = path.dirname(absPath);
+    const importRe = /\bfrom\s*['"](\.[^'"]*)['"]|\bimport\s*['"](\.[^'"]*)['"]/g;
+    let im: RegExpExecArray | null;
+    while ((im = importRe.exec(text)) !== null) {
+      const spec = im[1] ?? im[2];
+      if (!spec) continue;
+      if (loadsMissingAsset(path.resolve(dir, spec), seen)) {
+        missingAssetMemo.set(absPath, true);
+        return true;
+      }
+    }
+    missingAssetMemo.set(absPath, false);
+    return false;
+  }
+
   for (const section of mapping.sections) {
     const fullPath = path.join(projectDir, section.output_path);
     if (!fs.existsSync(fullPath)) continue;
@@ -1070,14 +1186,58 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
           missingSpecs.add(spec);
           return whole;
         }
-        // Leave the call alone when hoisting it would drag an embedded-asset
-        // load into module-load time. Staying a call is the STATUS QUO for
-        // this site, not a regression: it fails only if its own path runs,
-        // which is what it did before this pass existed.
+        // Do not HOIST when that would drag an embedded-asset load into
+        // module-load time — but do not leave the call form either.
+        //
+        // 🔴 "STAYING A CALL IS THE STATUS QUO" WAS WRONG HERE, exactly as it
+        // was wrong for the cycle guard (see :919 and the call site below).
+        // `import.meta.require` with a RELATIVE specifier does not resolve
+        // inside a compiled single-file binary AT ALL, so a guarded site does
+        // not "fail only if its own path runs" — it fails WHENEVER its path
+        // runs. MEASURED on 2.1.260: `skills/bundled/loremIpsum.js:195` does
+        //     en(import.meta.require('../../_unmatched/1273_SKILL.js'))
+        // and 1273_SKILL reaches an embedded asset transitively, so this guard
+        // fired and kept the call. The rebuilt binary then died with
+        //   ResolveMessage: Cannot find module '../../_unmatched/1273_SKILL.js'
+        // as an UNHANDLED REJECTION, which on the `-p` path presented as a
+        // silent hang: exit 124, zero bytes on stdout AND stderr.
+        //
+        // A bare lazy `require(spec)` is correct on both counts: bun bundles
+        // the target so it RESOLVES, and the call still runs only when the
+        // enclosing line runs, so the asset load stays as deferred as it was.
+        // That is the same remedy, for the same reason, as the cycle guard's.
+        //
+        // ⚠️ EXCEPT WHEN THE ASSET WAS NEVER RECOVERED — then a lazy `require`
+        // is WORSE than the call, because `require` makes bun BUNDLE the
+        // target, and bundling walks its static imports until it hits an
+        // `import.meta.require('/$bunfs/root/<asset>')` for a file that does
+        // not exist. MEASURED on 2.1.260: rewriting
+        // `en(import.meta.require('../../_unmatched/1273_SKILL.js'))` to a
+        // lazy require pulled in `_unmatched/1272_xZt.js`, whose module scope
+        // is `var e = Ee('/$bunfs/root/SKILL-57sfmcap.md')`, and the binary
+        // died with
+        //   ResolveMessage: Cannot find module '/$bunfs/root/SKILL-57sfmcap.md'
+        // — the same silent `-p` hang, one module further along.
+        // `SKILL-57sfmcap.md` is one of the uncompressed text assets
+        // tools/extract_assets.py does not yet recover (it reports 7/76), so
+        // there is nothing to embed and no rewrite can succeed.
+        //
+        // For that population the CALL is genuinely the least-bad form: it
+        // keeps the failure on the one code path that needs the asset instead
+        // of turning it into a resolve error for the whole binary. This is the
+        // narrow case where "staying a call is the status quo" is still true,
+        // and it is now decided by whether the asset EXISTS rather than
+        // assumed for every asset-loading module.
         if (loadsEmbeddedAsset(targetAbs)) {
           assetGuarded++;
           assetGuardedSpecs.add(spec);
-          return whole;
+          if (loadsMissingAsset(targetAbs)) {
+            missingAssetGuarded++;
+            missingAssetGuardedSpecs.add(spec);
+            return whole;
+          }
+          needsLazyRequire = true;
+          return `${LAZY_REQUIRE_FN}('${spec}')`;
         }
         // Hoisting this edge would close an import cycle and expose a
         // temporal-dead-zone read at module-evaluation time. See wouldCycle().
@@ -1175,13 +1335,32 @@ function bindStaticRequires(projectDir: string, mapping: Mapping): void {
       `namespace imports in ${filesRewritten} files`,
   );
   if (assetGuarded > 0) {
-    // Reported, because these are the sites that will still throw at runtime if
-    // their path runs — and because a sudden change in this count between
-    // versions means the embedded-asset surface moved.
+    // Reported because a sudden change in this count between versions means the
+    // embedded-asset surface moved. These sites no longer throw when their path
+    // runs: like the cycle-guarded ones they are rewritten to a bare lazy
+    // `require()`, which bun bundles and which resolves inside the compiled
+    // binary while still deferring the asset load past module evaluation.
     console.log(
-      `  ⚠️  ${assetGuarded} sites left as calls (${assetGuardedSpecs.size} distinct ` +
-        `specifiers) — hoisting them would eagerly load an embedded /$bunfs asset`,
+      `  ⚠️  ${assetGuarded - missingAssetGuarded} sites kept lazy as bare ` +
+        `${LAZY_REQUIRE_FN}() (${assetGuardedSpecs.size -
+          missingAssetGuardedSpecs.size} distinct specifiers) — hoisting them ` +
+        `would eagerly load an embedded /$bunfs asset`,
     );
+  }
+  if (missingAssetGuarded > 0) {
+    // Reported separately because these are the only sites that still throw
+    // when their path runs, and the remedy is not in this file: recover the
+    // asset (tools/extract_assets.py) and they become bundle-able like the
+    // rest. A rise here means the extractor's coverage gap widened.
+    console.log(
+      `  🔴 ${missingAssetGuarded} sites LEFT AS CALLS ` +
+        `(${missingAssetGuardedSpecs.size} distinct specifiers) — their module ` +
+        `loads an embedded asset that was never recovered, so bundling it ` +
+        `would fail the whole binary at resolve time`,
+    );
+    for (const s of [...missingAssetGuardedSpecs].sort()) {
+      console.log(`       ${s}`);
+    }
   }
   if (cycleGuarded > 0) {
     // Reported because a jump in this count between versions means the module

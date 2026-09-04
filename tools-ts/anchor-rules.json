@@ -1,7 +1,45 @@
 [
   {
+    "__note_chunked_export_maps": "The two rule pairs below exist because the CHUNKED bundle format (2.1.242+) moved where the original names live. On a monolithic build, `utils/auth.js` etc. each carry a big `RealName: () => minifiedId` map, which is why FOUR export_map rules produce 673 of that tree's 725 renames. In a chunked build those per-module maps are gone from the anchor modules — the anchors' own files export via a bare ESM `export { minified, ... }` list, which carries NO original names at all (measured: 1,189 names in entrypoints/sdk/coreSchemas.js, none recoverable). Name-carrying maps DO still exist, but in DIFFERENT files. Measured strict `key: () => bareIdentifier` pairs sitting in a file that also has a function-valued entry (the only shape findExportMapObject can anchor on): 3,074 on 2.1.238, 1,966 on 2.1.259, 312 on 2.1.260. So the recovery route on chunked trees is to anchor the files that still hold such a map. Each rule below was authored against a PRE-RENAME tree (STOP_AFTER_STEP=2.5) and verified on BOTH 2.1.259 and 2.1.260.",
+    "__note_export_map_collision_hazard": "An export_map walk binds the FIRST object literal containing `<key>: () => <anchorName>`, matching on the anchor's MINIFIED name. In files where the minifier reuses a short name heavily this is a real mis-binding hazard, not a theoretical one: in components/PromptInput/useSwarmBanner.js the anchor `userFacingName` minifies to `ne`, and `ne` occurs as an arrow body ~10 times in that file for entirely unrelated values. That candidate was DROPPED rather than shipped — it happened to fail closed, but it could as easily have bound the wrong map. Before adding a rule here, check that the anchor's minified target is used as a map value exactly ONCE (`=> <name>` followed by , } or whitespace)."
+  },
+  {
+    "id": "inkTextPropsOf",
+    "description": "Anchor for the design-system export map. Keyed on inkTextPropsOf's body — it sets `.bold = !0` then bails on a non-string and splits on ';' — which is measured tree-unique on both 2.1.259 and 2.1.260. Chosen from the SEVEN keys whose export-map target is a function declaration on BOTH versions (heldFor, inkTextPropsOf, rebuild, useEngineDrew, useRenderAnswer, useRenderDrawing, withHexColors); PressButton was rejected because it is a function declaration on 2.1.260 but not on 2.1.259, so a rule keyed on it would silently cover only one version. Its minified target is used as a map value exactly once on each version, so the collision hazard noted above does not apply.",
+    "file": "components/design-system/ThemedBox.js",
+    "find": {
+      "regex": "\\.bold = !0; if \\(typeof [a-z] !== \"string\"\\)"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "inkTextPropsOf",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "themedbox_exports",
+    "description": "Bulk-rename the design-system export map. VERIFIED: 31 renames on 2.1.260, 18 on 2.1.259 (the map itself is that much bigger on 260). Spot-checked members include BOLD_WEIGHT, HEX_COLOR_PROPS, InputField, PressButton, SelectField."
+  },
+  {
+    "id": "createRenderDraws",
+    "description": "Anchor for the precomputedCompact mega-chunk's export map. Keyed on the OUTER factory — `function X() { let a = <call>(); async function ...` — deliberately, not on the inner async worker: an earlier version keyed on the inner `async function n(o, { signal, origin })` and, although that landmark is also tree-unique, it bound the inner scope whose export map holds only 3 entries. The outer scope is the one the module's real map hangs off. Measured tree-unique on both versions, and its minified target is used as a map value exactly once on each.",
+    "file": "services/compact/precomputedCompact.js",
+    "find": {
+      "regex": "function [a-zA-Z_$]+\\(\\) \\{ let [a-z] = [A-Za-z_$.]+\\(\\); async function"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "createRenderDraws",
+    "walk": "export_map",
+    "rename": "__export_map",
+    "id": "precomputed_compact_exports",
+    "description": "Bulk-rename the precomputedCompact export map. VERIFIED: 87 renames on 2.1.260, 67 on 2.1.259. Spot-checked members include BORDER_STYLES, CONCEALING_STYLE_PROPERTIES, DIALOG_FRAME_COLUMNS, ELEMENT_KIND, INPUT_TEXT_PROPS."
+  },
+  {
     "id": "query",
-    "description": "query wrapper \u2014 calls queryLoop via yield* and notifies 'completed'",
+    "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
     "file": "query.js",
     "find": {
       "string_literal": "completed",
@@ -45,7 +83,7 @@
     "from": "query",
     "walk": "yield_star_callee",
     "rename": "queryLoop",
-    "description": "queryLoop \u2014 called via yield* from query",
+    "description": "queryLoop — called via yield* from query",
     "id": "queryLoop"
   },
   {
@@ -58,7 +96,7 @@
     "from": "query",
     "walk": "call_string_arg:completed:callee",
     "rename": "notifyCommandLifecycle",
-    "description": "notifyCommandLifecycle \u2014 called with 'completed' in query"
+    "description": "notifyCommandLifecycle — called with 'completed' in query"
   },
   {
     "id": "yieldMissingToolResultBlocks",
@@ -100,10 +138,10 @@
   },
   {
     "id": "getCustomApiKeyStatus",
-    "description": "getCustomApiKeyStatus \u2014 returns 'approved', 'rejected', or 'new'",
+    "description": "getCustomApiKeyStatus — returns 'approved', 'rejected', or 'new'. Keyed on this function's own RETURN CASCADE plus the config property it reads, NOT on the bare literal \"approved\": `find.string_literal` is a substring scan with no AST discrimination, and \"approved\" appears in permission decisions, swarm messages and settings schemas all over the tree — measured 10 ambiguous candidates on 2.1.260, so it bound nothing. `return \"rejected\"; return \"new\";` is the tail of THIS function only (measured tree-unique on both 2.1.259 and 2.1.260), and the customApiKeyResponses?.rejected?.includes(...) prefix ties it to the config read so a coincidental status cascade cannot match. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to `err` in entrypoints/sdk/coreSchemas.js.",
     "file": "utils/config.js",
     "find": {
-      "string_literal": "approved"
+      "regex": "customApiKeyResponses\\?\\.rejected\\?\\.includes\\([A-Za-z_$][\\w$]*\\)\\)\\s*\\n?\\s*return \"rejected\";\\s*return \"new\";"
     },
     "scope": "function",
     "rename": "getCustomApiKeyStatus"
@@ -112,20 +150,20 @@
     "from": "getCustomApiKeyStatus",
     "walk": "param:0",
     "rename": "truncatedApiKey",
-    "description": "truncatedApiKey \u2014 the API key to check status for"
+    "description": "truncatedApiKey — the API key to check status for"
   },
   {
     "from": "getCustomApiKeyStatus",
     "walk": "local:call_result",
     "rename": "config",
-    "description": "config \u2014 local var set to getGlobalConfig()"
+    "description": "config — local var set to getGlobalConfig()"
   },
   {
     "from": "getCustomApiKeyStatus",
     "walk": "local:call_result_callee",
     "id": "getGlobalConfig",
     "rename": "getGlobalConfig",
-    "description": "getGlobalConfig \u2014 the callee that provides config in getCustomApiKeyStatus"
+    "description": "getGlobalConfig — the callee that provides config in getCustomApiKeyStatus"
   },
   {
     "from": "getGlobalConfig",
@@ -138,26 +176,26 @@
     "walk": "contains:Date.now():assign_target",
     "rename": "globalConfigCache",
     "id": "globalConfigCache",
-    "description": "globalConfigCache \u2014 the config cache object assigned with mtime defaulting to Date.now()"
+    "description": "globalConfigCache — the config cache object assigned with mtime defaulting to Date.now()"
   },
   {
     "from": "getGlobalConfig",
     "walk": "contains:mtimeMs:member_access_target",
     "rename": "stats",
-    "description": "stats \u2014 local assigned from statSync, referenced as stats?.mtimeMs"
+    "description": "stats — local assigned from statSync, referenced as stats?.mtimeMs"
   },
   {
     "from": "getGlobalConfig_returnExpr",
     "walk": "contains:size:assign_target",
     "rename": "lastReadFileStats",
     "id": "lastReadFileStats",
-    "description": "lastReadFileStats \u2014 assigned { mtime, size } or null"
+    "description": "lastReadFileStats — assigned { mtime, size } or null"
   },
   {
     "from": "getGlobalConfig",
     "walk": "method_arg_callee:statSync",
     "rename": "getGlobalClaudeFile",
-    "description": "getGlobalClaudeFile \u2014 path function passed to statSync()"
+    "description": "getGlobalClaudeFile — path function passed to statSync()"
   },
   {
     "from": "getGlobalConfig",
@@ -169,19 +207,20 @@
     "from": "getGlobalConfig_cacheHitBranch",
     "walk": "postfix_increment_operand",
     "rename": "configCacheHits",
-    "description": "configCacheHits \u2014 incremented on cache hit"
+    "description": "configCacheHits — incremented on cache hit"
   },
   {
     "from": "getGlobalConfig",
     "walk": "standalone_increment",
     "rename": "configCacheMisses",
-    "description": "configCacheMisses \u2014 incremented at start of cache miss path"
+    "description": "configCacheMisses — incremented at start of cache miss path"
   },
   {
     "id": "getTotalCacheReadInputTokens",
+    "description": "getTotalCacheReadInputTokens — the accessor that reads the cost ledger's cache-read total. The ALTERNATION was dropped: its first branch, the bare literal \"cacheReadInputTokens\", is a field name that occurs in usage payloads, zod schemas and accumulator initialisers throughout the tree, so it dragged in unrelated scopes and the rule declined as absent on 2.1.260. The `.costLedger.totalCacheReadInputTokens()` CALL is the one that identifies this getter — measured exactly ONE occurrence per tree on both 2.1.259 and 2.1.260, in vendor/lodash/memoizeCapped.js (the method DEFINITION on the ledger class is a different, non-matching shape, so the call and its definition cannot be confused). VERIFIED: binds uniquely on both versions.",
     "file": "bootstrap/sessionState.js",
     "find": {
-      "regex": "(?:\"cacheReadInputTokens\"|\\.costLedger\\.totalCacheReadInputTokens\\(\\))"
+      "regex": "\\.costLedger\\.totalCacheReadInputTokens\\(\\)"
     },
     "scope": "function",
     "rename": "getTotalCacheReadInputTokens"
@@ -190,7 +229,7 @@
     "from": "getTotalCacheReadInputTokens",
     "walk": "contains:modelUsage:member_access_target",
     "rename": "STATE",
-    "description": "STATE \u2014 the global state object"
+    "description": "STATE — the global state object"
   },
   {
     "from": "getTotalCacheReadInputTokens",
@@ -210,7 +249,7 @@
     "from": "utils/config.js_fun_saveGlobalConfig",
     "walk": "call_string_arg:tengu_config_auth_loss_prevented:callee",
     "rename": "logEvent",
-    "description": "logEvent \u2014 telemetry event logger (Q), used across 247+ files"
+    "description": "logEvent — telemetry event logger (Q), used across 247+ files"
   },
   {
     "from": "utils/config.js_fun_saveGlobalConfig",
@@ -225,7 +264,7 @@
     "from": "saveGlobalConfig_fallbackCall",
     "walk": "callee",
     "rename": "logForDebugging",
-    "description": "logForDebugging \u2014 debug logger (h)"
+    "description": "logForDebugging — debug logger (h)"
   },
   {
     "from": "saveGlobalConfig_fallbackCall",
@@ -238,13 +277,13 @@
     "walk": "condition_callee",
     "rename": "wouldLoseAuthState",
     "id": "wouldLoseAuthState_call",
-    "description": "wouldLoseAuthState \u2014 checks if saving would lose oauthAccount/hasCompletedOnboarding"
+    "description": "wouldLoseAuthState — checks if saving would lose oauthAccount/hasCompletedOnboarding"
   },
   {
     "from": "wouldLoseAuthState_call",
     "walk": "param:0",
     "rename": "currentConfig",
-    "description": "currentConfig \u2014 the re-read config passed to wouldLoseAuthState"
+    "description": "currentConfig — the re-read config passed to wouldLoseAuthState"
   },
   {
     "id": "getInitialState",
@@ -259,14 +298,14 @@
     "from": "bootstrap/state.js_fun_flushInteractionTime",
     "walk": "only_bare_call",
     "rename": "flushInteractionTime_inner",
-    "description": "flushInteractionTime_inner \u2014 the actual flush, guarded by flushInteractionTime"
+    "description": "flushInteractionTime_inner — the actual flush, guarded by flushInteractionTime"
   },
   {
     "id": "hasAnthropicApiKeyAuth",
-    "description": "hasAnthropicApiKeyAuth \u2014 checks for API key auth, contains skipRetrievingKeyFromApiKeyHelper",
+    "description": "hasAnthropicApiKeyAuth — true when an API key is configured and its source is not 'none'. Keyed on the function BODY, not on the option name: `text: skipRetrievingKeyFromApiKeyHelper` is a raw substring scan that matches every CALL SITE passing the option (measured 29 occurrences across 14 files on 2.1.260 → 13 ambiguous candidate scopes), and the option's own definition is in a different function entirely. This key requires the destructure and the return to be ADJACENT, which additionally excludes the async twin `Bgr` — the same body exists twice, once sync and once `await`ed, and matching either one would be a coin flip on file order rather than a decision. Measured: exactly 1 match per tree. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to the sync `kzt` in entrypoints/sdk/coreSchemas.js.",
     "file": "utils/auth.js",
     "find": {
-      "text": "skipRetrievingKeyFromApiKeyHelper"
+      "regex": "\\} = [A-Za-z_$][\\w$]*\\(\\{ skipRetrievingKeyFromApiKeyHelper: !0 \\}\\);\\s*\\n\\s*return [A-Za-z_$][\\w$]* !== null && [A-Za-z_$][\\w$]* !== \"none\";"
     },
     "scope": "function",
     "anchor_only": true
@@ -280,7 +319,7 @@
   },
   {
     "id": "prependUserMessage",
-    "description": "prependUserMessage \u2014 method that calls jsonStringify with role:'user'",
+    "description": "prependUserMessage — method that calls jsonStringify with role:'user'",
     "file": "cli/structuredIO.js",
     "find": {
       "property_assignment": {
@@ -306,17 +345,17 @@
     "from": "jsonStringify_call",
     "walk": "callee",
     "rename": "jsonStringify",
-    "description": "jsonStringify \u2014 JSON serializer from slowOperations.js"
+    "description": "jsonStringify — JSON serializer from slowOperations.js"
   },
   {
     "from": "prependUserMessage",
     "walk": "enclosing_class",
     "rename": "StructuredIO",
-    "description": "StructuredIO \u2014 CLI structured I/O class"
+    "description": "StructuredIO — CLI structured I/O class"
   },
   {
     "id": "LogoV2",
-    "description": "LogoV2 \u2014 main logo/header component with compact and horizontal layouts",
+    "description": "LogoV2 — main logo/header component with compact and horizontal layouts",
     "file": "components/LogoV2/LogoV2.js",
     "find": {
       "string_literal": "theme"
@@ -328,11 +367,11 @@
     "from": "LogoV2",
     "walk": "contains:createElement:member_access_target",
     "rename": "React",
-    "description": "React \u2014 imported as R8, used for createElement calls"
+    "description": "React — imported as R8, used for createElement calls"
   },
   {
     "id": "getLayoutMode",
-    "description": "getLayoutMode \u2014 returns 'horizontal' or 'compact' based on terminal width",
+    "description": "getLayoutMode — returns 'horizontal' or 'compact' based on terminal width",
     "file": "utils/logoV2Utils.js",
     "find": {
       "string_literal": "compact"
@@ -344,7 +383,7 @@
     "from": "getLayoutMode",
     "walk": "param:0",
     "rename": "columns",
-    "description": "columns \u2014 terminal width param"
+    "description": "columns — terminal width param"
   },
   {
     "type": "pin",
@@ -521,7 +560,8 @@
       "regex": "generation\\+\\+"
     },
     "scope": "function",
-    "rename": "resetCredentialFileReadCache"
+    "rename": "resetCredentialFileReadCache",
+    "no_tree_scan": true
   },
   {
     "id": "resetCredentialFileReadCache_v238",
@@ -531,7 +571,8 @@
       "regex": "generation\\+\\+"
     },
     "scope": "function",
-    "rename": "resetCredentialFileReadCache"
+    "rename": "resetCredentialFileReadCache",
+    "no_tree_scan": true
   },
   {
     "id": "isSimpleMode",
@@ -565,13 +606,14 @@
   },
   {
     "id": "getTotalCacheReadInputTokens_split",
-    "description": "getTotalCacheReadInputTokens \u2014 split state module (>= 2.1.238): delegates to Sr.costLedger.totalCacheReadInputTokens()",
+    "description": "getTotalCacheReadInputTokens — split state module (>= 2.1.238): delegates to Sr.costLedger.totalCacheReadInputTokens()",
     "file": "_unmatched/0136_nt.js",
     "find": {
       "function_name": "getTotalCacheReadInputTokens"
     },
     "scope": "function",
-    "rename": "getTotalCacheReadInputTokens"
+    "rename": "getTotalCacheReadInputTokens",
+    "no_tree_scan": true
   },
   {
     "from": "getTotalCacheReadInputTokens_split",
@@ -582,35 +624,37 @@
   },
   {
     "id": "getInitialState_split",
-    "description": "getInitialState \u2014 split state module (>= 2.1.238): builds the root session, resolving cwd via realpathSync",
+    "description": "getInitialState — split state module (>= 2.1.238): builds the root session, resolving cwd via realpathSync",
     "file": "_unmatched/0136_nt.js",
     "find": {
       "regex": "realpathSync"
     },
     "scope": "function",
-    "rename": "getInitialState"
+    "rename": "getInitialState",
+    "no_tree_scan": true
   },
   {
     "id": "getSessionId_legacy",
-    "description": "getSessionId \u2014 legacy monolithic bootstrap/state.js (<= 2.1.168)",
+    "description": "getSessionId — legacy monolithic bootstrap/state.js (<= 2.1.168)",
     "file": "bootstrap/sessionState.js",
     "find": {
       "function_name": "getSessionId"
     },
     "scope": "function",
-    "anchor_only": true
+    "anchor_only": true,
+    "no_tree_scan": true
   },
   {
     "from": "getSessionId_legacy",
     "walk": "only_bare_call",
     "rename": "getSessionOverrides",
-    "description": "getSessionOverrides (tV) \u2014 session-overrides getter, the sole bare call in getSessionId (legacy)"
+    "description": "getSessionOverrides (tV) — session-overrides getter, the sole bare call in getSessionId (legacy)"
   },
   {
     "from": "getSessionId_split",
     "walk": "only_bare_call",
     "rename": "getSessionOverrides",
-    "description": "getSessionOverrides (hM) \u2014 session-overrides getter, the sole bare call in getSessionId (split)"
+    "description": "getSessionOverrides (hM) — session-overrides getter, the sole bare call in getSessionId (split)"
   },
   {
     "type": "pin",
@@ -665,7 +709,8 @@
       "text": "BUILD_REF_NAME"
     },
     "scope": "function",
-    "rename": "getVersionSuffix"
+    "rename": "getVersionSuffix",
+    "no_tree_scan": true
   },
   {
     "id": "getVersionSuffix_preamble",
@@ -675,7 +720,8 @@
       "text": "BUILD_REF_NAME"
     },
     "scope": "function",
-    "rename": "getVersionSuffix"
+    "rename": "getVersionSuffix",
+    "no_tree_scan": true
   },
   {
     "id": "useSwarmBanner",
@@ -815,7 +861,8 @@
       "regex": "\\.costLedger\\.modelUsage\\(\\)"
     },
     "scope": "function",
-    "anchor_only": true
+    "anchor_only": true,
+    "no_tree_scan": true
   },
   {
     "id": "getSessionId_split",
@@ -824,7 +871,8 @@
       "regex": "\\(\\)\\?\\.sessionId ?\\?\\?"
     },
     "scope": "function",
-    "anchor_only": true
+    "anchor_only": true,
+    "no_tree_scan": true
   },
   {
     "id": "getBuiltinCommandTable",

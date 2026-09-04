@@ -192,9 +192,30 @@ fi
 echo ""
 echo "=== Step 2.5: Module reconstruction ==="
 cd "$TOOLS_TS"
+# ASSET_DIR lets the asset guard tell a RECOVERED embedded asset from a missing
+# one. A module whose asset is missing cannot be bundled at all (bun resolves
+# `/$bunfs/root/<asset>` at BUILD time and fails the whole binary), so those
+# sites must keep the call form, while recovered ones become bundled lazy
+# requires. Passed explicitly because $DEOB is relocatable via DEOB_DIR and the
+# cache is not; absent on a monolithic build, where every asset then reads as
+# missing and the old call-form behaviour is preserved.
 CHUNK_GRAPH="$SCRIPT_DIR/.deob_cache/chunk-graph.json" \
+    ASSET_DIR="$SCRIPT_DIR/.deob_cache/assets" \
     bun run src/module-reconstruct.ts "$DEOB"
 cd "$SCRIPT_DIR"
+
+# STOP_AFTER_STEP=2.5 — leave the tree exactly as step 2.6 will SEE it.
+#
+# Anchor rules resolve at 2.6, before the 2.7 prettify and before 2.6 itself has
+# rewritten any names. Measuring anchors against a FINISHED tree therefore scores
+# a different population than the build does (measured: 725 pre-rename vs 55
+# post-rename on the same 2.1.238 tree). This hook is the only way to obtain the
+# input the resolver actually gets, without re-implementing steps 2-2.5 by hand.
+if [ "${STOP_AFTER_STEP:-}" = "2.5" ]; then
+    echo ""
+    echo "  STOP_AFTER_STEP=2.5 — pre-rename tree left at: $DEOB"
+    exit 0
+fi
 
 # Step 2.6: Rename minified identifiers (scope-aware via TS Language Service)
 echo ""

@@ -38,3 +38,8 @@ tools-ts/bun.lock
 *-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].md
 *-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].txt
 *.txt.zst
+# `.mjs` joined this set when extract_assets.py's positional pass raised
+# uncompressed text recovery from 7/76 to 74/76 — the newly-recovered names
+# include runner-scaffold-<hash>.mjs and build-report-lite-<hash>.mjs, which
+# had simply never been extracted before. Same provenance, same rule.
+*-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z].mjs

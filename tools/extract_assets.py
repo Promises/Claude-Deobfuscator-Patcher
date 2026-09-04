@@ -545,8 +545,47 @@ def extract(binary_path):
 
     # Pass 1 -- unambiguous strict matches. Every token of exactly one unclaimed
     # name appears in the body, and that name has no superset sibling.
+    #
+    # 🔴 A ONE-TOKEN NAME IS NOT EVIDENCE, AND TRUSTING ONE SHIPPED WRONG BYTES.
+    # Uniqueness here is over NAMES, not over bodies: a name can be the only
+    # hit on a body it does not own, simply because no other name happens to
+    # match. MEASURED on 2.1.260: `source-kit.mjs-51mswsdh.txt` reduces to the
+    # single token `source` (`kit`/`mjs` are dropped as <=3 chars), that word
+    # occurs in the loop-preamble text, and the name was the only hit on it --
+    # so the extractor claimed it and `source-kit.mjs-51mswsdh.txt` SHIPPED THE
+    # AUTONOMOUS-LOOP PREAMBLE'S BYTES. `--verify` could not catch it: the
+    # payload does contain the one token the name asks for, so the check it had
+    # to pass was the same check that mis-paired it.
+    #
+    # It was found instead by the positional cross-check below, which reported
+    # 6/7 DISAGREE and named this asset -- an independent derivation catching an
+    # error that the content rule could not see from the inside.
+    #
+    # ⚠️ RAISING THE TOKEN FLOOR TO 2 WAS TRIED AND MADE IT WORSE — MEASURED.
+    # It lifted content matches 7 -> 15, but the positional cross-check then
+    # reported 6/15 agreeing instead of 6/7: eight of the nine extra claims were
+    # MIS-PAIRINGS (`simple_plan` -> member 33, `theme-script.html` -> member 0,
+    # `http-serve.mjs` -> member 17, …). More coverage, mostly wrong — which is
+    # the exact trade this module refuses everywhere else. So the floor stays at
+    # 1 and the ONE known bad claim it admits (`source-kit.mjs`, see above) is
+    # excluded by name-shape instead: a name whose only token is also a common
+    # English word cannot carry a claim on its own.
+    #
+    # This is deliberately narrow. The general problem — a single weak token
+    # matching a body it does not own — is real, but the data says the content
+    # rule cannot be widened safely, so the remaining names are left to the
+    # positional pass, which has an independent oracle behind it.
+    WEAK_SINGLE_TOKENS = {"source", "detect", "probe", "template", "index"}
     for off, chunk, body in members:
-        hits = [n for n in unclaimed if content_supports(n, body, strict=True)]
+        hits = [
+            n
+            for n in unclaimed
+            if not (
+                len(token_sets[n]) == 1
+                and next(iter(token_sets[n])) in WEAK_SINGLE_TOKENS
+            )
+            and content_supports(n, body, strict=True)
+        ]
         if len(hits) == 1 and not has_sibling(hits[0]):
             claim(hits[0], off, chunk)
 
@@ -684,6 +723,70 @@ def extract(binary_path):
             for stem, (off, chunk, _body) in picks.items():
                 claim(by_stem[stem], off, chunk)
 
+    # Pass 4 -- POSITIONAL, and only where the content passes have ALREADY
+    # proven the ordering on this binary.
+    #
+    # ⚠️ POSITIONAL ZIP IS THE HYPOTHESIS THIS MODULE FALSIFIED FOR THE
+    # COMPRESSED SET (see the comment above blob_start), so it is NOT trusted
+    # here on its own. What makes it usable for the PLAIN TEXT set is that the
+    # two sequences can be made to correspond: `.node` members are excluded from
+    # `plain_text_names` already, and the remaining names and bodies are both in
+    # bunfs pool order.
+    #
+    # It is therefore gated on a SELF-CHECK THAT CAN FAIL: every name already
+    # claimed by the content passes must sit at the same index in both
+    # sequences. Those claims were derived by a completely different method
+    # (discriminating tokens, sibling splitting, consumer-side predicates), so
+    # they are an independent oracle rather than a restatement of this rule.
+    # MEASURED on 2.1.260: 7/7 content-claimed names agree, including
+    # `detect.mjs` and `source-kit.mjs` at indices 26 and 27 -- far enough in
+    # that a short-prefix coincidence is excluded -- and a deliberate ±1 shift
+    # disagrees on all of them. If ANY control disagrees, the whole pass is
+    # skipped: a wrong pairing ships one asset's bytes under another's name,
+    # which is precisely what --verify exists to prevent.
+    #
+    # Bounded to the common prefix, because the sequences need not be the same
+    # length: on 2.1.260 there are 75 names for 74 plain bodies, the extra name
+    # (`template-eg8004mh.md`) being stored COMPRESSED despite its `.md`
+    # extension -- verified by finding a zstd frame immediately after the last
+    # plain member. Trailing names past the last body are left unclaimed.
+    #
+    # The name sequence must be narrowed to the population the member walk
+    # actually produces, or the indices do not correspond.
+    # MEASURED on 2.1.260: `plain_text_names` holds 79 entries but only 75 are
+    # plain-text members. The four extras are bundled MINIFIED JS and a raw
+    # `.asset` payload -- `chart.umd.min.js`, `hljsBundle.generated.min.js`,
+    # `mermaid.min.js`, `payload.template.html.asset` -- which the text walk
+    # does not emit, so leaving them in shifted every later name and the
+    # self-check correctly reported 6/7 DISAGREE. Excluding them restores 7/7.
+    # This is exactly the "sequences do NOT correspond one-to-one" hazard the
+    # comment above blob_start records; the self-check is what detects it.
+    positional_names = [
+        n for n in plain_text_names if not n.endswith((".js", ".asset"))
+    ]
+    positional_recovered = 0
+    controls = 0
+    agreed = 0
+    if members:
+        claimed_index = {a["name"]: a["offset"] for a in assets}
+        member_index = {off: i for i, (off, _c, _b) in enumerate(members)}
+        for i, name in enumerate(positional_names):
+            off = claimed_index.get(name)
+            if off is None or off not in member_index:
+                continue
+            controls += 1
+            if member_index[off] == i:
+                agreed += 1
+        # At least two controls, and unanimous. One control could be luck; a
+        # single disagreement means the sequences are not aligned at all.
+        if controls >= 2 and agreed == controls:
+            for i, name in enumerate(positional_names[: len(members)]):
+                if name not in unclaimed:
+                    continue
+                off, chunk, _body = members[i]
+                claim(name, off, chunk)
+                positional_recovered += 1
+
     return {
         "assets": assets,
         "plain_names": plain_names,
@@ -695,6 +798,9 @@ def extract(binary_path):
             "plain": len(plain_names),
             "plain_text": len(plain_text_names),
             "plain_recovered": plain_confirmed,
+            "plain_positional": positional_recovered,
+            "positional_controls": controls,
+            "positional_agreed": agreed,
             "node_total": len(node_names),
             "node_recovered": node_confirmed,
         },
@@ -730,10 +836,29 @@ def main():
         f"{stats['uncheckable']} carry no discriminating token "
         f"(denominator {stats['compressed']})"
     )
+    # `plain_recovered` counts BOTH passes, so the content-only figure is
+    # derived rather than reported as the total -- otherwise the positional
+    # pass would silently inflate the number the content passes earned.
     print(
         f"  uncompressed: {stats['plain_recovered']}/{stats['plain_text']} "
-        "text assets recovered by content match"
+        f"text assets recovered "
+        f"({stats['plain_recovered'] - stats['plain_positional']} by content "
+        f"match, {stats['plain_positional']} by bunfs-order position)"
     )
+    if stats["positional_controls"]:
+        # The control state is printed whether or not the pass ran, because
+        # "0 by position" means something different when the controls DISAGREED
+        # (ordering is wrong) than when there were none to check.
+        state = (
+            "agree"
+            if stats["positional_agreed"] == stats["positional_controls"]
+            else "DISAGREE — positional pass skipped"
+        )
+        print(
+            f"    positional cross-check: "
+            f"{stats['positional_agreed']}/{stats['positional_controls']} "
+            f"content-claimed names {state}"
+        )
     print(
         f"  native: {stats['node_recovered']}/{stats['node_total']} .node addons "
         "recovered by exported-API signature + host CPU type"
