@@ -70,3 +70,36 @@ Two supporting tool changes were required:
   local is a minified name in a numbered memo-cache slot, so there is nothing
   safe to bind. **008 is reduced in scope for the same reason** — read its
   header before relying on the idle signal.
+
+## 🔴 010-cvstate-heartbeat IS NOT PORTED — MIGRATION BLOCKER, NOT AN OMISSION
+
+010 is absent from this directory deliberately. Do NOT "fix" it by binding four
+plausible-looking locals.
+
+WHY IT WAS DECLINED. It needs four REPL locals that on 2.1.260 are minified names
+inside numbered React-Compiler memo-cache slots. There is nothing semantic to key
+on. A WRONG BIND HERE IS SILENT AND IS STRICTLY WORSE THAN THE ABSENCE: no
+heartbeat is VISIBLE (the server simply never reconciles), whereas a lying
+heartbeat reports a seat healthy while it is anything at all. Declining was the
+right call; preserve it until a stable anchor exists.
+
+WHY IT BLOCKS A FLEET MIGRATION. server room.ex:211 documents 010 as "a
+lightweight ~3s reachability + task snapshot" that "self-heals a missed idle
+frame". MEASURED in room.ex: there are exactly TWO paths to Router.went_idle —
+patch 008's "idle" event (:377) and 010's cvstate reconcile (:311). turn_complete
+is DELIBERATELY excluded (:373) because it fires while background agents and
+queued work are still in flight. So 010 is the ONLY backstop, and on 2.1.260 it
+is gone.
+
+COMPOUNDING: 008 is itself ported with REDUCED SCOPE on 2.1.260 — no 400 ms
+debounce, and the message-queue depth is NOT consulted. So both directions are
+degraded at once:
+  false IDLE  (idle claimed while work is queued)  -> 238 checks queue depth; 260 does not
+  missed IDLE (never clears)                       -> 238 self-heals in ~3s; 260 never does
+cv-runner.mjs reaps on idle, so a premature idle reaps a worker mid-flight, and a
+missed idle leaves a seat stuck busy — permanently, since cv_send is reject-busy
+and cv_status cannot diagnose it (polling makes the CALLER busy).
+
+⚠️ NO AMOUNT OF SURFACE TESTING FINDS THIS. A live seat can only exercise what is
+compiled in; a missing patch is an ABSENCE. It was found by diffing the applied
+patch sets, not by driving the binary.
