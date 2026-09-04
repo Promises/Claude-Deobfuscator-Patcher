@@ -1,0 +1,91 @@
+# patch: 005-command-hooks-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 005-command-hooks.patch.
+# version: authored against 2.1.260
+# depends: none
+# description: Appends __commandHooks custom commands to the builtin slash
+#              command table.
+#
+# WHERE IT MOVED: commands.js DOES NOT EXIST on a chunked tree. The builtin
+#   command table is inside services/compact/precomputedCompact.js (the 9.1 MB
+#   merged chunk), at the tail of the array builder, ~line 225390.
+#
+# ANCHOR: the monolithic patch keyed on `...remoteWebCommands,` — an ANCHORED
+#   name that DOES NOT RESOLVE on chunked trees (measured: zero occurrences of
+#   `remoteWebCommands` anywhere in the 2.1.260 tree). The replacement landmark
+#   is the STRING LITERAL in the same array, `...kJ('logout'),`, which is unique
+#   tree-wide; the `'logout'` literal survives minification, though the function
+#   wrapping it does not (it is `Qee` on 2.1.259 — measured), so that call
+#   appears only as CONTEXT and never on an added line.
+#
+# The added line introduces NO minified name: it references only
+#   globalThis.__commandHooks
+# and is inserted at the array tail, after the trailing `...[],` spreads, so it
+# cannot change the relative order of any upstream command.
+#
+# ⚠️ COVERAGE NOTE: this patch is exercised by no automated check here. A
+#   headless `-p` turn never renders the slash-command list, so a green turn
+#   test says nothing about it; it applies cleanly and is syntactically carried
+#   into the bundle, but "custom commands actually appear in the REPL menu" is
+#   BELIEVED, not verified.
+diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
+index c075166..ec2164f 100644
+--- a/services/compact/precomputedCompact.js
++++ b/services/compact/precomputedCompact.js
+@@ -225362,56 +225374,57 @@ function sss() {
+         nkt,
+         Msr,
+         Pkt,
+         bkt,
+         Tor(),
+         wor(),
+         kor,
+         bor,
+         Sor,
+         ...kJ('logout'),
+         JSt,
+         ...(WUe ? [WUe] : []),
+         ...(GUe ? [GUe] : []),
+         FSt,
+         Xrr,
+         ...[],
+         ...Zos,
+         Kor,
+         ...(Uir ? [Uir] : []),
+         Krr,
+         ...(Hir ? [Hir] : []),
+         iir,
+         ...(qpe ? [qpe] : []),
+         ...(Kkt ? [Kkt] : []),
+         ...(Ykt ? [Ykt] : []),
+         ...(Xkt ? [Xkt] : []),
+         ...lir,
+         ...[],
++        ...(globalThis.__commandHooks ? globalThis.__commandHooks.getCommands() : []),
+     ];
+ }
+ 
+ function CI() {
+     let e = yo();
+     return (
+         (e.builtinCommandNames ??= new Set(VUe().flatMap((n) => [n.name, ...(n.aliases ?? [])]))),
+         e.builtinCommandNames
+     );
+ }
+ 
+ function One() {
+     let e = yo();
+     return (
+         (e.shippedCommandNames ??= new Set([
+             ...CI(),
+             ...Sre().flatMap((n) => [n.name, ...(n.aliases ?? [])]),
+             ...jgn(),
+         ])),
+         e.shippedCommandNames
+     );
+ }
+ 
+ function hEe() {
+     return VUe();
+ }
+ 
+ async function iss(e, n) {

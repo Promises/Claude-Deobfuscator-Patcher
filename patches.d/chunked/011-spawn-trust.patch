@@ -1,0 +1,56 @@
+# patch: 011-spawn-trust-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 011-spawn-trust.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: CLAUDIVERSE_SKIP_TRUST=1 bypasses the first-run "trust this
+#              folder?" dialog so unattended spawns boot straight to the REPL.
+#
+# WHERE IT MOVED: utils/config.js does not carry this on a chunked tree; the
+#   chokepoint function is in entrypoints/sdk/coreSchemas.js as `$o`.
+#
+# STILL THE CHOKEPOINT (checked, not assumed): `$o` has 14 call sites in that
+#   file and is itself called by the `sj()` wrapper that the startup gates use,
+#   so returning true here short-circuits the dialog everywhere with one edit —
+#   the same property the monolithic patch relies on.
+#
+# SCOPING (security-critical, unchanged): the bypass fires ONLY when
+#   process.env.CLAUDIVERSE_SKIP_TRUST is set — a dedicated opt-in the spawner
+#   sets per instance. Absent it, the guard is a no-op and the original session-
+#   cache logic runs unchanged, so the trust dialog stays fully gated. It is the
+#   FIRST statement, so it short-circuits BEFORE the caching side effects and
+#   never writes trustAccepted into session state: nothing is persisted, nothing
+#   touches ~/.claude.json, and the override dies with the process.
+#
+# ANCHORING: the added lines reference ONLY `process.env`, a JS builtin — no
+#   minified name is introduced. The context line `if (e.trustAccepted) return !0;`
+#   was verified UNIQUE across the whole 2.1.260 tree, and `trustAccepted` /
+#   `setTrustAccepted` are property names, which minification preserves.
+#   The enclosing `$o` is minified but appears only in context.
+#
+# ⚠️ NOT EXERCISED BY THE TURN TEST (the test cwd is already trusted, and a
+#   headless `-p` run does not reach the interactive trust gate). Applying and
+#   bundling are VERIFIED; the live bypass is BELIEVED.
+diff --git a/entrypoints/sdk/coreSchemas.js b/entrypoints/sdk/coreSchemas.js
+index a62c4fb..9611530 100644
+--- a/entrypoints/sdk/coreSchemas.js
++++ b/entrypoints/sdk/coreSchemas.js
+@@ -29055,16 +29055,19 @@ function ehr(e) {
+     return Vzt.includes(e);
+ }
+ var Xur = ['allowedTools', 'hasTrustDialogAccepted'];
+ function jJe() {
+     Q().setTrustAccepted(!1);
+ }
+ 
+ function $o() {
++    try {
++        if (process.env.CLAUDIVERSE_SKIP_TRUST) return !0;
++    } catch (e) {}
+     let e = Q();
+     if (e.trustAccepted) return !0;
+     let n = Sde();
+     if (n) e.setTrustAccepted(!0);
+     return n;
+ }
+ 
+ function sj() {

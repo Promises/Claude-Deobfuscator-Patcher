@@ -140,8 +140,47 @@ export async function bundleChunked(
   const entry = findEntry(projectDir, mapping);
   console.log(`  entry: ${entry}`);
 
+  // Custom claudiverse modules must be made REACHABLE from the entry.
+  //
+  // On the monolithic path the reassembler concatenates every section, so a
+  // custom module is included merely by existing. Bundling is reachability-based:
+  // nothing in the upstream graph imports _custom/*, so bun drops them ENTIRELY
+  // and the hooks are absent from a binary that builds and runs perfectly.
+  //
+  // The fix is a generated entry that side-effect-imports each custom module
+  // BEFORE re-exporting the real one, so they are evaluated (publishing
+  // __sessionHooks / __claudiverse onto globalThis) before any CLI code runs.
+  // Written next to the real entry so its relative specifiers still resolve.
+  let entryPath = path.join(projectDir, entry);
+  const customDir = path.join(projectDir, "_custom");
+  if (fs.existsSync(customDir)) {
+    const customFiles = fs
+      .readdirSync(customDir)
+      .filter((f) => f.endsWith(".js"))
+      .sort();
+    if (customFiles.length > 0) {
+      const entryDir = path.dirname(entryPath);
+      const lines = customFiles.map((f) => {
+        const spec = path
+          .relative(entryDir, path.join(customDir, f))
+          .split(path.sep)
+          .join("/");
+        return `import '${spec.startsWith(".") ? spec : "./" + spec}';`;
+      });
+      const generated = path.join(entryDir, "_claudiverse_entry.js");
+      fs.writeFileSync(
+        generated,
+        lines.join("\n") + `\nimport './${path.basename(entryPath)}';\n`,
+      );
+      entryPath = generated;
+      console.log(
+        `  custom modules: ${customFiles.length} (side-effect imports prepended to entry)`,
+      );
+    }
+  }
+
   const result = await Bun.build({
-    entrypoints: [path.join(projectDir, entry)],
+    entrypoints: [entryPath],
     target: "bun",
     format: "esm",
     // The tree is already minified upstream; re-minifying only costs time and

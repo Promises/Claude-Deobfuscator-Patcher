@@ -1,0 +1,62 @@
+# patch: 003-interactive-inject-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 003-interactive-inject.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: Make remote_input work in the interactive Ink TTY REPL.
+#              The sidecar (002) injects via StructuredIO.prependUserMessage,
+#              which only the stream-json input loop drains — so injected prompts
+#              never execute in interactive mode. This registers
+#              globalThis.__claudiverseSubmit pointing at the live submit path.
+#
+# RE-ANCHORED ONTO A BETTER LANDMARK THAN THE MONOLITHIC PATCH HAD.
+#   The 2.1.238 hunk hung off `Sut = React_REPL.useRef(vse); Sut.current = vse;`
+#   inside the REPL component, and its own header flagged `Sut` as a minified
+#   name on an ADDED line — the dangerous case. That shape is GONE on chunked:
+#   the REPL component body is now React-Compiler output, a long run of
+#   `if (Vi[413] !== Uu.submit)` memo-cache slots where every local is an
+#   unanchorable minified name in a numbered slot. Re-contexting was not an
+#   option, so the hook was moved UPSTREAM to the owner of the submit path.
+#
+#   New site: class `PromptSubmitController`.bindHost(), which is the
+#   host-binding step the REPL performs on mount — the same lifecycle moment the
+#   old useEffect used, one layer closer to the submitter.
+#
+# ANCHOR QUALITY (better than the patch it replaces):
+#   The hunk's context contains the STRING LITERAL
+#     'PromptSubmitController used before its host was bound'
+#   which is unique across the whole tree and identical on 2.1.259 AND 2.1.260
+#   (measured on both). A string literal cannot be renamed by a minifier, so
+#   this hunk is anchored on something that does not drift with the bundler.
+#
+# 🔴 ONE MINIFIED NAME ON AN ADDED LINE: `Tb`.
+#   `Tb` is the shared no-op input-controls object
+#     var Tb = { setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} };
+#   i.e. exactly the literal the monolithic patch inlined by hand. It is used
+#   because this file ALREADY calls `this.submit(w, Tb)` in submitSurveyFollowUp,
+#   so the added line reproduces an existing in-tree call shape rather than
+#   inventing one. Mitigation is honest but PARTIAL: `this.submit` and the class
+#   are pinned by the string-literal context above, so a wrong binding cannot be
+#   a wrong SUBMITTER — but a future reassignment of `Tb` would silently pass the
+#   wrong options object. Inlining the literal instead would remove the last
+#   minified name; it is left as-is to match the file's own idiom, and flagged
+#   here rather than hidden.
+diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
+index dc1d67d..eeeb1d9 100644
+--- a/components/PromptInput/useSwarmBanner.js
++++ b/components/PromptInput/useSwarmBanner.js
+@@ -75509,12 +75513,15 @@ class Xie {
+     #t = null;
+     constructor(w) {
+         this.#e = w;
+     }
+     bindHost(w) {
+         this.#t = w;
++        try {
++            globalThis.__claudiverseSubmit = (__text) => this.submit(__text, Tb);
++        } catch (__e) {}
+     }
+     #o() {
+         if (!this.#t) throw Error('PromptSubmitController used before its host was bound');
+         return this.#t;
+     }
+     submit = async (w, H, ne) => {

@@ -311,7 +311,29 @@ var __claudiverse = (function() {
   };
 })();
 
+// Publish onto globalThis as well as the bare `var` — see the same note in
+// AAASessionHooks.js. On the CHUNKED format (2.1.242+) this file is its own ESM
+// module, so `var __claudiverse` is module-scoped and invisible to the patched
+// call sites in other chunks; those sites are `try`-guarded, so without this the
+// mirroring is silently absent. No-op on the monolithic path.
+try {
+  globalThis.__claudiverse = __claudiverse;
+} catch (e) {}
+
 // Register with session hooks (runs on first getSessionId call).
 // The hook passes Claude's own session UUID; we forward it to the server so a
 // reconnect reuses this session's row rather than creating another.
-try { __sessionHooks.push(function(sessionId) { __claudiverse.connect(sessionId); }); } catch(e) {}
+//
+// Reads __sessionHooks THROUGH globalThis with a bare-var fallback: this is a
+// CROSS-MODULE reference on the chunked format, where the other file's `var`
+// does not reach here. Ordering is not a concern in either format —
+// AAASessionHooks sorts first (AAA…) in the monolithic concat, and on the
+// chunked path both modules are imported by the entry before any hook can run.
+try {
+  var __cvHooks =
+    (typeof globalThis !== 'undefined' && globalThis.__sessionHooks) ||
+    (typeof __sessionHooks !== 'undefined' ? __sessionHooks : null);
+  __cvHooks.push(function (sessionId) {
+    __claudiverse.connect(sessionId);
+  });
+} catch (e) {}

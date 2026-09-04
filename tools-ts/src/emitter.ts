@@ -170,8 +170,20 @@ export function emitProject(
     JSON.stringify(mapping, null, 2)
   );
 
-  // Inject custom modules from patches.d/modules/ if present
-  const customModulesDir = path.join(path.dirname(outputDir), "patches.d", "modules");
+  // Inject custom modules from patches.d/modules/ if present.
+  //
+  // Resolved from THIS FILE's location, not from outputDir. The old form,
+  // `path.dirname(outputDir) + "/patches.d/modules"`, only worked while the
+  // deob tree sat inside patch-ref: with DEOB_DIR=/tmp/deob-260 it resolved to
+  // /tmp/patches.d/modules, which does not exist, so the custom modules were
+  // SILENTLY not copied. The tree then built and ran fine while every
+  // claudiverse hook was absent — the exact failure class the DEOB_DIR flag
+  // exists to support (materialising two versions side by side).
+  // CLAUDIVERSE_MODULES_DIR overrides for callers (the studio) that keep their
+  // modules elsewhere.
+  const customModulesDir =
+    process.env.CLAUDIVERSE_MODULES_DIR ||
+    path.resolve(__dirname, "..", "..", "patches.d", "modules");
   if (fs.existsSync(customModulesDir)) {
     const customFiles = fs.readdirSync(customModulesDir).filter((f) => f.endsWith(".js")).sort();
     let insertIdx = mapping.sections.findIndex((s) => s.type === "section");

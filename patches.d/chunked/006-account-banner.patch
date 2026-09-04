@@ -1,0 +1,42 @@
+# patch: 006-account-banner-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic trees keep using
+#         006-account-banner.patch, which is unchanged.
+# version: authored against 2.1.260
+# depends: none (the 004 multi-account half is deliberately NOT carried over --
+#          004 is disabled by operator decision, so the useSwarmBanner hunk that
+#          depended on __multiAccount is omitted here rather than shipped dead.)
+# description: getVersionSuffix() returns ' [claudiverse]' so every version
+#              readout is identifiably patched. This is the build's canary.
+#
+# VERSION-STRING-INDEPENDENT BY CONSTRUCTION (unchanged rationale): the hunk
+# edits the one-line BODY of getVersionSuffix rather than any template literal
+# embedding VERSION/BUILD_TIME/GIT_SHA, so a release bump does not by itself
+# invalidate it.
+#
+# WHERE IT MOVED: _preamble.js DOES NOT EXIST on a chunked tree (there is no
+# shared runtime preamble to carve off). getVersionSuffix survives as a tiny
+# standalone chunk that the CLI entry imports directly.
+#
+# 🔴 THE FILE PATH ITSELF IS VERSION-VARYING. The chunk is emitted as
+#   _unmatched/0003_Px.js on 2.1.260 and _unmatched/0003_dH.js on 2.1.259
+#   (MEASURED on both trees): the 0003 index is stable but the suffix is the
+#   chunk's minified export name. A path is not something `git apply` can
+#   fuzzy-match, so this patch is version-locked at the FILENAME level and a
+#   bump requires re-pointing it. Nothing in the hunk mitigates that; it is
+#   stated rather than hidden.
+#   What IS anchored: the retained context line `}.BUILD_REF_NAME,` is a
+#   build-CONSTANT key (not a build-varying value) and was verified UNIQUE
+#   across the whole 2.1.260 tree, so within the right file the hunk cannot
+#   land anywhere else. The added line introduces no identifier at all.
+diff --git a/_unmatched/0003_Px.js b/_unmatched/0003_Px.js
+index e02091f..59e624d 100644
+--- a/_unmatched/0003_Px.js
++++ b/_unmatched/0003_Px.js
+@@ -20,6 +20,6 @@ function Px(
+         DD_SOURCEMAP_GROUP: 'darwin',
+     }.BUILD_REF_NAME,
+ ) {
+-    return '';
++    return ' [claudiverse]';
+ }
+ export { Px };

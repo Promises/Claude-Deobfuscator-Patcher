@@ -723,8 +723,26 @@ var __multiAccount = (function () {
 })();
 
 // Register with session hooks for late init (secure storage, oauthAccount sync)
+//
+// GUARDED ON ITS OWN DEPENDENCIES, and reads __sessionHooks through globalThis.
+// This module is always emitted, but patch 004-multi-account-failover is
+// DISABLED, and getGlobalConfig/saveGlobalConfig are upstream symbols that only
+// 004 brings into scope here. On the monolithic format they were visible anyway
+// (one shared scope); on the CHUNKED format they are module-scoped in another
+// chunk, so this callback threw `ReferenceError: getGlobalConfig is not defined`
+// on EVERY session (observed 2026-09-04 in /tmp/claude-session-hooks.log).
+// runAll() isolates each callback, so the sidecar still connected — but it meant
+// a guaranteed exception on the foundation hook path for a switched-off feature.
+// `typeof` on an undeclared identifier is legal and yields "undefined", so this
+// test is itself safe. Registering only when the deps resolve keeps 004
+// revivable without shipping a hook that cannot run.
 try {
-  __sessionHooks.push(function () {
+  var __cvHooksMA =
+    (typeof globalThis !== 'undefined' && globalThis.__sessionHooks) ||
+    (typeof __sessionHooks !== 'undefined' ? __sessionHooks : null);
+  if (typeof getGlobalConfig === 'undefined' || typeof saveGlobalConfig === 'undefined')
+    throw new Error('multi-account deps absent (patch 004 disabled)');
+  __cvHooksMA.push(function () {
     __multiAccount.bindConfig(getGlobalConfig, saveGlobalConfig);
     __multiAccount.bindSecureStorage(
       function () { return U4().read(); },

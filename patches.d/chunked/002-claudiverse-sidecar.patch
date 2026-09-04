@@ -1,0 +1,102 @@
+# patch: 002-claudiverse-sidecar-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic trees keep using
+#         002-claudiverse-sidecar.patch, which is unchanged.
+# version: authored against 2.1.260
+# depends: 001
+# description: Sidecar hooks for structuredIO and query mirroring.
+#              prependUserMessage registers the StructuredIO instance; the query
+#              entrypoint mirrors each inner-loop message to __claudiverse while
+#              PRESERVING the loop's return value (the terminal `d`, consumed by
+#              the downstream reason handling). After a top-level turn drains
+#              (agentId absent, i.e. not a subagent) it emits a synthetic
+#              {type:"turn_complete"} marker.
+#
+# LOAD-BEARING SHAPE (do not "simplify") — carried over verbatim from the
+# monolithic patch, because the hazard is unchanged:
+#     The manual-iteration rewrite `while (!(__s = await __it.next()).done)` is
+#     deliberate. An earlier `for await (...) { yield ... }` attempt BROKE the
+#     generator protocol: the delegated return value was lost, so the terminal
+#     value came back undefined and the downstream reason handling faulted.
+#     Manual iteration is the only shape that both taps every yielded value and
+#     preserves `__s.value` on done. The ternary over the two loop generators is
+#     preserved verbatim as the iterator initializer.
+#
+# WHERE THE CODE MOVED (chunked format):
+#     query.js DOES NOT EXIST. bun's bundler merged the query driver into
+#     services/compact/precomputedCompact.js — a 9.1 MB chunk named after one of
+#     its many constituents. The hunk lands at ~line 182300 of that file.
+#     cli/structuredIO.js survived under its own name.
+#
+# 🔴 MINIFIED NAMES ON CONTEXT LINES — UNAVOIDABLE, AND MITIGATED.
+#     The `query` anchor chain does not resolve on chunked trees, so the
+#     entrypoint is `EM` on 2.1.260 (MEASURED: it is `aN` on 2.1.259, and the
+#     loop generators/notifier differ too — Rae/Y4o/I6n/Fue here vs
+#     Yce/C5o/$qn/ope there). This patch is therefore version-locked and a bump
+#     WILL require re-authoring; that is a property of the tree, not a shortcut.
+#     ⚠️ NOTE the tree's own _renames.json maps "EM" -> "notifySubagentLifecycle",
+#     which is WRONG — EM is the query entrypoint and the lifecycle notifier is
+#     Fue. The mapping is inert (it is not applied to this chunk), but it is a
+#     standing trap for anyone who trusts that file instead of reading the code.
+#
+#     Mitigation: the hunk is emitted with -U10 so BOTH the defining line
+#     `async function* EM(e) {` AND the anchored string literal 'subagent_exit'
+#     sit in CONTEXT. Every minified name is context; the only names introduced
+#     on added lines are globalThis.__claudiverse and the __-prefixed locals.
+#     So a rename of the entrypoint, its parameter or the notifier makes this
+#     FAIL TO APPLY rather than apply-and-silently-stop-mirroring.
+#
+# WHY globalThis: see 001. The custom module's `var` is module-scoped in an ESM
+# graph and would be silently undefined at these try-guarded call sites.
+diff --git a/cli/structuredIO.js b/cli/structuredIO.js
+index 1fc20f4..b867807 100644
+--- a/cli/structuredIO.js
++++ b/cli/structuredIO.js
+@@ -629,6 +629,9 @@ class Xie {
+     }
+     repliesLeftForNextProcess = 0;
+     prependUserMessage(n) {
++        try {
++            globalThis.__claudiverse.setStructuredIO(this);
++        } catch (__e) {}
+         (this.prependedLines.push(
+             S({
+                 type: 'user',
+diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
+index c075166..ec2164f 100644
+--- a/services/compact/precomputedCompact.js
++++ b/services/compact/precomputedCompact.js
+@@ -182294,21 +182294,33 @@ function K4o(e, n) {
+ `)
+         : void 0;
+ }
+ 
+ async function* EM(e) {
+     let n = [],
+         r = performance.now(),
+         o = [],
+         d;
+     try {
+-        d = yield* Rae() ? Y4o(e, n, o) : I6n(e, n, o);
++        let __it = Rae() ? Y4o(e, n, o) : I6n(e, n, o),
++            __s;
++        while (!(__s = await __it.next()).done) {
++            try {
++                globalThis.__claudiverse.mirrorMessage(__s.value);
++            } catch (__e) {}
++            yield __s.value;
++        }
++        d = __s.value;
++        try {
++            if (!e.toolUseContext.agentId)
++                globalThis.__claudiverse.mirrorMessage({ type: 'turn_complete' });
++        } catch (__e) {}
+     } finally {
+         let _ = e.toolUseContext.agentId;
+         if (_)
+             Fue(
+                 e.toolUseContext.session.precompute,
+                 _,
+                 'subagent_exit',
+                 e.querySource,
+                 e.toolUseContext.storageV5,
+             );

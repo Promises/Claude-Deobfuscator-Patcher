@@ -1,0 +1,73 @@
+# patch: 007-remote-answer-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 007-remote-answer.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: globalThis.__claudiverseAnswer / __claudiverseDecline /
+#              __claudiverseListQuestions, so a permission / ask-user-question
+#              dialog can be answered remotely by the sidecar.
+#
+# SAME STRUCTURE AS THE MONOLITHIC PATCH, RE-CONTEXTED (not re-designed):
+#   services/dialogs/dialogStore.js SURVIVES under its own name on chunked, and
+#   the store is still a factory that builds an object of methods and returns it.
+#   The hook is installed on the last statement before that return, so the
+#   closure captures the finished store.
+#   The store local is `v` here (it was `r` on 2.1.238) — a minified name, but it
+#   appears on added lines ONLY as the object the hunk was generated against, and
+#   the immediately preceding CONTEXT line `dismissKind(w) { ... v.dismiss(T.id); }`
+#   pins `v` to the store itself: that line both names `v` and proves it is the
+#   object owning dismiss/answer. A rename therefore fails the apply.
+#   The kind discriminator 'permission_ask_user_question' is a STRING LITERAL and
+#   is the real semantic anchor; it is unchanged from the monolithic patch.
+#
+# The catch binding is `__e` (the monolithic patch used `e2`): `e` is not in
+# scope here, but __-prefixing every introduced binding is the convention used
+# across the chunked patch set so an added local can never shadow a captured one.
+#
+# ⚠️ COVERAGE NOTE: not exercised by the turn test — a headless `-p` run opens no
+#   permission dialog. Applying cleanly is VERIFIED; "answers a live dialog" is
+#   BELIEVED, and is the same code path the 2.1.238 fleet has been running.
+diff --git a/services/dialogs/dialogStore.js b/services/dialogs/dialogStore.js
+index 8f3b695..8096c03 100644
+--- a/services/dialogs/dialogStore.js
++++ b/services/dialogs/dialogStore.js
+@@ -3087,8 +3087,40 @@ function go() {
+             dismissKind(w) {
+                 for (let T of o.getState().open) if (T.kind === w) v.dismiss(T.id);
+             },
+         };
++    try {
++        var __cvOpen = function () {
++            return v.getState().open.filter((d) => d && d.kind === 'permission_ask_user_question');
++        };
++        var __cvPick = function (toolUseId) {
++            var open = __cvOpen();
++            return toolUseId
++                ? open.find((d) => d.payload && d.payload.requestId === toolUseId)
++                : open[open.length - 1];
++        };
++        globalThis.__claudiverseListQuestions = function () {
++            return __cvOpen().map((d) => ({
++                toolUseId: d.payload && d.payload.requestId,
++                questions: d.payload && d.payload.questions,
++            }));
++        };
++        globalThis.__claudiverseAnswer = function (toolUseId, answerPayload) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            v.answer(req.id, {
++                behavior: 'allow',
++                updatedInput: Object.assign({}, req.payload.input, answerPayload),
++            });
++            return true;
++        };
++        globalThis.__claudiverseDecline = function (toolUseId) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            v.answer(req.id, { behavior: 'deny' });
++            return true;
++        };
++    } catch (__e) {}
+     return v;
+ }
+ 
+ function ts(o, n) {

@@ -307,7 +307,32 @@ elif [ -d "$SCRIPT_DIR/patches.d" ]; then
     cd "$DEOB"
     git init -q && git add -A && git commit -q -m "baseline" 2>/dev/null
 
-    for patch in "$SCRIPT_DIR/patches.d"/*.patch; do
+    # PATCH SET IS SELECTED BY TREE FORMAT, and the two sets are disjoint.
+    #
+    # A hunk's target FILE has to exist for it to apply, and the two formats do
+    # not share one. query.js, screens/REPL.js and _preamble.js exist only in a
+    # monolithic tree; on a chunked tree that code lives inside merged chunks
+    # (services/compact/precomputedCompact.js holds query's, and
+    # bootstrap/sessionState.js survives in NAME only, as a re-export barrel with
+    # no function bodies). So a chunked patch is a re-authoring, not a path fix,
+    # and the monolithic patches in patches.d/*.patch are left untouched — they
+    # are what the live 2.1.238 fleet binary is built from.
+    #
+    # Same $FORMAT the rest of the script dispatches on, which is MEASURED from
+    # the source in step 1, never inferred from a version number.
+    if [ "$FORMAT" = "chunked" ]; then
+        PATCH_DIR="$SCRIPT_DIR/patches.d/chunked"
+        echo "  patch set: patches.d/chunked/ (chunked tree)"
+        if [ ! -d "$PATCH_DIR" ]; then
+            echo "🔴 No patches.d/chunked/ — refusing to build an unpatched binary."
+            exit 1
+        fi
+    else
+        PATCH_DIR="$SCRIPT_DIR/patches.d"
+        echo "  patch set: patches.d/ (monolithic tree)"
+    fi
+
+    for patch in "$PATCH_DIR"/*.patch; do
         [ -f "$patch" ] || continue
         echo "  Applying $(basename "$patch")..."
         # --check first so a partially-applied multi-hunk patch cannot leave the
