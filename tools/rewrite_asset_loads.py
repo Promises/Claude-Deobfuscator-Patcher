@@ -258,16 +258,43 @@ def rewrite_file(path, assets_dir, available, text_asset, coercers):
         # ⚠️ `-p` did NOT catch this. That path reads no asset, so a green
         # `-p 'reply with exactly: OK'` exercised ZERO of the asset lane — the
         # check that proved the turn works is blind to this whole class.
-        # import.meta.dir is `/$bunfs/root` in a compiled binary, so the retry
-        # lands there. The direct read is tried first so an absolute path (dev
-        # runs, tests) keeps working unchanged, and a non-ENOENT error is
-        # re-thrown rather than being masked by the fallback.
+        # import.meta.dir is `/$bunfs/root` in a compiled binary, so that read
+        # serves from the BUNDLE. It is deliberately FIRST — see below.
+        #
+        # 🔴 THE BUNDLE IS TRIED BEFORE THE LITERAL PATH, AND THE ORDER IS THE
+        # WHOLE POINT. This was the other way round, and that ordering is what
+        # let a build-input defect ship while every test reported success.
+        #
+        # `p` is the RELATIVE specifier a `with { type: "file" }` import yields
+        # (`./visual_plan-169gvcqt.txt`), and readFileSync resolves a relative
+        # path against process.cwd(). So consulting it first means: any cwd that
+        # happens to hold a copy satisfies the read, the bundle is never
+        # exercised, and an asset MISSING FROM THE BUNDLE is invisible.
+        #
+        # MEASURED 2026-09-04, and this is not hypothetical — it shipped:
+        # `claude-260-patched` passed every check from `patch-ref/` (where the
+        # build's own sidecar copies sit) and died from any other cwd with
+        #   ENOENT: open '/$bunfs/root/loopAutonomousPreamble-07qcyhv4.md'
+        # Exactly 7 assets were genuinely unembedded; the cwd-first order hid all
+        # 7 in the one directory the build is developed in, and cv-runner.mjs
+        # launches every fleet worker with --workdir <git worktree>, i.e. never
+        # that directory.
+        #
+        # Bundle-first inverts the failure mode: a missing build input now fails
+        # in EVERY cwd, including the build directory, so it cannot be masked by
+        # a stray local copy. The literal path is kept as the fallback so an
+        # ABSOLUTE path still works for dev runs and tests, and a non-ENOENT
+        # error is re-thrown rather than swallowed by the retry.
+        #
+        # ⚠️ Note `-p 'reply with exactly: OK'` reads NO asset, so it is green
+        # while this entire lane is broken. Exercising an asset path requires a
+        # module that actually loads one; see the probe described in the commit.
         "const __cvReadAsset = (p) => {",
         "  let b;",
-        "  try { b = __cvReadFileSync(p); }",
+        "  try { b = __cvReadFileSync(import.meta.dir + '/' + String(p).replace(/^.*\\//, '')); }",
         "  catch (e) {",
         "    if (e && e.code !== 'ENOENT') throw e;",
-        "    b = __cvReadFileSync(import.meta.dir + '/' + String(p).replace(/^.*\\//, ''));",
+        "    b = __cvReadFileSync(p);",
         "  }",
         "  const z = b.length >= 4 && b[0] === 40 && b[1] === 181"
         " && b[2] === 47 && b[3] === 253;",
