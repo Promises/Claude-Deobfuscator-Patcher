@@ -281,8 +281,78 @@ var __claudiverse = (function() {
 
   // --- Public API ---
 
+  // --- cvstate fallback heartbeat -------------------------------------------
+  //
+  // WHY HERE AND NOT IN THE REPL. Patch 010 emits {type:"cvstate"} every ~3s
+  // from inside the REPL, reading four locals (status, isLoading, messageQueue,
+  // tasks). On the CHUNKED format (2.1.242+) those are minified names inside
+  // numbered React-Compiler memo-cache slots with nothing semantic to key on, so
+  // 010 is NOT PORTED there — see patches.d/chunked/README.md. That matters
+  // because server room.ex has exactly TWO paths to Router.went_idle: patch
+  // 008's "idle" event (:377) and 010's cvstate reconcile (:311). With 010 gone
+  // a missed idle frame never clears — the seat stays busy, cv_send
+  // (reject-busy) bounces forever, and cv_status cannot diagnose it because
+  // polling makes the CALLER busy. Unrecoverable without a restart.
+  //
+  // This module is OUR code, so it carries ZERO minified names and cannot drift
+  // with a release.
+  //
+  // 🔴 IT IS NOT EQUIVALENT TO 010, AND THAT DIFFERENCE IS THE POINT:
+  //   010  COMPUTES idle from REPL state -> heals a missed EMISSION *and* a lost
+  //                                         message.
+  //   this RE-ASSERTS the last SEEN idle -> heals a LOST MESSAGE only. If patch
+  //                                         008 never fired at all, there is
+  //                                         nothing to re-assert and this stays
+  //                                         silent.
+  // It closes the transport half of the gap, not the emission half. Do NOT
+  // record it as "010 ported".
+  //
+  // TASKS ARE DELIBERATELY OMITTED. 010 carries a task snapshot; nothing here
+  // can see one. The server defaults the field to [] and log_task_change
+  // (room.ex:326) explicitly does NOT record an event when tasks are empty and
+  // were already empty — so omitting is BLIND, never a false "tasks changed".
+  // Asserting a fabricated task list would be exactly the lying-heartbeat hazard
+  // that got 010 declined, and a false healthy is worse than a visible absence.
+  var cvIdle = false;
+  var foreignCvstateAt = 0;
+  var emittingOwnCvstate = false;
+  var cvstateTimer = null;
+
+  // Self-configuring: if something else (patch 010, on the monolithic build) is
+  // already supplying cvstate we SEE it here and stand down, so no flag has to
+  // pass between the patch and this module and the same file is correct on both
+  // formats.
+  function noteMirrored(msg) {
+    if (!msg || typeof msg !== "object") return;
+    if (msg.type === "cvstate") {
+      if (!emittingOwnCvstate) foreignCvstateAt = Date.now();
+      return; // never let a heartbeat flip the flag it is reporting
+    }
+    cvIdle = msg.type === "idle";
+  }
+
+  function startCvstateFallback() {
+    if (cvstateTimer) return;
+    cvstateTimer = setInterval(function () {
+      try {
+        // A real REPL heartbeat beats every ~3s; 10s of silence means none.
+        if (Date.now() - foreignCvstateAt < 10000) return;
+        emittingOwnCvstate = true;
+        mirrorMessage({ type: "cvstate", idle: cvIdle });
+      } catch (e) {
+      } finally {
+        emittingOwnCvstate = false;
+      }
+    }, 3000);
+    // Must never hold the process open.
+    if (cvstateTimer && typeof cvstateTimer.unref === "function") {
+      cvstateTimer.unref();
+    }
+  }
+
   function mirrorMessage(msg) {
     if (!TOKEN) return;
+    noteMirrored(msg);
     if (!connected && !connecting) autoConnect();
     if (channelJoined) {
       pushChannel("mirror_messages", { messages: [msg] });
@@ -302,6 +372,7 @@ var __claudiverse = (function() {
   function isConnected() { return connected; }
 
   if (TOKEN) log("Token found, will connect on first message");
+  if (TOKEN) startCvstateFallback();
 
   return {
     connect: autoConnect,
