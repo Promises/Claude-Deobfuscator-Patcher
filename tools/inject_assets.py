@@ -46,6 +46,34 @@ ASSET_REF_RE = re.compile(
     r"/\$bunfs/root/([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst))"
 )
 
+# The SAME asset after step 4's bundle has consumed its file import.
+#
+# 🔴 THE `/$bunfs/root/` PREFIX IS NOT PRESENT ON EVERY ASSET REFERENCE — THAT
+# WAS THE BUG. This tool ran on the bundle and matched with ASSET_REF_RE alone,
+# which keys on that prefix. But step 2.4 (rewrite_asset_loads.py) replaces the
+# `ve('/$bunfs/root/x.md')` CALL with a real
+#     import __cvAssetN from '<dir>/x.md' with { type: "file" };
+# and step 4's `bun build --target=bun` then RESOLVES that import, emitting the
+# payload as a SIDECAR file next to the bundle and collapsing the binding to a
+# bare relative string:
+#     var loopAutonomousPreamble_07qcyhv4_default = "./loopAutonomousPreamble-07qcyhv4.md";
+# By the time this tool sees the bundle there is no `/$bunfs/root/` text and no
+# import left, so `referenced` missed all of them, `inject` was empty for this
+# class, and step 5 had nothing to embed.
+#
+# MEASURED on the shipped claude-260-patched: 80 assets appear ONLY in this
+# relative form and 0 of 83 loose assets had their bytes in the binary. The
+# binary still worked when launched from patch-ref/ purely because the sidecars
+# step 4 wrote sit there, so `readFileSync("./x.md")` resolved against the CWD —
+# from any other directory it died with ENOENT on the retry path.
+#
+# Matching the `= "./<name>"` ASSIGNMENT form specifically, not any occurrence
+# of the name: a bare filename is far too weak a signal to key an embed on, and
+# this is the exact shape bun emits for a consumed file import.
+BUNDLED_ASSET_REF_RE = re.compile(
+    r"""=\s*["']\./([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst|mjs))["']"""
+)
+
 # `<loader>(<var>, import.meta.dirname)` -- the EAGER loader. A miss here is
 # fatal at module-init time, which is the failure this tool exists to clear.
 #
@@ -188,7 +216,12 @@ def main():
         return
 
     available = set(os.listdir(args.assets)) if os.path.isdir(args.assets) else set()
-    referenced = set(ASSET_REF_RE.findall(source))
+    # BOTH reference forms. See BUNDLED_ASSET_REF_RE: an asset whose file import
+    # step 4 already consumed no longer carries the `/$bunfs/root/` prefix, and
+    # keying on that prefix alone is what silently shipped an unembedded binary.
+    bunfs_refs = set(ASSET_REF_RE.findall(source))
+    bundled_refs = set(BUNDLED_ASSET_REF_RE.findall(source))
+    referenced = bunfs_refs | bundled_refs
     eager = eager_assets(source)
 
     # 🔴 CONTROL: an EMPTY eager set is not a clean bill of health.
@@ -219,6 +252,31 @@ def main():
             "produce a binary that fails on the first turn."
         )
 
+    # 🔴 CONTROL: a bundled-form reference is ALWAYS a must-embed.
+    #
+    # An asset in this form got there because step 2.4 rewrote its load into a
+    # real file import and step 4 then consumed it, leaving `readFileSync` on a
+    # CWD-relative path. Unlike the `/$bunfs/root/` population — where a
+    # non-recovered asset is legitimately lazy and correctly skipped — there is
+    # no benign reason for one of these to go un-injected: the code WILL read it
+    # off disk relative to wherever the user happened to launch the binary.
+    #
+    # Fatal rather than a warning because the symptom is invisible from the
+    # build directory (the step-4 sidecars sit there and mask it) and only
+    # appears as an ENOENT for users running from anywhere else — which is
+    # exactly how this shipped in a binary that had been called verified.
+    unembeddable = sorted(bundled_refs - available)
+    if unembeddable:
+        raise SystemExit(
+            f"{len(unembeddable)} asset(s) are referenced by a bundle-relative "
+            "path but were not recovered: "
+            + ", ".join(unembeddable[:10])
+            + ("..." if len(unembeddable) > 10 else "")
+            + f"\n(looked in {args.assets}) -- these cannot fall back to a lazy "
+            "load; the binary would read them from the CWD and fail for any "
+            "user not standing in the build directory."
+        )
+
     inject = sorted(referenced & available)
     if not inject:
         print("  no recovered assets match this bundle; nothing to inject")
@@ -243,6 +301,15 @@ def main():
     print(
         f"  injected {len(inject)} asset imports "
         f"({len(eager)} of them eagerly loaded, all present)"
+    )
+    # Reported separately because the two populations have DIFFERENT failure
+    # modes, and collapsing them is what hid this bug: a missing bunfs-form
+    # asset is a lazy path that may never run, while a missing bundled-form one
+    # is an unconditional CWD-relative read.
+    print(
+        f"    {len(bundled_refs)} from bundle-relative specifiers "
+        f"(file imports consumed by step 4), "
+        f"{len(bunfs_refs)} from /$bunfs/root/ paths"
     )
     unreferenced = sorted(referenced - available)
     if unreferenced:
