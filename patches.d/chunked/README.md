@@ -117,3 +117,35 @@ that is exactly the failure 010 exists to self-heal, and cv_send DOES trust it.
 ⚠️ NO AMOUNT OF SURFACE TESTING FINDS THIS. A live seat can only exercise what is
 compiled in; a missing patch is an ABSENCE. It was found by diffing the applied
 patch sets, not by driving the binary.
+
+
+## 9 ASSETS SHIP UTF-16LE WITH NO BOM — PRE-EXISTING UPSTREAM, NOT A 260 REGRESSION
+
+⛔ DO NOT REDISCOVER THESE AS A CHUNKED-FORMAT DEFECT. 2.1.238 HAS THEM TOO.
+
+Found by driving the bundled skills (dataviz, claude-api), not by any presence
+check — this is a CONTENT defect and every test we run passes on it: the asset is
+present, loads without error, and is then mangled by every byte-wise reader. No
+BOM, so nothing auto-detects it.
+
+Known members include anti-patterns.md, choosing-a-form.md, color-formula.md,
+components.md, marks-and-anatomy.md (dataviz), two files inside the claude-api
+bundle, and SKILL-8zd8x5rj.md.
+
+CAUSATION, four independent checks — our pipeline is INNOCENT:
+ 1. patched3's dataviz extraction vs the pre-patched3 extraction: byte-for-byte
+    IDENTICAL, same 5 files defective in both.
+ 2. The loose copies in patch-ref/ are ALSO UTF-16LE (hexdump: 23 00 20 00 ...),
+    so the encoding predates the embedding fix.
+ 3. Those loose copies DIFFER in length from the bundle output — consistent with
+    older snapshots of the same upstream asset, not with us rewriting anything.
+ 4. tools/extract_assets.py writes asset["bytes"], the ORIGINAL chunk;
+    decode_member() exists only to produce text for MATCHING and its result is
+    never written. The extractor deliberately preserves the encoding.
+=> The UTF-16LE encoding is in the UPSTREAM binary. File it as an upstream
+   product defect. It is not in scope for the asset-embedding work and is not a
+   reason to hold a migration.
+
+⚠️ The instance we predicted was a DIFFERENT one (source-kit.mjs-51mswsdh.txt, a
+mis-attribution). The warning did not predict this; the CATEGORY did —
+presence != content, and an asset census only ever measures presence.
