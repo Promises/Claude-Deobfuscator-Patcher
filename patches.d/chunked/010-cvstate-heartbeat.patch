@@ -114,6 +114,27 @@
 # ⚠️ NOT EXERCISED BY THE HEADLESS TURN TEST (no REPL). Applying is VERIFIED
 #   (git apply --check, with a corrupted-token positive control that FAILS).
 #   Live cvstate emission is BELIEVED, not measured.
+#
+# 🔴 CALLS qc(), NOT useMessageQueue(), AND THAT IS DELIBERATE.
+#   The anchor rule resolves qc -> useMessageQueue at 100%%, but the rename does
+#   NOT LAND in components/PromptInput/useSwarmBanner.js: the definition stays
+#   `function qc()` in _unmatched/0390_qye.js and this file still imports `qc`.
+#   MEASURED: after a full build, `useMessageQueue` appeared in exactly ONE file
+#   -- this patch's own inserted line -- and nowhere else. So the binding does
+#   not exist at the call site and the REPL died with
+#     Claude Code exited after an unrecoverable interface error
+#     (useMessageQueue is not defined)
+#   while `-p` passed, because -p never mounts the REPL.
+#   ⚠️ I VERIFIED THE WRONG THING EARLIER: I grepped the built tree for
+#   `useMessageQueue`, found it, and called the hazard closed -- but the hit WAS
+#   my own patch text. A name being present is not the same as the name being
+#   BOUND, and a grep cannot tell those apart.
+#   Using the minified name here is the honest trade: it is on an ADDED line, so
+#   if `qc` drifts this fails at RUNTIME rather than at apply time. The context
+#   line above it carries the anchored names, so the hunk still fails LOUDLY on
+#   structural drift. Revert to useMessageQueue() once the cross-chunk rename
+#   actually lands.
+#
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
 index 39d277a..e77156c 100644
 --- a/components/PromptInput/useSwarmBanner.js
@@ -122,7 +143,7 @@ index 39d277a..e77156c 100644
              (cx[37] = WOo));
      else (($Oo = cx[36]), (WOo = cx[37]));
      (E($Oo, WOo), YVe(IQr, replStatusForActivity, EQr));
-+    let __cvQueue = useMessageQueue();
++    let __cvQueue = qc();
 +    E(() => {
 +        let __cvHb = setInterval(() => {
 +            try {

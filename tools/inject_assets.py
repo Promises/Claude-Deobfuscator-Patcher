@@ -42,8 +42,21 @@ import sys
 
 # Any `/$bunfs/root/<name>` naming a non-JS asset. `.js` entries are chunk
 # specifiers and are handled by the module graph, not by this tool.
+#
+# `.asset` is in the list because omitting it made `/design` DISCOVERABLE BUT
+# UNUSABLE. `payload.template.html.asset` is the design canvas editor payload;
+# the skill's own SKILL.md resolved, so the command was advertised and
+# selectable, and only on invocation did it die with
+# `editor payload unreadable at /$bunfs/root/payload.template.html.asset`.
+# Nothing warned earlier: it is loaded by the ASYNC loader (see
+# LOADER_BODY_TOKEN below), so it is correctly absent from the eager set and the
+# must-be-present check has no reason to fire on it.
+#
+# It is a zstd payload despite the extension -- extract_assets.py routes it into
+# the COMPRESSED population and writes the raw frame -- so the bytes injected
+# here are what `await Bun.zstdDecompress` expects, matching every `.zst` asset.
 ASSET_REF_RE = re.compile(
-    r"/\$bunfs/root/([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst))"
+    r"/\$bunfs/root/([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst|asset))"
 )
 
 # The SAME asset after step 4's bundle has consumed its file import.
@@ -71,7 +84,7 @@ ASSET_REF_RE = re.compile(
 # of the name: a bare filename is far too weak a signal to key an embed on, and
 # this is the exact shape bun emits for a consumed file import.
 BUNDLED_ASSET_REF_RE = re.compile(
-    r"""=\s*["']\./([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst|mjs))["']"""
+    r"""=\s*["']\./([A-Za-z0-9_.\-]+\.(?:md|txt|node|zst|mjs|asset))["']"""
 )
 
 # `<loader>(<var>, import.meta.dirname)` -- the EAGER loader. A miss here is

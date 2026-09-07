@@ -419,8 +419,41 @@ def extract(binary_path):
             reach = off + length
     frames = top
 
+    # `.asset` is a COMPRESSED member despite carrying no `.zst` suffix.
+    #
+    # MEASURED on 2.1.260 AND 2.1.263 -- `payload.template.html.asset` (the
+    # `/design` skill's editor payload) was claimed by NO pass at all: the text
+    # walk never emits a body for it, and it was explicitly excluded from the
+    # positional pass, so it fell out of every population and `/design` shipped
+    # DISCOVERABLE BUT UNUSABLE, dying at ENOENT on first invocation.
+    #
+    # The name's own extension is what misled the split. Routing it here is not
+    # a guess -- it is forced by a COUNT THAT COULD HAVE STAYED WRONG AND DID
+    # NOT. Both builds hold 107 top-level zstd frames in the asset region but
+    # only 106 `.zst`/`.min.js` names, a surplus of exactly one; adding this one
+    # name closes it exactly (107 == 107) on BOTH. Had `.asset` been stored
+    # plainly, the counts would now disagree and `extract` would refuse to emit
+    # a mapping rather than pair anything.
+    #
+    # The resulting pairing is corroborated three independent ways, none of them
+    # the count that motivated it:
+    #   * NEIGHBOURS -- it lands at compressed index 55 on both builds, directly
+    #     after `SKILL-59d7da6d.md.zst` (whose body is the `name: design` skill
+    #     front-matter) and directly before `seed-canvas.mjs-a5d6a8af.txt.zst`
+    #     ("Design-canvas seeding helper"). The design skill's three files are
+    #     contiguous in the pool, and the payload lands inside its own cohort.
+    #   * CONTENT -- the body is a 2,488,483-byte `<!doctype html>` document
+    #     whose second line of prose reads "DESIGN CANVAS APPIFACT".
+    #   * CROSS-VERSION -- 2.1.260 and 2.1.263 independently yield the same
+    #     index, the same neighbours and a byte-identical payload.
+    #
+    # Content alone would NOT have been safe here and was not relied on: two
+    # frames in the region decompress to full HTML documents (the other belongs
+    # to `template.html-1461d319.txt.zst`), so an "it looks like HTML" rule is a
+    # coin flip. The position is what discriminates; the content only checks it.
     compressed_names = [
-        n for n in names if n.endswith(".zst") or n.endswith(".min.js")
+        n for n in names
+        if n.endswith(".zst") or n.endswith(".min.js") or n.endswith(".asset")
     ]
     plain_names = [n for n in names if n not in set(compressed_names)]
 
@@ -820,6 +853,15 @@ def extract(binary_path):
     # self-check correctly reported 6/7 DISAGREE. Excluding them restores 7/7.
     # This is exactly the "sequences do NOT correspond one-to-one" hazard the
     # comment above blob_start records; the self-check is what detects it.
+    #
+    # ⚠️ The `.asset` half of that exclusion is now DEAD CODE, and deliberately
+    # kept as a belt-and-braces guard rather than a live filter: `.asset` names
+    # are routed into `compressed_names` above, so they never reach
+    # `plain_text_names` at all. Excluding them here too costs nothing and keeps
+    # this pass correct if a future build stores one plainly. The observation
+    # the comment records -- that leaving a non-member name in SHIFTS every
+    # later index -- is what made the misrouting detectable in the first place,
+    # so it stays on the record.
     positional_names = [
         n for n in plain_text_names if not n.endswith((".js", ".asset"))
     ]
