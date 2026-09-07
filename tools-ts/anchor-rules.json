@@ -1,11 +1,11 @@
 [
   {
-    "__note_chunked_export_maps": "The two rule pairs below exist because the CHUNKED bundle format (2.1.242+) moved where the original names live. On a monolithic build, `utils/auth.js` etc. each carry a big `RealName: () => minifiedId` map, which is why FOUR export_map rules produce 673 of that tree's 725 renames. In a chunked build those per-module maps are gone from the anchor modules — the anchors' own files export via a bare ESM `export { minified, ... }` list, which carries NO original names at all (measured: 1,189 names in entrypoints/sdk/coreSchemas.js, none recoverable). Name-carrying maps DO still exist, but in DIFFERENT files. Measured strict `key: () => bareIdentifier` pairs sitting in a file that also has a function-valued entry (the only shape findExportMapObject can anchor on): 3,074 on 2.1.238, 1,966 on 2.1.259, 312 on 2.1.260. So the recovery route on chunked trees is to anchor the files that still hold such a map. Each rule below was authored against a PRE-RENAME tree (STOP_AFTER_STEP=2.5) and verified on BOTH 2.1.259 and 2.1.260.",
-    "__note_export_map_collision_hazard": "An export_map walk binds the FIRST object literal containing `<key>: () => <anchorName>`, matching on the anchor's MINIFIED name. In files where the minifier reuses a short name heavily this is a real mis-binding hazard, not a theoretical one: in components/PromptInput/useSwarmBanner.js the anchor `userFacingName` minifies to `ne`, and `ne` occurs as an arrow body ~10 times in that file for entirely unrelated values. That candidate was DROPPED rather than shipped — it happened to fail closed, but it could as easily have bound the wrong map. Before adding a rule here, check that the anchor's minified target is used as a map value exactly ONCE (`=> <name>` followed by , } or whitespace)."
+    "__note_chunked_export_maps": "The two rule pairs below exist because the CHUNKED bundle format (2.1.242+) moved where the original names live. On a monolithic build, `utils/auth.js` etc. each carry a big `RealName: () => minifiedId` map, which is why FOUR export_map rules produce 673 of that tree's 725 renames. In a chunked build those per-module maps are gone from the anchor modules \u2014 the anchors' own files export via a bare ESM `export { minified, ... }` list, which carries NO original names at all (measured: 1,189 names in entrypoints/sdk/coreSchemas.js, none recoverable). Name-carrying maps DO still exist, but in DIFFERENT files. Measured strict `key: () => bareIdentifier` pairs sitting in a file that also has a function-valued entry (the only shape findExportMapObject can anchor on): 3,074 on 2.1.238, 1,966 on 2.1.259, 312 on 2.1.260. So the recovery route on chunked trees is to anchor the files that still hold such a map. Each rule below was authored against a PRE-RENAME tree (STOP_AFTER_STEP=2.5) and verified on BOTH 2.1.259 and 2.1.260.",
+    "__note_export_map_collision_hazard": "An export_map walk binds the FIRST object literal containing `<key>: () => <anchorName>`, matching on the anchor's MINIFIED name. In files where the minifier reuses a short name heavily this is a real mis-binding hazard, not a theoretical one: in components/PromptInput/useSwarmBanner.js the anchor `userFacingName` minifies to `ne`, and `ne` occurs as an arrow body ~10 times in that file for entirely unrelated values. That candidate was DROPPED rather than shipped \u2014 it happened to fail closed, but it could as easily have bound the wrong map. Before adding a rule here, check that the anchor's minified target is used as a map value exactly ONCE (`=> <name>` followed by , } or whitespace)."
   },
   {
     "id": "inkTextPropsOf",
-    "description": "Anchor for the design-system export map. Keyed on inkTextPropsOf's body — it sets `.bold = !0` then bails on a non-string and splits on ';' — which is measured tree-unique on both 2.1.259 and 2.1.260. Chosen from the SEVEN keys whose export-map target is a function declaration on BOTH versions (heldFor, inkTextPropsOf, rebuild, useEngineDrew, useRenderAnswer, useRenderDrawing, withHexColors); PressButton was rejected because it is a function declaration on 2.1.260 but not on 2.1.259, so a rule keyed on it would silently cover only one version. Its minified target is used as a map value exactly once on each version, so the collision hazard noted above does not apply.",
+    "description": "Anchor for the design-system export map. Keyed on inkTextPropsOf's body \u2014 it sets `.bold = !0` then bails on a non-string and splits on ';' \u2014 which is measured tree-unique on both 2.1.259 and 2.1.260. Chosen from the SEVEN keys whose export-map target is a function declaration on BOTH versions (heldFor, inkTextPropsOf, rebuild, useEngineDrew, useRenderAnswer, useRenderDrawing, withHexColors); PressButton was rejected because it is a function declaration on 2.1.260 but not on 2.1.259, so a rule keyed on it would silently cover only one version. Its minified target is used as a map value exactly once on each version, so the collision hazard noted above does not apply.",
     "file": "components/design-system/ThemedBox.js",
     "find": {
       "regex": "\\.bold = !0; if \\(typeof [a-z] !== \"string\"\\)"
@@ -22,7 +22,7 @@
   },
   {
     "id": "createRenderDraws",
-    "description": "Anchor for the precomputedCompact mega-chunk's export map. Keyed on the OUTER factory — `function X() { let a = <call>(); async function ...` — deliberately, not on the inner async worker: an earlier version keyed on the inner `async function n(o, { signal, origin })` and, although that landmark is also tree-unique, it bound the inner scope whose export map holds only 3 entries. The outer scope is the one the module's real map hangs off. Measured tree-unique on both versions, and its minified target is used as a map value exactly once on each.",
+    "description": "Anchor for the precomputedCompact mega-chunk's export map. Keyed on the OUTER factory \u2014 `function X() { let a = <call>(); async function ...` \u2014 deliberately, not on the inner async worker: an earlier version keyed on the inner `async function n(o, { signal, origin })` and, although that landmark is also tree-unique, it bound the inner scope whose export map holds only 3 entries. The outer scope is the one the module's real map hangs off. Measured tree-unique on both versions, and its minified target is used as a map value exactly once on each.",
     "file": "services/compact/precomputedCompact.js",
     "find": {
       "regex": "function [a-zA-Z_$]+\\(\\) \\{ let [a-z] = [A-Za-z_$.]+\\(\\); async function"
@@ -39,24 +39,12 @@
   },
   {
     "id": "query",
-    "description": "query wrapper — calls queryLoop via yield* and notifies 'completed'",
-    "file": "query.js",
+    "description": "query -- the async-generator query entrypoint (2.1.263: FM, 2.1.260: EM). Keyed on the `hasActiveGoal:` property assignment in its terminal return object. `hasActiveGoal` occurs twice in the file on both versions, but the other occurrence is a DESTRUCTURING BINDING in the result-builder's parameter list (263 L194483 / 260 L181775), which is a BindingElement, not a PropertyAssignment -- so the AST-level property_assignment criterion cannot match it and the count is effectively one. Survives a bump because it is an upstream source-level object key: minifiers preserve property names.",
+    "file": "services/compact/precomputedCompact.js",
     "find": {
-      "string_literal": "completed",
-      "filter": [
-        {
-          "not": {
-            "property_assignment": {
-              "key": "reason"
-            }
-          }
-        },
-        {
-          "include": {
-            "case": "completed"
-          }
-        }
-      ]
+      "property_assignment": {
+        "key": "hasActiveGoal"
+      }
     },
     "scope": "async_generator",
     "rename": "query"
@@ -80,11 +68,14 @@
     "description": "for-of loop variable in query"
   },
   {
-    "from": "query",
-    "walk": "yield_star_callee",
-    "rename": "queryLoop",
-    "description": "queryLoop — called via yield* from query",
-    "id": "queryLoop"
+    "id": "queryLoop",
+    "description": "queryLoop -- the FALSE arm of the ternary; the underlying (unobserved) query loop generator (2.1.263: Oer, 2.1.260: I6n). Keyed on the log string '[query] turn-start poll_events build aborted -- leaving events queued', which occurs exactly ONCE in the file on both versions. NOTE: the tempting structural route -- anchor queryWithObserverTap then walk local:call_result_callee to reach `d = Oer(e,t,r)` -- MIS-BINDS: it returns the FIRST `let x = fn()` in the tap's body, which is H_ on 263 and E_ on 260, neither of which is the loop. Anchoring the loop on its own body avoids the ordering dependency entirely.",
+    "file": "services/compact/precomputedCompact.js",
+    "find": {
+      "string_contains": "turn-start poll_events build aborted"
+    },
+    "scope": "async_generator",
+    "rename": "queryLoop"
   },
   {
     "from": "query",
@@ -96,7 +87,7 @@
     "from": "query",
     "walk": "call_string_arg:completed:callee",
     "rename": "notifyCommandLifecycle",
-    "description": "notifyCommandLifecycle — called with 'completed' in query"
+    "description": "notifyCommandLifecycle \u2014 called with 'completed' in query"
   },
   {
     "id": "yieldMissingToolResultBlocks",
@@ -138,7 +129,7 @@
   },
   {
     "id": "getCustomApiKeyStatus",
-    "description": "getCustomApiKeyStatus — returns 'approved', 'rejected', or 'new'. Keyed on this function's own RETURN CASCADE plus the config property it reads, NOT on the bare literal \"approved\": `find.string_literal` is a substring scan with no AST discrimination, and \"approved\" appears in permission decisions, swarm messages and settings schemas all over the tree — measured 10 ambiguous candidates on 2.1.260, so it bound nothing. `return \"rejected\"; return \"new\";` is the tail of THIS function only (measured tree-unique on both 2.1.259 and 2.1.260), and the customApiKeyResponses?.rejected?.includes(...) prefix ties it to the config read so a coincidental status cascade cannot match. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to `err` in entrypoints/sdk/coreSchemas.js.",
+    "description": "getCustomApiKeyStatus \u2014 returns 'approved', 'rejected', or 'new'. Keyed on this function's own RETURN CASCADE plus the config property it reads, NOT on the bare literal \"approved\": `find.string_literal` is a substring scan with no AST discrimination, and \"approved\" appears in permission decisions, swarm messages and settings schemas all over the tree \u2014 measured 10 ambiguous candidates on 2.1.260, so it bound nothing. `return \"rejected\"; return \"new\";` is the tail of THIS function only (measured tree-unique on both 2.1.259 and 2.1.260), and the customApiKeyResponses?.rejected?.includes(...) prefix ties it to the config read so a coincidental status cascade cannot match. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to `err` in entrypoints/sdk/coreSchemas.js.",
     "file": "utils/config.js",
     "find": {
       "regex": "customApiKeyResponses\\?\\.rejected\\?\\.includes\\([A-Za-z_$][\\w$]*\\)\\)\\s*\\n?\\s*return \"rejected\";\\s*return \"new\";"
@@ -150,20 +141,20 @@
     "from": "getCustomApiKeyStatus",
     "walk": "param:0",
     "rename": "truncatedApiKey",
-    "description": "truncatedApiKey — the API key to check status for"
+    "description": "truncatedApiKey \u2014 the API key to check status for"
   },
   {
     "from": "getCustomApiKeyStatus",
     "walk": "local:call_result",
     "rename": "config",
-    "description": "config — local var set to getGlobalConfig()"
+    "description": "config \u2014 local var set to getGlobalConfig()"
   },
   {
     "from": "getCustomApiKeyStatus",
     "walk": "local:call_result_callee",
     "id": "getGlobalConfig",
     "rename": "getGlobalConfig",
-    "description": "getGlobalConfig — the callee that provides config in getCustomApiKeyStatus"
+    "description": "getGlobalConfig \u2014 the callee that provides config in getCustomApiKeyStatus"
   },
   {
     "from": "getGlobalConfig",
@@ -176,26 +167,26 @@
     "walk": "contains:Date.now():assign_target",
     "rename": "globalConfigCache",
     "id": "globalConfigCache",
-    "description": "globalConfigCache — the config cache object assigned with mtime defaulting to Date.now()"
+    "description": "globalConfigCache \u2014 the config cache object assigned with mtime defaulting to Date.now()"
   },
   {
     "from": "getGlobalConfig",
     "walk": "contains:mtimeMs:member_access_target",
     "rename": "stats",
-    "description": "stats — local assigned from statSync, referenced as stats?.mtimeMs"
+    "description": "stats \u2014 local assigned from statSync, referenced as stats?.mtimeMs"
   },
   {
     "from": "getGlobalConfig_returnExpr",
     "walk": "contains:size:assign_target",
     "rename": "lastReadFileStats",
     "id": "lastReadFileStats",
-    "description": "lastReadFileStats — assigned { mtime, size } or null"
+    "description": "lastReadFileStats \u2014 assigned { mtime, size } or null"
   },
   {
     "from": "getGlobalConfig",
     "walk": "method_arg_callee:statSync",
     "rename": "getGlobalClaudeFile",
-    "description": "getGlobalClaudeFile — path function passed to statSync()"
+    "description": "getGlobalClaudeFile \u2014 path function passed to statSync()"
   },
   {
     "from": "getGlobalConfig",
@@ -207,17 +198,17 @@
     "from": "getGlobalConfig_cacheHitBranch",
     "walk": "postfix_increment_operand",
     "rename": "configCacheHits",
-    "description": "configCacheHits — incremented on cache hit"
+    "description": "configCacheHits \u2014 incremented on cache hit"
   },
   {
     "from": "getGlobalConfig",
     "walk": "standalone_increment",
     "rename": "configCacheMisses",
-    "description": "configCacheMisses — incremented at start of cache miss path"
+    "description": "configCacheMisses \u2014 incremented at start of cache miss path"
   },
   {
     "id": "getTotalCacheReadInputTokens",
-    "description": "getTotalCacheReadInputTokens — the accessor that reads the cost ledger's cache-read total. The ALTERNATION was dropped: its first branch, the bare literal \"cacheReadInputTokens\", is a field name that occurs in usage payloads, zod schemas and accumulator initialisers throughout the tree, so it dragged in unrelated scopes and the rule declined as absent on 2.1.260. The `.costLedger.totalCacheReadInputTokens()` CALL is the one that identifies this getter — measured exactly ONE occurrence per tree on both 2.1.259 and 2.1.260, in vendor/lodash/memoizeCapped.js (the method DEFINITION on the ledger class is a different, non-matching shape, so the call and its definition cannot be confused). VERIFIED: binds uniquely on both versions.",
+    "description": "getTotalCacheReadInputTokens \u2014 the accessor that reads the cost ledger's cache-read total. The ALTERNATION was dropped: its first branch, the bare literal \"cacheReadInputTokens\", is a field name that occurs in usage payloads, zod schemas and accumulator initialisers throughout the tree, so it dragged in unrelated scopes and the rule declined as absent on 2.1.260. The `.costLedger.totalCacheReadInputTokens()` CALL is the one that identifies this getter \u2014 measured exactly ONE occurrence per tree on both 2.1.259 and 2.1.260, in vendor/lodash/memoizeCapped.js (the method DEFINITION on the ledger class is a different, non-matching shape, so the call and its definition cannot be confused). VERIFIED: binds uniquely on both versions.",
     "file": "bootstrap/sessionState.js",
     "find": {
       "regex": "\\.costLedger\\.totalCacheReadInputTokens\\(\\)"
@@ -229,7 +220,7 @@
     "from": "getTotalCacheReadInputTokens",
     "walk": "contains:modelUsage:member_access_target",
     "rename": "STATE",
-    "description": "STATE — the global state object"
+    "description": "STATE \u2014 the global state object"
   },
   {
     "from": "getTotalCacheReadInputTokens",
@@ -249,7 +240,7 @@
     "from": "utils/config.js_fun_saveGlobalConfig",
     "walk": "call_string_arg:tengu_config_auth_loss_prevented:callee",
     "rename": "logEvent",
-    "description": "logEvent — telemetry event logger (Q), used across 247+ files"
+    "description": "logEvent \u2014 telemetry event logger (Q), used across 247+ files"
   },
   {
     "from": "utils/config.js_fun_saveGlobalConfig",
@@ -264,7 +255,7 @@
     "from": "saveGlobalConfig_fallbackCall",
     "walk": "callee",
     "rename": "logForDebugging",
-    "description": "logForDebugging — debug logger (h)"
+    "description": "logForDebugging \u2014 debug logger (h)"
   },
   {
     "from": "saveGlobalConfig_fallbackCall",
@@ -277,13 +268,13 @@
     "walk": "condition_callee",
     "rename": "wouldLoseAuthState",
     "id": "wouldLoseAuthState_call",
-    "description": "wouldLoseAuthState — checks if saving would lose oauthAccount/hasCompletedOnboarding"
+    "description": "wouldLoseAuthState \u2014 checks if saving would lose oauthAccount/hasCompletedOnboarding"
   },
   {
     "from": "wouldLoseAuthState_call",
     "walk": "param:0",
     "rename": "currentConfig",
-    "description": "currentConfig — the re-read config passed to wouldLoseAuthState"
+    "description": "currentConfig \u2014 the re-read config passed to wouldLoseAuthState"
   },
   {
     "id": "getInitialState",
@@ -298,11 +289,11 @@
     "from": "bootstrap/state.js_fun_flushInteractionTime",
     "walk": "only_bare_call",
     "rename": "flushInteractionTime_inner",
-    "description": "flushInteractionTime_inner — the actual flush, guarded by flushInteractionTime"
+    "description": "flushInteractionTime_inner \u2014 the actual flush, guarded by flushInteractionTime"
   },
   {
     "id": "hasAnthropicApiKeyAuth",
-    "description": "hasAnthropicApiKeyAuth — true when an API key is configured and its source is not 'none'. Keyed on the function BODY, not on the option name: `text: skipRetrievingKeyFromApiKeyHelper` is a raw substring scan that matches every CALL SITE passing the option (measured 29 occurrences across 14 files on 2.1.260 → 13 ambiguous candidate scopes), and the option's own definition is in a different function entirely. This key requires the destructure and the return to be ADJACENT, which additionally excludes the async twin `Bgr` — the same body exists twice, once sync and once `await`ed, and matching either one would be a coin flip on file order rather than a decision. Measured: exactly 1 match per tree. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to the sync `kzt` in entrypoints/sdk/coreSchemas.js.",
+    "description": "hasAnthropicApiKeyAuth \u2014 true when an API key is configured and its source is not 'none'. Keyed on the function BODY, not on the option name: `text: skipRetrievingKeyFromApiKeyHelper` is a raw substring scan that matches every CALL SITE passing the option (measured 29 occurrences across 14 files on 2.1.260 \u2192 13 ambiguous candidate scopes), and the option's own definition is in a different function entirely. This key requires the destructure and the return to be ADJACENT, which additionally excludes the async twin `Bgr` \u2014 the same body exists twice, once sync and once `await`ed, and matching either one would be a coin flip on file order rather than a decision. Measured: exactly 1 match per tree. VERIFIED: binds uniquely on 2.1.259 and 2.1.260, to the sync `kzt` in entrypoints/sdk/coreSchemas.js.",
     "file": "utils/auth.js",
     "find": {
       "regex": "\\} = [A-Za-z_$][\\w$]*\\(\\{ skipRetrievingKeyFromApiKeyHelper: !0 \\}\\);\\s*\\n\\s*return [A-Za-z_$][\\w$]* !== null && [A-Za-z_$][\\w$]* !== \"none\";"
@@ -319,7 +310,7 @@
   },
   {
     "id": "prependUserMessage",
-    "description": "prependUserMessage — method that calls jsonStringify with role:'user'",
+    "description": "prependUserMessage \u2014 method that calls jsonStringify with role:'user'",
     "file": "cli/structuredIO.js",
     "find": {
       "property_assignment": {
@@ -345,17 +336,17 @@
     "from": "jsonStringify_call",
     "walk": "callee",
     "rename": "jsonStringify",
-    "description": "jsonStringify — JSON serializer from slowOperations.js"
+    "description": "jsonStringify \u2014 JSON serializer from slowOperations.js"
   },
   {
     "from": "prependUserMessage",
     "walk": "enclosing_class",
     "rename": "StructuredIO",
-    "description": "StructuredIO — CLI structured I/O class"
+    "description": "StructuredIO \u2014 CLI structured I/O class"
   },
   {
     "id": "LogoV2",
-    "description": "LogoV2 — main logo/header component with compact and horizontal layouts",
+    "description": "LogoV2 \u2014 main logo/header component with compact and horizontal layouts",
     "file": "components/LogoV2/LogoV2.js",
     "find": {
       "string_literal": "theme"
@@ -367,11 +358,11 @@
     "from": "LogoV2",
     "walk": "contains:createElement:member_access_target",
     "rename": "React",
-    "description": "React — imported as R8, used for createElement calls"
+    "description": "React \u2014 imported as R8, used for createElement calls"
   },
   {
     "id": "getLayoutMode",
-    "description": "getLayoutMode — returns 'horizontal' or 'compact' based on terminal width",
+    "description": "getLayoutMode \u2014 returns 'horizontal' or 'compact' based on terminal width",
     "file": "utils/logoV2Utils.js",
     "find": {
       "string_literal": "compact"
@@ -383,7 +374,7 @@
     "from": "getLayoutMode",
     "walk": "param:0",
     "rename": "columns",
-    "description": "columns — terminal width param"
+    "description": "columns \u2014 terminal width param"
   },
   {
     "type": "pin",
@@ -606,7 +597,7 @@
   },
   {
     "id": "getTotalCacheReadInputTokens_split",
-    "description": "getTotalCacheReadInputTokens — split state module (>= 2.1.238): delegates to Sr.costLedger.totalCacheReadInputTokens()",
+    "description": "getTotalCacheReadInputTokens \u2014 split state module (>= 2.1.238): delegates to Sr.costLedger.totalCacheReadInputTokens()",
     "file": "_unmatched/0136_nt.js",
     "find": {
       "function_name": "getTotalCacheReadInputTokens"
@@ -624,7 +615,7 @@
   },
   {
     "id": "getInitialState_split",
-    "description": "getInitialState — split state module (>= 2.1.238): builds the root session, resolving cwd via realpathSync",
+    "description": "getInitialState \u2014 split state module (>= 2.1.238): builds the root session, resolving cwd via realpathSync",
     "file": "_unmatched/0136_nt.js",
     "find": {
       "regex": "realpathSync"
@@ -635,7 +626,7 @@
   },
   {
     "id": "getSessionId_legacy",
-    "description": "getSessionId — legacy monolithic bootstrap/state.js (<= 2.1.168)",
+    "description": "getSessionId \u2014 legacy monolithic bootstrap/state.js (<= 2.1.168)",
     "file": "bootstrap/sessionState.js",
     "find": {
       "function_name": "getSessionId"
@@ -648,13 +639,13 @@
     "from": "getSessionId_legacy",
     "walk": "only_bare_call",
     "rename": "getSessionOverrides",
-    "description": "getSessionOverrides (tV) — session-overrides getter, the sole bare call in getSessionId (legacy)"
+    "description": "getSessionOverrides (tV) \u2014 session-overrides getter, the sole bare call in getSessionId (legacy)"
   },
   {
     "from": "getSessionId_split",
     "walk": "only_bare_call",
     "rename": "getSessionOverrides",
-    "description": "getSessionOverrides (hM) — session-overrides getter, the sole bare call in getSessionId (split)"
+    "description": "getSessionOverrides (hM) \u2014 session-overrides getter, the sole bare call in getSessionId (split)"
   },
   {
     "type": "pin",
@@ -955,9 +946,10 @@
   },
   {
     "id": "notifySubagentLifecycle",
+    "description": "notifySubagentLifecycle -- the lifecycle notifier called from query's finally block with 'subagent_exit' (2.1.263: fde, 2.1.260: Fue). Keyed on the method name `forgetSubagentTelemetry`, which occurs exactly ONCE in the file on both versions and sits INSIDE the notifier body (`if (r === 'subagent_exit') e.forgetSubagentTelemetry(p)`). Deliberately NOT keyed on 'subagent_exit' -- see __note_position_hazard above; that key silently binds the query entrypoint on 2.1.260. A property name on a store object survives minification.",
     "file": "services/compact/precomputedCompact.js",
     "find": {
-      "string_literal": "subagent_exit"
+      "regex": "forgetSubagentTelemetry"
     },
     "scope": "function",
     "rename": "notifySubagentLifecycle"
@@ -983,5 +975,153 @@
     "rename": "remoteWebCommands",
     "id": "remoteWebCommands",
     "description": "remoteWebCommands -- the array of Claude-Code-on-the-web slash commands (ultraplan, ultrareview, teleport, remote-control, schedule, autofix-pr)."
+  },
+  {
+    "from": "query",
+    "walk": "param:0",
+    "rename": "params",
+    "description": "sole parameter of query -- the patch reads params.toolUseContext.agentId to decide whether the drained turn is top-level."
+  },
+  {
+    "from": "query",
+    "walk": "local:array_init",
+    "rename": "consumedCommandUuids",
+    "description": "first `= []` accumulator in query. Context-only for the patch, but it pins the declaration list the ternary sits in."
+  },
+  {
+    "id": "isObserverAgentsEnabled",
+    "description": "isObserverAgentsEnabled -- the ternary PREDICATE selecting the observer-tap arm (2.1.263: ble, 2.1.260: Rae). Keyed on the gate flag string 'tengu_observer_agents_enabled', which occurs exactly ONCE in the file on both versions. A statsig/gate key is about as stable as a landmark gets: it is a wire-protocol string, so it cannot be minified and cannot be renamed without an upstream config change.",
+    "file": "services/compact/precomputedCompact.js",
+    "find": {
+      "string_literal": "tengu_observer_agents_enabled"
+    },
+    "scope": "function",
+    "rename": "isObserverAgentsEnabled"
+  },
+  {
+    "id": "queryWithObserverTap",
+    "description": "queryWithObserverTap -- the TRUE arm of the ternary; the observer-tap wrapper around the real loop (2.1.263: oZo, 2.1.260: Y4o). Keyed on its own SELF-NAMING invariant message, `throw Error('queryWithObserverTap: missing terminal after completion')`, which occurs exactly ONCE in the file on both versions. This is the strongest landmark in the set: upstream wrote the function's real name into a string literal, so the anchor recovers the author's own name and survives any rename of the identifier.",
+    "file": "services/compact/precomputedCompact.js",
+    "find": {
+      "string_startswith": "queryWithObserverTap:"
+    },
+    "scope": "async_generator",
+    "rename": "queryWithObserverTap"
+  },
+  {
+    "id": "PromptSubmitController",
+    "file": "components/PromptInput/useSwarmBanner.js",
+    "find": {
+      "string_literal": "PromptSubmitController used before its host was bound"
+    },
+    "scope": "class",
+    "rename": "PromptSubmitController",
+    "description": "PATCH 003. The interactive REPL's submit controller. Anchored on its own developer-facing invariant message, which upstream wrote into the class and which minification cannot touch (string literals are preserved). VERIFIED: resolves to Qce on 2.1.263 and Xie on 2.1.260, and in both the class body holds `bindHost(w){ this.#t = w; }` plus `submit = async (w, I, ne) => {...}` -- the exact members patch 003 hooks. Both `bindHost` and `submit` are PUBLIC member names that survive minification, so once the CLASS is named the patch needs no further anchors: it can be expressed as `bindHost(w){ this.#t = w; ... }` inside class PromptSubmitController."
+  },
+  {
+    "id": "useReplStatusEffects",
+    "file": "components/PromptInput/useSwarmBanner.js",
+    "find": {
+      "regex": "=== ['\"]idle['\"] && [\\w$]+ \\? ['\"]shell['\"] :"
+    },
+    "scope": "function",
+    "rename": "useReplStatusEffects",
+    "description": "PATCH 008. The REPL hook that owns the session-activity effect patch 008 emits from. Anchored on the shell-status ternary `status === 'idle' && <hasShellSnapshot> ? 'shell' : status`, whose two string literals ('idle', 'shell') are unminifiable and whose combination is unique in the file on both versions. VERIFIED: resolves to dce on 2.1.263 and die on 2.1.260 -- in both, the body contains the `{ status, waitingFor }` activity-report effect. Deliberately NOT anchored on the memo-cache slot indices (cx[33]/$C[33]), which renumber freely between builds. QUOTE CLASS IS LOAD-BEARING: anchors run at step 2.6, and the only formatter before that is beautify.ts's TS printer, which PRESERVES the bundle's original quote style. The raw 2.1.263 bundle spells this literal \"shell\" (71 double-quoted vs 2 single-quoted occurrences); prettier's singleQuote only converts it at step 2.7, AFTER anchors. A single-quote-only regex therefore matches the finished tree but NOT the build -- measured, this is the resolve-but-never-land defect. ['\"] covers both."
+  },
+  {
+    "from": "useReplStatusEffects",
+    "find": {
+      "regex": "=== ['\"]idle['\"] && [\\w$]+ \\? ['\"]shell['\"] :"
+    },
+    "walk": "declarator_name",
+    "rename": "replStatusForActivity",
+    "id": "replStatusForActivity",
+    "description": "PATCH 008. The computed status local -- the `status:` value handed to the session-activity reporter, and the value 008 tests for rest. This is the symbol the patch header calls `uie`. Reached by landing the find on the ternary and walking to the name of the declarator that owns it. VERIFIED: resolves to uce on 2.1.263 (line `uce = xD === 'idle' && FQr ? 'shell' : xD,`) and to uie on 2.1.260 (`uie = II === 'idle' && EFr ? 'shell' : II,`) -- uie is exactly the identifier 008 currently hardcodes."
+  },
+  {
+    "id": "useMessageQueue",
+    "file": "_unmatched/0390_qye.js",
+    "find": {
+      "regex": "\\)\\s*\\{\\s*return\\s+[\\w$]+\\(\\s*[\\w$]+\\s*\\)\\s*\\?\\?\\s*[\\w$]+\\(\\)\\s*;\\s*\\}"
+    },
+    "scope": "function",
+    "rename": "useMessageQueue",
+    "description": "PATCH 008 (QUEUE-DEPTH GAP). The message-queue accessor: `return <useContext>(<QueueCtx>) ?? <fallbackQueue>();`. Callers do `useMessageQueue().getMainThreadQueueLength()` -- getMainThreadQueueLength is a PUBLIC method name and is not minified, so once this accessor is named, 008 can restore the queue-depth term of the 2.1.238 three-part rest test WITHOUT touching any React-Compiler memo slot. The `file` here is a HINT ONLY: the module is an _unmatched chunk whose FILENAME CHANGES between versions (_unmatched/0388_X_e.js on .260 vs _unmatched/0390_qye.js on .263), so on .260 the engine's tree-scan fallback rebinds it -- VERIFIED as a unique whole-tree bind. The `){ return` prefix is load-bearing: it requires the return to be the FIRST statement, which discriminates this accessor from services/compact/precomputedCompact.js's `function S8(){ let e = Q(); return er(e) ?? _e(); }` -- without it the rule is AMBIGUOUS on .260 and declines. VERIFIED: resolves to qc on 2.1.263 and Fc on 2.1.260."
+  },
+  {
+    "id": "getSessionId_chunk",
+    "description": "getSessionId -- returns the effective session UUID: the session-override sessionId when one is installed, else the root session's id. Chunked-tree body (bootstrap/sessionState.js only re-exports it as `K as getSessionId`). VERIFIED binding: K at vendor/lodash/memoizeCapped.js:4010 on 2.1.263, K at :3954 on 2.1.260. anchor_only because K is 1-char and a global rename measures 4058 replacements.",
+    "file": "vendor/lodash/memoizeCapped.js",
+    "find": {
+      "regex": "\\(\\)\\?\\.sessionId \\?\\? [A-Za-z_$][A-Za-z0-9_$]*\\(\\)\\.id"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "getSessionId_chunk",
+    "find": {
+      "regex": "[A-Za-z_$][A-Za-z0-9_$]*\\(\\)\\?\\.sessionId \\?\\?"
+    },
+    "walk": "closest_parent:call",
+    "id": "getSessionOverrides_call",
+    "description": "Intermediate anchor: the `g()` call whose result is optional-chained to .sessionId. The find deliberately starts the regex AT the callee identifier so closest_parent:call binds the OVERRIDES call and not the outer ?? expression."
+  },
+  {
+    "from": "getSessionOverrides_call",
+    "walk": "callee",
+    "id": "getSessionOverrides_chunk",
+    "description": "getSessionOverrides -- the session-overrides getter; returns the override record or undefined. VERIFIED resolving to g (vendor/lodash/memoizeCapped.js:4011) on BOTH 2.1.263 and 2.1.260. NO rename emitted: g is 1-char; measured 86 unrelated occurrences in components/PromptInput/useSwarmBanner.js alone."
+  },
+  {
+    "from": "getSessionId_chunk",
+    "find": {
+      "regex": "\\(\\)\\.id"
+    },
+    "walk": "closest_parent:call",
+    "id": "getRootSession_call",
+    "description": "Intermediate anchor: the `n()` call on the right of the ?? fallback, whose .id is the root session id."
+  },
+  {
+    "from": "getRootSession_call",
+    "walk": "callee",
+    "id": "getRootSession_chunk",
+    "description": "getRootSession -- the root-session ACCESSOR. Note the shape change the 001 patch header did not capture: on the chunked tree there is no module-level ROOT_SESSION binding at all. The root session is reached by CALLING this getter (`n().costLedger...`, `n().requestJournal...` -- measured 456 call sites in the chunk), with `C()?.session ?? y` inside. So a patch line must read getRootSession().id, NOT ROOT_SESSION.id. VERIFIED resolving to n on BOTH 2.1.263 and 2.1.260. NO rename emitted: n is 1-char; measured 382 unrelated occurrences in components/PromptInput/useSwarmBanner.js alone."
+  },
+  {
+    "id": "markPostCompaction",
+    "description": "markPostCompaction(tokens, {keepsCachedPrefix}) -- the post-compaction chokepoint. Sets the request journal's pendingPostCompaction latch, records the last main-thread context-token count, and (unless the cached prefix is kept) clears the last main-thread request. This is where 009 mirrors {type:'compact'}; the emit belongs at the END of the body so it fires after the post-compaction state is fully written. VERIFIED binding: crt at vendor/lodash/memoizeCapped.js:4456 on 2.1.263, gtt at :4405 on 2.1.260 -- both cross-checked against the barrel's `X as markPostCompaction` export line. anchor_only: `crt` collides with an unrelated local in useSwarmBanner.js under the text-scope-blind global renamer.",
+    "file": "vendor/lodash/memoizeCapped.js",
+    "find": {
+      "regex": "\\.replacePendingPostCompaction\\(!0\\)"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "consumePostCompaction",
+    "description": "consumePostCompaction() -- the read-and-clear counterpart: returns the pendingPostCompaction latch and resets it to false. Anchored alongside markPostCompaction because the !1 argument is what proves the !0 key above selected the WRITER and not this function. VERIFIED binding: FOn at vendor/lodash/memoizeCapped.js:4462 on 2.1.263, gIn at :4414 on 2.1.260 -- both cross-checked against the barrel's `X as consumePostCompaction` export line (263:517, 260:509). anchor_only for the same short-name reason.",
+    "file": "vendor/lodash/memoizeCapped.js",
+    "find": {
+      "regex": "\\.replacePendingPostCompaction\\(!1\\)"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "id": "createDialogStore_safe",
+    "description": "createDialogStore() -- factory building ONE dialog store instance {getState, subscribe, onClosed, open, update, answer, dismiss, dismissKind, firstReveal, hasRevealed, dismissKind}. Keyed on `onClosed: <ident>.subscribe` -- the store's one structurally distinctive property, wiring the closed-dialog emitter's subscribe onto the store surface. Source-level property names only; no minified identifier, no position. VERIFIED binding: ho at services/dialogs/dialogStore.js:3026 on 2.1.263, go at :3026 on 2.1.260. anchor_only: renaming `ho` globally measures 928 replacements across 90+ files.",
+    "file": "services/dialogs/dialogStore.js",
+    "find": {
+      "regex": "onClosed: ?[A-Za-z_$][A-Za-z0-9_$]*\\.subscribe"
+    },
+    "scope": "function",
+    "anchor_only": true
+  },
+  {
+    "from": "createDialogStore_safe",
+    "walk": "local:declarator_named_init:onClosed",
+    "rename": "dialogStore",
+    "description": "dialogStore -- the store object the factory builds and returns; the object 007 drives via .getState().open and .answer(id, result). Reached as the LOCAL whose initializer contains `onClosed`, i.e. the declarator holding the store object literal itself. The key is semantic (which local IS the store), not ordinal. VERIFIED resolving to v at services/dialogs/dialogStore.js:3041 on BOTH 2.1.263 and 2.1.260. VERIFIED LANDING end-to-end on a copy of /tmp/deob-263: `local:` is a SCOPED walk, excluded from the tree-wide global renamer, and rewrote exactly 3 sites -- the declarator (`dialogStore = {`), the self-reference inside dismissKind, and `return dialogStore;` -- all inside the factory body, zero collateral. NOTE `from` targets the SHIPPED rule id createDialogStore (which emits the global rename the scoped pass depends on); if that rule is made anchor_only, repoint this to createDialogStore_safe and the scoped pass will need the parent lookup to accept an anchor_only name."
   }
 ]

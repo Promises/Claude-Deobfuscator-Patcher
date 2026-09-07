@@ -1256,10 +1256,10 @@ function dropCollidingRenamesPerChunk<T extends { minified: string; original: st
 function renameWithMultiFileService(
   projectDir: string,
   mapping: any,
-  renameTasks: Array<{ minified: string; original: string; declFile: string }>,
+  renameTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }>,
   fileTexts: Map<string, string>,
   perChunkDecls: Map<string, Set<string>>,
-): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string }> } {
+): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }> } {
   renameTasks = dropCollidingRenamesPerChunk(renameTasks, perChunkDecls);
 
   const engine = buildMultiFileEngine(projectDir, mapping, fileTexts);
@@ -1301,8 +1301,8 @@ function renameWithMultiFileService(
 function renameWithLanguageService(
   projectDir: string,
   mapping: any,
-  renameTasks: Array<{ minified: string; original: string; declFile: string }>,
-): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string }> } {
+  renameTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }>,
+): { totalRenames: number; fileRenames: Map<string, number>; effectiveTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }> } {
   const engine = buildRenameEngine(projectDir, mapping);
   const { sections, assembled } = engine;
 
@@ -1385,8 +1385,8 @@ function discoverRenameTasks(
   mapping: any,
   db: RenameDB | null,
   noSourceRef: boolean,
-): { filteredTasks: Array<{ minified: string; original: string; declFile: string }>; seenSize: number; collisions: number } {
-  const renameTasks: Array<{ minified: string; original: string; declFile: string }> = [];
+): { filteredTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }>; seenSize: number; collisions: number } {
+  const renameTasks: Array<{ minified: string; original: string; declFile: string; isAnchor?: boolean }> = [];
   const seen = new Map<string, string>(); // minified → original (dedup)
 
   for (const section of mapping.sections) {
@@ -1456,9 +1456,47 @@ function discoverRenameTasks(
   // Layer 0: User-defined anchor rules (highest priority)
   const anchorRulesPath = path.join(import.meta.dir, "../anchor-rules.json");
   const anchorMatches = applyAnchorRules(projectDir, anchorRulesPath);
+  // 🔴 "HIGHEST PRIORITY" WAS A LIE — the code did the OPPOSITE of the comment
+  // above, and it silently cost 13 of 27 individual anchors.
+  //
+  // Export maps are harvested earlier (~:1392) into `seen`, and this loop then
+  // `continue`d whenever `seen` already held the MINIFIED name — so any bulk
+  // export-map entry that happened to claim the same short name beat the
+  // hand-written anchor, with the only trace behind RENAME_VERBOSE. MEASURED on
+  // 2.1.263: 13 of 13 lost individual anchors died here, mostly to env-var names
+  // in utils/env.js — `go -> createDialogStore` beaten by CLAUDE_DEBUG,
+  // `Ft -> APIError` by ANTHROPIC_FOUNDRY_AUTH_TOKEN, `es -> memoize` by
+  // CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE.
+  //
+  // The `__anchor__`-wins logic below never fired for these: it arbitrates
+  // cross-file collisions on the ORIGINAL name, whereas this collision is on the
+  // MINIFIED name and `seen` had already settled it hundreds of lines earlier.
+  //
+  // An anchor is hand-written and load-bearing for a patch; an export-map entry
+  // is bulk-harvested. When they disagree the anchor wins — which is what the
+  // comment always claimed. The displaced claim is COUNTED and reported rather
+  // than dropped silently, so the trade stays visible.
+  let anchorOverrides = 0;
   for (const m of anchorMatches) {
     if (seen.has(m.minified)) {
-      if (process.env.RENAME_VERBOSE) console.warn(`    anchor skip (already seen): ${m.minified} → ${m.original} (existing: ${seen.get(m.minified)})`);
+      const prior = seen.get(m.minified);
+      if (prior === m.original) continue; // same target, nothing to arbitrate
+      if (!isValidBindingName(m.original)) {
+        console.warn(`    anchor skip (invalid identifier): ${m.minified} → ${m.original}`);
+        continue;
+      }
+      anchorOverrides++;
+      if (process.env.RENAME_VERBOSE) {
+        console.warn(`    anchor OVERRIDES export map: ${m.minified} → ${m.original} (was: ${prior})`);
+      }
+      const displaced = renameTasks.findIndex(
+        (t) => t.minified === m.minified && t.original === prior,
+      );
+      if (displaced !== -1) renameTasks.splice(displaced, 1);
+      seen.set(m.minified, m.original);
+      // declFile is the chunk the anchor ACTUALLY bound against, not the
+      // sentinel "__anchor__". See the note at the non-collision push below.
+      renameTasks.push({ minified: m.minified, original: m.original, declFile: m.file ?? "__anchor__", isAnchor: true });
       continue;
     }
     // Anchors were the one admission path with NO validity guard. A typo'd or
@@ -1468,7 +1506,20 @@ function discoverRenameTasks(
       continue;
     }
     seen.set(m.minified, m.original);
-    renameTasks.push({ minified: m.minified, original: m.original, declFile: "__anchor__" });
+    // declFile is the chunk the anchor ACTUALLY bound against — the engine has
+    // always carried it as MatchResult.file and this discarded it for a sentinel.
+    // That sentinel is not a real path, so outputPathToFile.get() always missed
+    // and every anchor fell to the "unique declaring chunk" fallback, which GIVES
+    // UP when a name is declared in more than one chunk. MEASURED on 2.1.263:
+    // getReplWaitingReason, notifySubagentLifecycle and getBuiltinCommandTable
+    // were all recorded in _renames.json as applied while appearing in ZERO
+    // files — each is declared in 2-3 chunks, so targetFile stayed undefined and
+    // the rename was silently skipped. isAnchor keeps the collision-arbiter
+    // behaviour that used to key off the sentinel.
+    renameTasks.push({ minified: m.minified, original: m.original, declFile: m.file ?? "__anchor__", isAnchor: true });
+  }
+  if (anchorOverrides > 0) {
+    console.log(`  Anchors overriding export-map claims: ${anchorOverrides}`);
   }
 
   // Filter cross-file collisions: if two different minified names from different
@@ -1485,10 +1536,10 @@ function discoverRenameTasks(
       const uniqueMinified = new Set(tasks.map(t => t.minified));
       if (uniqueMinified.size > 1) {
         // If an anchor claims this name, trust the anchor and drop conflicting entries
-        const anchorTask = tasks.find(t => t.declFile === "__anchor__");
+        const anchorTask = tasks.find(t => t.isAnchor || t.declFile === "__anchor__");
         if (anchorTask) {
           for (let i = renameTasks.length - 1; i >= 0; i--) {
-            if (renameTasks[i].original === original && renameTasks[i].declFile !== "__anchor__") {
+            if (renameTasks[i].original === original && !renameTasks[i].isAnchor && renameTasks[i].declFile !== "__anchor__") {
               renameTasks.splice(i, 1);
             }
           }
