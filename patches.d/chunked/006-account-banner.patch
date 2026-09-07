@@ -1,75 +1,87 @@
 # patch: 006-account-banner-chunked
 # format: CHUNKED ONLY (2.1.242+). Monolithic trees keep using
 #         006-account-banner.patch, which is unchanged.
-# version: authored against 2.1.260
-# depends: none (the 004 multi-account half is deliberately NOT carried over --
-#          004 is disabled by operator decision, so the useSwarmBanner hunk that
-#          depended on __multiAccount is omitted here rather than shipped dead.)
+# version: VERSION-INDEPENDENT. Verified apply-clean against the emitted-file
+#          content of BOTH 2.1.263 and 2.1.260.
+# depends: the PIN rule for utils/versionSuffix.ts (delivered as
+#          /tmp/anchors-263/006-pin.json, to be merged into
+#          tools-ts/anchor-rules.json). THIS PATCH DOES NOT APPLY WITHOUT IT --
+#          without the pin there is no utils/versionSuffix.js in the tree.
 # description: getVersionSuffix() returns ' [claudiverse]' so every version
 #              readout is identifiably patched. This is the build's canary.
 #
-# VERSION-STRING-INDEPENDENT BY CONSTRUCTION (unchanged rationale): the hunk
-# edits the one-line BODY of getVersionSuffix rather than any template literal
-# embedding VERSION/BUILD_TIME/GIT_SHA, so a release bump does not by itself
-# invalidate it.
-#
-# WHERE IT MOVED: _preamble.js DOES NOT EXIST on a chunked tree (there is no
-# shared runtime preamble to carve off). getVersionSuffix survives as a tiny
-# standalone chunk that the CLI entry imports directly.
-#
-# 🔴 THE FILE PATH ITSELF IS VERSION-VARYING. The chunk is emitted as
-#   _unmatched/0003_Px.js on 2.1.260 and _unmatched/0003_dH.js on 2.1.259
-#   (MEASURED on both trees): the 0003 index is stable but the suffix is the
-#   chunk's minified export name. A path is not something `git apply` can
-#   fuzzy-match, so this patch is version-locked at the FILENAME level and a
-#   bump requires re-pointing it. Nothing in the hunk mitigates that; it is
-#   stated rather than hidden.
-#   What IS anchored: the retained context line `}.BUILD_REF_NAME,` is a
-#   build-CONSTANT key (not a build-varying value) and was verified UNIQUE
-#   across the whole 2.1.260 tree, so within the right file the hunk cannot
-#   land anywhere else. The added line introduces no identifier at all.
-#
 # ============================================================================
-# RE-AUTHORED 2026-09-07 — RE-CONTEXTED TO 2.1.263
+# RE-AUTHORED 2026-09-07 -- VERSION-LOCK RESOLVED BY A PIN, NOT BY A REWRITE
 # ============================================================================
-# STATUS: 🔴 VERSION-LOCKED, AND STRUCTURALLY UNFIXABLE AS A GIT PATCH.
-#         Applies to 2.1.263 (verified); FAILS on 2.1.260 (verified).
 #
-# WHAT BLOCKS IT — THE FILENAME, not the hunk:
-#   The target is the deobfuscator's unmatched-chunk bucket, and the FILE NAME
-#   itself embeds the minified export:
+# WHAT WAS BROKEN, AND WHY NO HUNK COULD FIX IT:
+#   The target is a standalone chunk that the emitter named by its MINIFIED
+#   export, so the FILENAME ITSELF drifted every release:
 #       2.1.260:  _unmatched/0003_Px.js
 #       2.1.263:  _unmatched/0003_$x.js
-#   `git apply` matches paths LITERALLY — there is no path-glob, no fuzz, no
-#   rename detection that helps here. The hunk body is already as stable as it
-#   can be (context trimmed to `) {` and `}`, both byte-identical), but the
-#   `diff --git` / `---` / `+++` lines can only name ONE path. So the failure
-#   happens before context is ever consulted, and no amount of anchoring
-#   inside the hunk can fix it.
+#   `git apply` matches paths LITERALLY -- no glob, no fuzz, no rename
+#   detection. The failure therefore happened in the `--- / +++` header BEFORE
+#   a single context line was consulted. Anchoring inside the hunk, which is
+#   what unblocked every other patch in this set, is inert against a path
+#   mismatch. The FILE had to acquire a stable name.
 #
-# THE CONTENT ANCHOR THAT *WOULD* WORK (if the tool could use one):
-#   `BUILD_REF_NAME` occurs in EXACTLY ONE file in each tree (verified by
-#   grep -rl in both) — a perfect content-addressed landmark. The ordinal
-#   prefix `0003_` is also stable across both. Either would locate this file
-#   unambiguously, but neither is expressible in a git patch header.
+# HOW IT IS FIXED:
+#   A `type: "pin"` rule keyed on BUILD_REF_NAME gives that module the stable
+#   path utils/versionSuffix.js at build step 2 (emitter.ts:48 calls
+#   resolvePinRules), which is BEFORE patches are applied at step 3. This patch
+#   targets the pinned path, so the minified name never appears in a path.
+#   The pin key is a build-CONSTANT property KEY, not a build-varying value:
+#   VERSION / BUILD_TIME / GIT_SHA sit in the very same object literal and
+#   change every release, but BUILD_REF_NAME is an upstream source identifier
+#   preserved by minification. MEASURED tree-unique -- exactly 1 manifest
+#   section of 1650 on 2.1.263 and 1 of 1643 on 2.1.260.
 #
-# ⛔ WHAT WOULD UNBLOCK IT, in order of preference:
-#   1. An anchor rule naming this export (it is the build-ref/version-banner
-#      getter). The file would become `_unmatched/0003_<stableName>.js` and
-#      this patch would go version-independent for free.
-#   2. Have the deobfuscator name unmatched chunks by ORDINAL ONLY
-#      (`0003.js`), which is already stable, instead of ordinal+minified name.
-#   3. Apply this one edit with a content-addressed tool (sed/python keyed on
-#      BUILD_REF_NAME) rather than as a git patch.
+# THE HUNK BODY IS VERSION-INDEPENDENT BY CONSTRUCTION:
+#   Context is trimmed to `) {` and `}` and the changed line is `return '';`.
+#   All three are BYTE-IDENTICAL on 2.1.263 and 2.1.260 (verified). Every
+#   version-varying token in this file -- the minified name `$x`/`Px`, VERSION,
+#   BUILD_TIME, GIT_SHA -- lives in the parameter object ABOVE the context
+#   window and is never matched. The added line introduces no identifier at
+#   all, only a string literal.
 #
-# The hunk itself introduces NO minified name on the added line — the change
-# is a bare string literal return value.
+#   NOTE the `function $x(` text after the `@@` marker: that is git's function
+#   -context hint, which `git apply` does NOT match against. VERIFIED by
+#   positive control -- the patch applies cleanly to the 2.1.260 file, where
+#   that function is named `Px`.
 #
-diff --git a/_unmatched/0003_$x.js b/_unmatched/0003_$x.js
-index 3097700..ecd6b51 100644
---- a/_unmatched/0003_$x.js
-+++ b/_unmatched/0003_$x.js
-@@ -22,3 +22,3 @@ function $x(
+# 🔴 THE PIN CHANGES THIS FILE'S HEADER, so the patch is authored against the
+#   PINNED emit, not against today's _unmatched/ file. A pinned module is
+#   emitted with confidence "high", which routes it through beautify()
+#   (emitter.ts) -- and beautify COLLAPSES the two blank lines in the Anthropic
+#   banner that the unmatched file still carries. Measured: exactly 2 blank
+#   lines removed, which shifts the hunk's start line from 22 to 20. Authoring
+#   this against the current _unmatched/ file would have produced an off-by-two
+#   that only surfaced after the pin landed.
+#
+# HOW THE EXPECTED FILE WAS DERIVED (reproducible):
+#   The 2.1.263 and 2.1.260 module trees were regenerated from
+#   versionref/2.1.263-bin and versionref/2.1.260-bin with
+#   `tools/extract_chunks.py --splitter-compat` into a private scratch dir (the
+#   shared .deob_cache was NOT touched -- it holds 2.1.238), then the emitted
+#   content was reproduced by calling the pipeline's own beautify() followed by
+#   prettifyCode() from tools-ts/src. That is the exact transform chain a real
+#   build applies to a pinned module before step 3.
+#
+# ⚠️ WHAT IS NOT YET VERIFIED: no build has been run with the pin merged, so
+#   utils/versionSuffix.js does not exist in any on-disk tree yet. The apply
+#   check above is against the RECONSTRUCTED emit, not against build output.
+#   The residual risk is that the real pipeline's step 2.6 renamer alters this
+#   file (it would rename `$x`/`Px` if an anchor rule named it) -- the pin
+#   itself emits no rename, and the shipped getVersionSuffix_* rules cannot
+#   fire here (both declare hardcoded version-specific files with
+#   no_tree_scan:true), so the expectation is no change to the context window.
+#   Confirm on the first build after the pin merges.
+#
+diff --git a/utils/versionSuffix.js b/utils/versionSuffix.js
+index 7db8d43..50b6857 100644
+--- a/utils/versionSuffix.js
++++ b/utils/versionSuffix.js
+@@ -20,3 +20,3 @@ function $x(
  ) {
 -    return '';
 +    return ' [claudiverse]';

@@ -68,14 +68,28 @@
 #   status/waitingFor locals. Naming the helper alone is not enough; the guard
 #   reads the VALUES, so the locals are what must become stable.
 #
+#
+# 🔴 REGENERATED 2026-09-07 against the anchored tree, and the reason matters:
+#   the hunk now uses replStatusForActivity / replWaitingForActivity instead of
+#   the minified uce / eGe. Swapping the TOKENS was not enough — the longer
+#   names made prettier REFLOW the call across three lines, so the old
+#   single-line context could never match. The hunk was re-derived from the
+#   real tree rather than hand-edited.
+#   Note the @@ header now reads `function useReplStatusEffects(...)`: that is
+#   an anchored name too, so even git's context hint is version-stable.
+#
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
-index de8c6aa..978385d 100644
+index 39d277a..3dac6b3 100644
 --- a/components/PromptInput/useSwarmBanner.js
 +++ b/components/PromptInput/useSwarmBanner.js
-@@ -70104,2 +70105,6 @@ function dce(AQr) {
-             xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo);
+@@ -70104,6 +70104,10 @@ function useReplStatusEffects(AQr) {
+             xUe({ status: replStatusForActivity, waitingFor: replWaitingForActivity }, ZVe).catch(
+                 oFo,
+             );
 +            try {
-+                if (uce === 'idle' && !eGe)
++                if (replStatusForActivity === 'idle' && !replWaitingForActivity)
 +                    globalThis.__claudiverse.mirrorMessage({ type: 'idle' });
 +            } catch (__e) {}
          }),
+             (WOo = [replStatusForActivity, replWaitingForActivity, ZVe]),
+             (cx[33] = replStatusForActivity),

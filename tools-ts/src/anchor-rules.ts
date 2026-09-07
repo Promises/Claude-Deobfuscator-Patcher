@@ -140,7 +140,16 @@ export function resolvePinRules(rulesPath: string, modulesDir: string): Map<stri
     const result = new Map<string, string>();
     if (!fs.existsSync(rulesPath)) return result;
 
-    const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
+    const rules: AnchorRule[] = (JSON.parse(fs.readFileSync(rulesPath, "utf-8")) as AnchorRule[])
+        // `disabled: true` retires a rule WITHOUT deleting it, so the REASON it was
+        // retired stays beside it — delete the rule and the next person to meet the
+        // same symptom re-derives the whole diagnosis.
+        // ⚠️ Added because the flag was ALREADY BEING USED and silently IGNORED: a
+        // rule marked disabled still fired, so a "retirement" was a no-op that read
+        // as done. Anything shaped like an off-switch must switch something off.
+        // Filtered at LOAD, not in isPinRule() — a disabled pin dropped there would
+        // fall through to the root-rule path at :1463 and be misrouted, not disabled.
+        .filter((r) => (r as any).disabled !== true);
     const pins = rules.filter(isPinRule) as PinRule[];
     if (pins.length === 0) return result;
 
@@ -159,6 +168,31 @@ export function resolvePinRules(rulesPath: string, modulesDir: string): Map<stri
             const sf = ts.createSourceFile(section.filename, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
             const pos = findPatternPos(code, pin.find, sf);
             if (pos !== -1) {
+                // 🔴 A DUPLICATE BINDING USED TO BE SILENT, AND IT DELETES A MODULE.
+                // This is a plain Map keyed on the minified module name: a second
+                // pin matching the same module simply overwrote the first, and
+                // BOTH printed a cheerful "Pin:" success line. MEASURED on
+                // 2.1.263: two shipped pins both bind module `b2`
+                // (commands/remoteCommands.ts and services/compact/
+                // precomputedCompact.ts), the second wins, and
+                // commands/remoteCommands.js is ABSENT from the built tree while
+                // the log shows two successes. Confirmed independently by two
+                // agents, and present with the shipped ruleset alone.
+                // Related, same class: a pin aimed at an already-occupied path
+                // deletes whatever legitimately owned it — that cost two modules
+                // (5439 -> 5437 files) earlier in this project, with the build
+                // reporting success throughout.
+                // A pin is a rename of a FILE; two rules claiming one file is a
+                // rule bug, not a tie to be broken silently.
+                const prior = result.get(section.module_name);
+                if (prior && prior !== pin.source) {
+                    throw new Error(
+                        `pin collision: module "${section.module_name}" is claimed by BOTH ` +
+                        `"${prior}" and "${pin.source}". One of the two find keys is not ` +
+                        `unique to its module. Tighten it — silently keeping the last writer ` +
+                        `makes the other module vanish from the tree.`,
+                    );
+                }
                 result.set(section.module_name, pin.source);
                 console.log(`  Pin: ${section.module_name} → ${pin.source} (${pin.description ?? ""})`);
                 found = true;
@@ -1177,6 +1211,42 @@ function walkLocal(fn: ts.FunctionLikeDeclaration, localType: string, sf?: ts.So
             }
         }
 
+        // binding_element:PROP — name the local bound by an object-destructuring
+        // property whose SOURCE KEY is PROP:
+        //   let { status: xD, waitingFor: eGe, working: tGe } = IOo  →  (…:waitingFor) eGe
+        //
+        // This is the only walk that can reach a destructured local. Every other
+        // `local:*` variant tests `ts.isIdentifier(decl.name)`, which an
+        // ObjectBindingPattern fails by construction, so before this handler a
+        // destructured binding was unnameable no matter which find/walk pair was
+        // tried. React-Compiler output destructures heavily out of anonymous memo
+        // slots, so this reaches a whole class of symbols, not one.
+        //
+        // Keyed on the PROPERTY NAME, which is upstream source text: a minifier
+        // may rewrite the bound local (`eGe`) freely but must preserve the key
+        // (`waitingFor:`) or the object lookup breaks. That is what makes it
+        // version-stable.
+        //
+        // Shorthand (`let { waitingFor } = x`) is deliberately EXCLUDED: there
+        // the local IS the property name, so it is already unminified and needs
+        // no anchor — and binding it would emit a self-rename.
+        if (localType.startsWith("binding_element:") && ts.isObjectBindingPattern(node)) {
+            const wantKey = localType.slice("binding_element:".length);
+            if (wantKey) {
+                for (const el of node.elements) {
+                    if (
+                        el.propertyName &&
+                        ts.isIdentifier(el.propertyName) &&
+                        el.propertyName.text === wantKey &&
+                        ts.isIdentifier(el.name)
+                    ) {
+                        result = el.name.text;
+                        return;
+                    }
+                }
+            }
+        }
+
         ts.forEachChild(node, visit);
     }
 
@@ -1367,7 +1437,16 @@ function scanTreeForRule(rule: RootRule, index: TreeIndex): ScanCandidate[] {
 export function applyAnchorRules(deobDir: string, rulesPath: string): MatchResult[] {
     if (!fs.existsSync(rulesPath)) return [];
 
-    const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
+    const rules: AnchorRule[] = (JSON.parse(fs.readFileSync(rulesPath, "utf-8")) as AnchorRule[])
+        // `disabled: true` retires a rule WITHOUT deleting it, so the REASON it was
+        // retired stays beside it — delete the rule and the next person to meet the
+        // same symptom re-derives the whole diagnosis.
+        // ⚠️ Added because the flag was ALREADY BEING USED and silently IGNORED: a
+        // rule marked disabled still fired, so a "retirement" was a no-op that read
+        // as done. Anything shaped like an off-switch must switch something off.
+        // Filtered at LOAD, not in isPinRule() — a disabled pin dropped there would
+        // fall through to the root-rule path at :1463 and be misrouted, not disabled.
+        .filter((r) => (r as any).disabled !== true);
     return applyAnchorRulesFromRules(deobDir, rules);
 }
 
@@ -1748,7 +1827,16 @@ function isScopedWalk(walk: string): boolean {
 export function applyAnchorScopedRenamesInDir(deobDir: string, rulesPath: string): number {
     if (!fs.existsSync(rulesPath)) return 0;
 
-    const rules: AnchorRule[] = JSON.parse(fs.readFileSync(rulesPath, "utf-8"));
+    const rules: AnchorRule[] = (JSON.parse(fs.readFileSync(rulesPath, "utf-8")) as AnchorRule[])
+        // `disabled: true` retires a rule WITHOUT deleting it, so the REASON it was
+        // retired stays beside it — delete the rule and the next person to meet the
+        // same symptom re-derives the whole diagnosis.
+        // ⚠️ Added because the flag was ALREADY BEING USED and silently IGNORED: a
+        // rule marked disabled still fired, so a "retirement" was a no-op that read
+        // as done. Anything shaped like an off-switch must switch something off.
+        // Filtered at LOAD, not in isPinRule() — a disabled pin dropped there would
+        // fall through to the root-rule path at :1463 and be misrouted, not disabled.
+        .filter((r) => (r as any).disabled !== true);
     const walkRules = (rules.filter(isWalkRule) as WalkRule[]).filter((r) => isScopedWalk(r.walk));
     if (walkRules.length === 0) return 0;
 
