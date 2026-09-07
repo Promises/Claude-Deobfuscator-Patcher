@@ -1,0 +1,143 @@
+# patch: 010-cvstate-heartbeat-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 010-cvstate-heartbeat.patch.
+# version: authored against 2.1.263
+# depends: 002, 008
+# description: Emits {type:"cvstate"} every ~3s from inside the REPL: a
+#              reachability heartbeat carrying a COMPUTED idle flag. The server
+#              reconciles its idle flag from this, so a missed/lost idle frame
+#              self-heals within ~3s.
+#
+# WHY THIS EXISTS AT ALL (server room.ex, measured): there are exactly TWO paths
+#   to Router.went_idle -- patch 008's "idle" event and this cvstate reconcile.
+#   turn_complete is DELIBERATELY excluded from both. Without 010 a seat can be
+#   marked busy with nothing to clear it: cv_send is reject-busy so it bounces
+#   forever, and cv_status cannot diagnose it because polling makes the CALLER
+#   busy. Unrecoverable without a restart.
+#
+#   The SidecarClient.js fallback is NOT a substitute and does not make this
+#   redundant: it RE-ASSERTS the last SEEN idle, so it heals a LOST MESSAGE but
+#   not a MISSED EMISSION. This patch is the emission half -- it COMPUTES idle
+#   from live REPL state. The fallback self-configures (it stands down when it
+#   sees a foreign cvstate for 10s), so the two coexist with no flag to pass.
+#
+# ============================================================================
+# WHY THIS WAS PREVIOUSLY DECLINED, AND WHAT CHANGED
+# ============================================================================
+# The monolithic 010 needs four REPL locals: _h (status), mi (isLoading),
+# z (message queue), He (appState.tasks). On a chunked tree the REPL body is
+# React-Compiler output where those are minified names in NUMBERED MEMO-CACHE
+# SLOTS (cx[33], cx[34], ...). Binding them by slot index or position is a
+# SILENT MISBIND, and a heartbeat that LIES is strictly worse than one that is
+# absent: an absence is visible in cv_status, a false-healthy defeats the sweep
+# it feeds. So 010 was declined on purpose.
+#
+# WHAT CHANGED: the `local:binding_element:PROP` walk (tools-ts/src/anchor-rules.ts)
+# names a destructured local by its SOURCE PROPERTY NAME, which a minifier cannot
+# rewrite because the key performs the lookup. That made the status/waitingFor
+# locals addressable. Combined with the `useMessageQueue` rule -- keyed on the
+# PUBLIC, unminifiable method name getMainThreadQueueLength -- three of the four
+# terms became anchorable. NO NEW WALK TYPE WAS NEEDED for this patch.
+#
+# ============================================================================
+# 🔴 DEGRADED VS MONOLITHIC 010 -- STATED, NOT GLOSSED
+# ============================================================================
+#   TERM              MONOLITHIC 010   HERE       WHY
+#   status            _h               ANCHORED   replStatusForActivity
+#   message queue     z                ANCHORED   useMessageQueue()
+#   isLoading         mi               OMITTED    not in this hook's scope
+#   tasks             He               OMITTED    NO SAFE ANCHOR -- see below
+#
+# 🔴 THE `tasks` FIELD IS OMITTED, DELIBERATELY.
+#   The appState tasks registry was reached in 2.1.238 via the REPLComponent
+#   anchor, whose landmark regex is `isLocalJSXCommand === !0 && \w+\?\.jsx != null`.
+#   MEASURED on 2.1.263: the string `isLocalJSXCommand` occurs ZERO times in the
+#   whole tree. The anchor is DEAD, not relocated, so React_REPL, messageQueue
+#   and appStateTasks (which chains through it via runningTeammateTasksCall) are
+#   all ORPHANED and are skipped SILENTLY by the engine -- they produce no
+#   resolve line and no diagnostic.
+#   The obvious replacement landmark is the selector `function X(p){return p.tasks}`.
+#   MEASURED: that exact shape occurs 8 TIMES in useSwarmBanner.js. There is no
+#   semantic discriminator separating the appState registry from seven
+#   look-alikes, so any rule keyed on it would bind BY POSITION -- exactly the
+#   forbidden silent misbind.
+#   OMITTING IS SAFE AND IS NOT A FALSE SIGNAL. Server room.ex:217 reads
+#   `tasks = Map.get(message, "tasks", [])`, and log_task_change (room.ex:326)
+#   explicitly does NOT record an event when tasks are empty AND were already
+#   empty. So the omission is BLIND, never a false "tasks changed". Asserting a
+#   fabricated task list would be the lying-heartbeat hazard that got 010
+#   declined in the first place.
+#   CONSEQUENCE, stated plainly: a ZOMBIE BACKGROUND TASK IS NOT VISIBLE in
+#   cv_events on the chunked build. Idle self-healing -- the severe failure --
+#   IS restored. Task observability is not.
+#
+# THE IDLE TEST, and why it is not merely a port of the old expression:
+#   old:  _h !== 'waiting' && !mi && z.getMainThreadQueueLength() === 0
+#   here: replStatusForActivity !== 'waiting' && replStatusForActivity !== 'busy'
+#         && !replWaitingForActivity && useMessageQueue().getMainThreadQueueLength() === 0
+#   `mi` (isLoading) is not in this hook's scope. Its role -- "a turn is in
+#   flight" -- is covered by the status itself: upstream computes 'busy' for a
+#   running turn (see `if (xD === 'busy')` in this same function). Adding the
+#   explicit `!== 'busy'` term restores the turn-in-flight guard WITHOUT
+#   reaching into a memo slot. `!replWaitingForActivity` matches patch 008's
+#   own rest test, so both emitters agree on what "at rest" means.
+#   NOTE this is the same task-independent basis as 008: a background task
+#   cannot pin the seat busy, which is the precise failure this heartbeat
+#   exists to make VISIBLE rather than to suffer from.
+#
+# ANCHORS USED -- ALL VERIFIED WITH THE REAL ENGINE ON BOTH TREES, resolved node
+# source READ, not merely reported green:
+#   replStatusForActivity   .263 -> replStatusForActivity (95%)  useSwarmBanner.js:70086
+#                                  `replStatusForActivity = xD === 'idle' && FQr ? 'shell' : xD`
+#   replWaitingForActivity  .263 -> replWaitingForActivity (95%)  useSwarmBanner.js:70039
+#                                  `let { status: xD, waitingFor: replWaitingForActivity, ... } = IOo`
+#   useMessageQueue         .263 -> qc (100%)  _unmatched/0390_qye.js:26  `function qc(){ return De(t) ?? Xm(); }`
+#                           .260 -> Fc (100%)  (tree-scan rebind; the chunk FILENAME differs by version)
+#   `De` is VERIFIED to be useContext and `E` to be useEffect
+#   (_tentative/0341_reconciler.js:250,256 -> `s.H.useContext` / `s.H.useEffect`),
+#   so useMessageQueue() is a genuine hook and is called unconditionally at the
+#   top level of this hook body, obeying the Rules of Hooks. Upstream itself
+#   calls it exactly this way at useSwarmBanner.js:55475.
+#
+# 🔴 VERSION-LOCKED, and it FAILS LOUDLY rather than misbinding. Minified names
+#   (`$Oo`, `WOo`, `cx`, `E`, `qOo`) appear ONLY in context lines; every ADDED
+#   line uses anchored names or this patch's own `__cv*` locals. If the
+#   surrounding React-Compiler output drifts, the context fails and the patch is
+#   REJECTED -- it cannot apply while binding different variables.
+#
+# ⚠️ PRETTIER REFLOW TRAP (this is what broke patch 008): longer anchored names
+#   can make prettier re-wrap a call across lines, so a token-swapped hunk
+#   becomes unmatchable. This hunk was DERIVED FROM THE REAL TREE and then
+#   re-formatted with the build's own formatterSpecs.json (printWidth 100,
+#   tabWidth 4, singleQuote) -- VERIFIED byte-stable: prettier does not touch a
+#   single added line.
+#
+# ⚠️ NOT EXERCISED BY THE HEADLESS TURN TEST (no REPL). Applying is VERIFIED
+#   (git apply --check, with a corrupted-token positive control that FAILS).
+#   Live cvstate emission is BELIEVED, not measured.
+diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
+index 39d277a..e77156c 100644
+--- a/components/PromptInput/useSwarmBanner.js
++++ b/components/PromptInput/useSwarmBanner.js
+@@ -70113,6 +70113,22 @@ function useReplStatusEffects(AQr) {
+             (cx[37] = WOo));
+     else (($Oo = cx[36]), (WOo = cx[37]));
+     (E($Oo, WOo), YVe(IQr, replStatusForActivity, EQr));
++    let __cvQueue = useMessageQueue();
++    E(() => {
++        let __cvHb = setInterval(() => {
++            try {
++                globalThis.__claudiverse.mirrorMessage({
++                    type: 'cvstate',
++                    idle:
++                        replStatusForActivity !== 'waiting' &&
++                        replStatusForActivity !== 'busy' &&
++                        !replWaitingForActivity &&
++                        __cvQueue.getMainThreadQueueLength() === 0,
++                });
++            } catch (__e) {}
++        }, 3000);
++        return () => clearInterval(__cvHb);
++    }, [replStatusForActivity, replWaitingForActivity, __cvQueue]);
+     let qOo;
+     if (cx[38] === p) {
+         let BQr = H('tengu_terminal_sidebar', !1);

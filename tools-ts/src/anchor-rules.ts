@@ -186,11 +186,47 @@ export function resolvePinRules(rulesPath: string, modulesDir: string): Map<stri
                 // rule bug, not a tie to be broken silently.
                 const prior = result.get(section.module_name);
                 if (prior && prior !== pin.source) {
+                    // VERSION-SPECIFIC MERGES ARE EXPECTED, so a pin may declare
+                    // `yields_to`: the paths it will stand down for when upstream
+                    // merges its module into another. This is NOT a tie-break
+                    // convenience — it is how one ruleset stays correct across
+                    // versions where module IDENTITY differs.
+                    //
+                    // MEASURED: commands/remoteCommands is a separate module on
+                    // 2.1.238 (where patch 005 depends on its pin) and is MERGED
+                    // into the precomputed-compact chunk on 2.1.263 (one 5.6 MB
+                    // chunk holding both pin keys). A global `disabled` flag
+                    // cannot express that: disabling it fixed 263 and dropped 238
+                    // to 9/10 patches; restoring it fixed 238 and made 263 throw.
+                    // I broke each version once by fixing the other.
+                    //
+                    // A pin that yields keeps its rules pointed at the winner's
+                    // path, which is correct: the module is genuinely there now.
+                    const yieldsTo = ((pin as any).yields_to ?? []) as string[];
+                    if (yieldsTo.includes(prior)) {
+                        console.log(
+                            `  Pin: ${pin.source} YIELDS to ${prior} for module ` +
+                            `"${section.module_name}" (declared yields_to; upstream merged them)`,
+                        );
+                        found = true;
+                        break;
+                    }
+                    if (((result.get(section.module_name) && (pins.find(x => x.source === prior) as any)?.yields_to) ?? []).includes(pin.source)) {
+                        // The incumbent declared that IT yields to us — take over.
+                        console.log(
+                            `  Pin: ${prior} YIELDS to ${pin.source} for module "${section.module_name}"`,
+                        );
+                        result.set(section.module_name, pin.source);
+                        found = true;
+                        break;
+                    }
                     throw new Error(
                         `pin collision: module "${section.module_name}" is claimed by BOTH ` +
-                        `"${prior}" and "${pin.source}". One of the two find keys is not ` +
-                        `unique to its module. Tighten it — silently keeping the last writer ` +
-                        `makes the other module vanish from the tree.`,
+                        `"${prior}" and "${pin.source}". Either one find key is not unique to ` +
+                        `its module (tighten it), or upstream MERGED the two modules in this ` +
+                        `version — in which case add "yields_to": ["${prior}"] to the pin that ` +
+                        `should stand down. Silently keeping the last writer makes the other ` +
+                        `module vanish from the tree.`,
                     );
                 }
                 result.set(section.module_name, pin.source);
