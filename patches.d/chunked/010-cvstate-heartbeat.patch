@@ -135,6 +135,30 @@
 #   structural drift. Revert to useMessageQueue() once the cross-chunk rename
 #   actually lands.
 #
+#
+# ✅ ADJUDICATED 2026-09-08 — THE OMITTED `tasks` FIELD IS ACCEPTED, NOT PENDING.
+#   watcher-2 answered from PRACTICE, not preference: across ~40 sweeps it
+#   enumerated every instrument the sweep uses — #fleet-control HALT posts,
+#   `tmux ls` occupancy, capture-pane md5 over 60s, build-artifact mtimes,
+#   forum queue depth, the runner panes, and `ps -eo pid,lstart,command`.
+#   NOT ONE reads a cvstate field. Its sweep procedure actively FORBIDS the
+#   nearest equivalent — "cv_status discriminates nothing" — a ruling earned when
+#   a quota-dead seat reported "busy" for four and a half hours. The sweep
+#   deliberately does not trust agent-reported state; it measures the machine.
+#   What it DOES need from a heartbeat is reachability: that it fires, at a
+#   predictable interval, with idle=false through a long blocking call. That is
+#   the half a watcher cannot derive from outside — a silent seat and a dead seat
+#   look identical to tmux — and it is the half this patch ships (MEASURED: 5
+#   frames, gaps 3,3,3,3 s, idle=false through a 14 s blocking call).
+#
+#   ⚠️ watcher-2 bounded its answer to the WATCHER SWEEP and said to ask other
+#   consumers separately. MEASURED, so the bound can be widened on evidence
+#   rather than assumption: room.ex is the ONLY consumer of cvstate in the tree.
+#   It WRITES tasks into cv_events (:308, :332-334) and nothing reads them back —
+#   no orchestrator module, no other server module. The field is write-only
+#   telemetry today. If a dashboard or future consumer wants it, this becomes
+#   live work again; until then the omission costs nothing that exists.
+#
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
 index 39d277a..e77156c 100644
 --- a/components/PromptInput/useSwarmBanner.js
