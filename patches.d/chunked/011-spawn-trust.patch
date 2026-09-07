@@ -30,27 +30,42 @@
 # ⚠️ NOT EXERCISED BY THE TURN TEST (the test cwd is already trusted, and a
 #   headless `-p` run does not reach the interactive trust gate). Applying and
 #   bundling are VERIFIED; the live bypass is BELIEVED.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk anchored on the function DECLARATION `function $o() {`, which
+#   is a bundler name (`Bo` on 2.1.263), plus several churning neighbours
+#   (`Xur`/`Jfr`, `jJe`/`LZe`, `Sde`/`Pde`).
+#
+# THE FIX — MOVE THE GUARD ONE LINE DOWN so it sits between two stable lines:
+#   The guard is now injected AFTER `let e = Q();` instead of before it. This
+#   is SEMANTICALLY EQUIVALENT: `Q()` is a pure store getter with no side
+#   effect, and the injected branch returns before `e` is otherwise read.
+#   The payoff is that the hunk's context becomes
+#           let e = Q();
+#           if (e.trustAccepted) return !0;
+#   both BYTE-IDENTICAL across .260 and .263, and the second is UNIQUE
+#   (1 occurrence in each tree, verified by grep -c). The churning
+#   `function Bo()` / `function $o()` line is now OUTSIDE the hunk.
+#
+# NO MINIFIED NAME ON ANY ADDED LINE. The added lines reference only
+# `process.env.CLAUDIVERSE_SKIP_TRUST`. The context minified names (`e`, `Q`)
+# are pinned by the context lines themselves.
+#
+# The catch binding was renamed `e` -> `__e` so it cannot shadow the outer
+# `e` now that the guard sits after that declaration.
+#
 diff --git a/entrypoints/sdk/coreSchemas.js b/entrypoints/sdk/coreSchemas.js
-index a62c4fb..9611530 100644
+index fc0550d..8bae489 100644
 --- a/entrypoints/sdk/coreSchemas.js
 +++ b/entrypoints/sdk/coreSchemas.js
-@@ -29055,16 +29055,19 @@ function ehr(e) {
-     return Vzt.includes(e);
- }
- var Xur = ['allowedTools', 'hasTrustDialogAccepted'];
- function jJe() {
-     Q().setTrustAccepted(!1);
- }
- 
- function $o() {
+@@ -29164,2 +29164,5 @@ function Bo() {
+     let e = Q();
 +    try {
 +        if (process.env.CLAUDIVERSE_SKIP_TRUST) return !0;
-+    } catch (e) {}
-     let e = Q();
++    } catch (__e) {}
      if (e.trustAccepted) return !0;
-     let n = Sde();
-     if (n) e.setTrustAccepted(!0);
-     return n;
- }
- 
- function sj() {

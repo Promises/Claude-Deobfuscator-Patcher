@@ -40,23 +40,70 @@
 #   wrong options object. Inlining the literal instead would remove the last
 #   minified name; it is left as-is to match the file's own idiom, and flagged
 #   here rather than hidden.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, AND DELIBERATELY MADE LOUDER
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED BY CHOICE. Applies to 2.1.263 (verified); FAILS on
+#         2.1.260 (verified). An EARLIER draft of this patch applied cleanly to
+#         BOTH trees — and that version was WRONG. See below; this is the one
+#         finding in this batch that a green check would have hidden.
+#
+# THE TRAP THAT WAS CAUGHT:
+#   The injected line passes an editor-helpers stub as submit()'s 2nd arg.
+#   On 2.1.263 that stub is `$k`; on 2.1.260 the SAME object is named `Tb`.
+#   A context-only anchoring (unique string 'PromptSubmitController used
+#   before its host was bound', identical in both trees) made the hunk APPLY
+#   to both. But `git apply` matches CONTEXT only — never added lines — so on
+#   .260 it would have emitted a reference to `$k`, and on .260 `$k` IS A
+#   DIFFERENT, LIVE LOCAL (`$k = Fc()`, a message queue, declared ~line 85128
+#   inside another function and NOT in scope at the injection site ~75513).
+#   Result: a clean `git apply --check` PASS that silently produces a
+#   ReferenceError, swallowed by the try/catch — the feature dies quietly.
+#   This is exactly the "applies but binds something entirely different"
+#   failure the anchor work exists to prevent.
+#
+# THE FIX — bind the name where it is DEFINED, not where it is used:
+#   Hunk 1 aliases the stub at its definition site:
+#       globalThis.__cvSubmitHelpers = $k;
+#   Hunk 2's added line then references ONLY `globalThis.__cvSubmitHelpers`.
+#   No minified name appears on ANY added line in this patch.
+#   Because hunk 1's context necessarily contains `var $k = {...}`, the patch
+#   now FAILS LOUDLY on a tree where the stub is renamed, instead of applying
+#   and misbinding. That is the intended trade: a loud, correct failure over a
+#   green check that ships a dead feature.
+#
+# ANCHORS USED: 'PromptSubmitController used before its host was bound'
+#   (UNIQUE, 1 occurrence, byte-identical in both trees — `bindHost` alone is
+#   NOT usable: 7 occurrences in each tree) and the stub's own body literal
+#   `{ setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} }`.
+#
+# ⛔ WHAT WOULD UNBLOCK IT: an anchor rule naming the editor-helpers stub.
+#   Then hunk 1 anchors on a stable name and the whole patch goes
+#   version-independent with no loss of loudness.
+#
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
-index dc1d67d..eeeb1d9 100644
+index de8c6aa..978385d 100644
 --- a/components/PromptInput/useSwarmBanner.js
 +++ b/components/PromptInput/useSwarmBanner.js
-@@ -75509,12 +75513,15 @@ class Xie {
-     #t = null;
+@@ -16339,4 +16339,5 @@ F();
+ F();
+ var $k = { setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} };
++globalThis.__cvSubmitHelpers = $k;
+ function V7(kpn) {
+     let Qbe = _(8),
+@@ -77084,10 +77089,14 @@ class Qce {
      constructor(w) {
          this.#e = w;
      }
      bindHost(w) {
          this.#t = w;
 +        try {
-+            globalThis.__claudiverseSubmit = (__text) => this.submit(__text, Tb);
++            globalThis.__claudiverseSubmit = (__text) =>
++                this.submit(__text, globalThis.__cvSubmitHelpers);
 +        } catch (__e) {}
      }
      #o() {
          if (!this.#t) throw Error('PromptSubmitController used before its host was bound');
          return this.#t;
      }
-     submit = async (w, H, ne) => {

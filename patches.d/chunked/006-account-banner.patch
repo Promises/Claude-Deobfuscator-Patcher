@@ -28,15 +28,49 @@
 #   build-CONSTANT key (not a build-varying value) and was verified UNIQUE
 #   across the whole 2.1.260 tree, so within the right file the hunk cannot
 #   land anywhere else. The added line introduces no identifier at all.
-diff --git a/_unmatched/0003_Px.js b/_unmatched/0003_Px.js
-index e02091f..59e624d 100644
---- a/_unmatched/0003_Px.js
-+++ b/_unmatched/0003_Px.js
-@@ -20,6 +20,6 @@ function Px(
-         DD_SOURCEMAP_GROUP: 'darwin',
-     }.BUILD_REF_NAME,
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — RE-CONTEXTED TO 2.1.263
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED, AND STRUCTURALLY UNFIXABLE AS A GIT PATCH.
+#         Applies to 2.1.263 (verified); FAILS on 2.1.260 (verified).
+#
+# WHAT BLOCKS IT — THE FILENAME, not the hunk:
+#   The target is the deobfuscator's unmatched-chunk bucket, and the FILE NAME
+#   itself embeds the minified export:
+#       2.1.260:  _unmatched/0003_Px.js
+#       2.1.263:  _unmatched/0003_$x.js
+#   `git apply` matches paths LITERALLY — there is no path-glob, no fuzz, no
+#   rename detection that helps here. The hunk body is already as stable as it
+#   can be (context trimmed to `) {` and `}`, both byte-identical), but the
+#   `diff --git` / `---` / `+++` lines can only name ONE path. So the failure
+#   happens before context is ever consulted, and no amount of anchoring
+#   inside the hunk can fix it.
+#
+# THE CONTENT ANCHOR THAT *WOULD* WORK (if the tool could use one):
+#   `BUILD_REF_NAME` occurs in EXACTLY ONE file in each tree (verified by
+#   grep -rl in both) — a perfect content-addressed landmark. The ordinal
+#   prefix `0003_` is also stable across both. Either would locate this file
+#   unambiguously, but neither is expressible in a git patch header.
+#
+# ⛔ WHAT WOULD UNBLOCK IT, in order of preference:
+#   1. An anchor rule naming this export (it is the build-ref/version-banner
+#      getter). The file would become `_unmatched/0003_<stableName>.js` and
+#      this patch would go version-independent for free.
+#   2. Have the deobfuscator name unmatched chunks by ORDINAL ONLY
+#      (`0003.js`), which is already stable, instead of ordinal+minified name.
+#   3. Apply this one edit with a content-addressed tool (sed/python keyed on
+#      BUILD_REF_NAME) rather than as a git patch.
+#
+# The hunk itself introduces NO minified name on the added line — the change
+# is a bare string literal return value.
+#
+diff --git a/_unmatched/0003_$x.js b/_unmatched/0003_$x.js
+index 3097700..ecd6b51 100644
+--- a/_unmatched/0003_$x.js
++++ b/_unmatched/0003_$x.js
+@@ -22,3 +22,3 @@ function $x(
  ) {
 -    return '';
 +    return ' [claudiverse]';
  }
- export { Px };

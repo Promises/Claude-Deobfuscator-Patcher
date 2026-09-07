@@ -27,65 +27,37 @@
 #   test says nothing about it; it applies cleanly and is syntactically carried
 #   into the bundle, but "custom commands actually appear in the REPL menu" is
 #   BELIEVED, not verified.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk carried ~30 lines of leading context, and EVERY one of those
+#   lines was a bare bundler identifier (`nkt`, `Msr`, `Pkt`, `Tor()`, `kJ`,
+#   `WUe`, `Zos`, `lir`, ...). Essentially all of them churn between builds,
+#   so the hunk had ~30 independent chances to fail and took every one.
+#
+# THE ANCHOR — PURELY STRUCTURAL, ZERO IDENTIFIERS:
+#   The command-table array ends with the 3-line sequence
+#           ...[],
+#       ];
+#   }
+#   That sequence is UNIQUE (1 occurrence) in BOTH trees — verified by regex
+#   count in each. Context is now only `...[],` and `];`. The bare `...[],`
+#   line alone is NOT unique (4 occurrences in each tree, measured), which is
+#   why the closing `];` must stay in the hunk.
+#
+# NO MINIFIED NAMES AT ALL — not in context, not on the added line. The added
+# line references only `globalThis.__commandHooks`, which the custom module
+# publishes. This is the cleanest patch in the set.
+#
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index c075166..ec2164f 100644
+index c4ca553..2a390ea 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -225362,56 +225374,57 @@ function sss() {
-         nkt,
-         Msr,
-         Pkt,
-         bkt,
-         Tor(),
-         wor(),
-         kor,
-         bor,
-         Sor,
-         ...kJ('logout'),
-         JSt,
-         ...(WUe ? [WUe] : []),
-         ...(GUe ? [GUe] : []),
-         FSt,
-         Xrr,
-         ...[],
-         ...Zos,
-         Kor,
-         ...(Uir ? [Uir] : []),
-         Krr,
-         ...(Hir ? [Hir] : []),
-         iir,
-         ...(qpe ? [qpe] : []),
-         ...(Kkt ? [Kkt] : []),
-         ...(Ykt ? [Ykt] : []),
-         ...(Xkt ? [Xkt] : []),
-         ...lir,
+@@ -229026,2 +229038,3 @@ function Wds() {
          ...[],
 +        ...(globalThis.__commandHooks ? globalThis.__commandHooks.getCommands() : []),
      ];
- }
- 
- function CI() {
-     let e = yo();
-     return (
-         (e.builtinCommandNames ??= new Set(VUe().flatMap((n) => [n.name, ...(n.aliases ?? [])]))),
-         e.builtinCommandNames
-     );
- }
- 
- function One() {
-     let e = yo();
-     return (
-         (e.shippedCommandNames ??= new Set([
-             ...CI(),
-             ...Sre().flatMap((n) => [n.name, ...(n.aliases ?? [])]),
-             ...jgn(),
-         ])),
-         e.shippedCommandNames
-     );
- }
- 
- function hEe() {
-     return VUe();
- }
- 
- async function iss(e, n) {

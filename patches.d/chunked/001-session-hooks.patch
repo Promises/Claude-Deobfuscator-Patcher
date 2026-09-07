@@ -37,16 +37,38 @@
 #   monolithic patch would be permanently `undefined` and, because the site is
 #   try-guarded, would fail SILENTLY. modules/AAASessionHooks.js now publishes
 #   itself onto globalThis for exactly this reason (no-op on monolithic).
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk used 3 lines of leading context, which swept in the line
+#   `function y_r(e) {` — a bundler name that churns every build (it is `Cbr`
+#   on 2.1.263). The BODY it targets never changed; only a neighbour did. The
+#   patch was failing on a line it did not care about.
+#
+# THE ANCHOR:
+#   `return g()?.sessionId ?? n().id;` is BYTE-IDENTICAL and UNIQUE (1
+#   occurrence) in both 2.1.260 and 2.1.263 — verified by grep -c in each
+#   tree. Context is now exactly `function K() {` + that return line, so the
+#   churning neighbour is outside the hunk.
+#
+# MINIFIED NAMES STILL PRESENT (`K`, `g`, `n`) — WHY THIS IS SAFE:
+#   `g` and `n` DO appear on an added line. They are safe here only because
+#   the immediately following CONTEXT line is the identical expression
+#   `return g()?.sessionId ?? n().id;`: the patch cannot apply unless `g` and
+#   `n` still mean exactly what the added line assumes. If either is renamed,
+#   the context no longer matches and the hunk FAILS LOUDLY rather than
+#   binding a different function. `K` is version-stable across .260/.263 (both
+#   trees measured) but is not relied on for correctness — only for locating.
+#
 diff --git a/vendor/lodash/memoizeCapped.js b/vendor/lodash/memoizeCapped.js
-index 5ba5d4c..d7516f7 100644
+index 0bae2c1..580d56b 100644
 --- a/vendor/lodash/memoizeCapped.js
 +++ b/vendor/lodash/memoizeCapped.js
-@@ -3949,12 +3949,17 @@ var C = () => {
- };
- function y_r(e) {
-     C = e;
- }
- 
+@@ -4010,2 +4010,7 @@ function Cbr(e) {
  function K() {
 +    try {
 +        if (globalThis.__sessionHooks) {
@@ -54,8 +76,3 @@ index 5ba5d4c..d7516f7 100644
 +        }
 +    } catch (__e) {}
      return g()?.sessionId ?? n().id;
- }
- 
- function ze() {
-     let e = g()?.sessionId;
-     if (e) return no(e);

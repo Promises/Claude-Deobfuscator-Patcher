@@ -21,8 +21,8 @@
 #     therefore has to use the minified names. See MINIFIED NAMES below.
 #  2. The single `yield* queryLoop(params, consumedCommandUuids)` became a
 #     TERNARY over two loop generators:
-#       `o = yield* C8n() ? r3v(e, t, n) : R6f(e, t, n);`
-#     (`r3v` is a new observer-tap wrapper around the real loop `R6f`.) The
+#       `o = yield* isObserverAgentsEnabled() ? queryWithObserverTap(e, t, n) : queryLoop(e, t, n);`
+#     (`queryWithObserverTap` is a new observer-tap wrapper around the real loop `queryLoop`.) The
 #     ternary is preserved verbatim as the iterator initializer.
 #  3. notifySubagentLifecycle (ex-AJ6) CHANGED ARITY 3 -> 5. It is now
 #     `notifySubagentLifecycle(e.toolUseContext.session.precompute, s,
@@ -45,15 +45,15 @@
 #     utils/forkedAgent.js, utils/hooks/execAgentHook.js).
 #
 # MINIFIED NAMES USED (unavoidable — see change 1):
-#     gce  = the query entrypoint (async generator; the module's exported query
+#     query  = the query entrypoint (async generator; the module's exported query
 #            driver, imported by REPL/QueryEngine/AgentTool/tasks)
 #     e    = its sole parameter (ex-`params`)
-#     C8n  = git-operation-tracking predicate selecting the observer-tap arm
-#     r3v  = observer-tap loop wrapper;  R6f = the underlying query loop
+#     isObserverAgentsEnabled  = git-operation-tracking predicate selecting the observer-tap arm
+#     queryWithObserverTap  = observer-tap loop wrapper;  queryLoop = the underlying query loop
 #     t, n = the two command-uuid accumulators;  o = the terminal result
 #     Because a wrong minified name on an ADDED line would silently stop
 #     mirroring with NO error, the query.js hunk is emitted with -U10 so that
-#     BOTH the defining line `async function* gce(e) {` AND the anchored
+#     BOTH the defining line `async function* query(e) {` AND the anchored
 #     `notifySubagentLifecycle(` call sit in CONTEXT. Any rename of the
 #     entrypoint, its parameter, or the lifecycle notifier makes the patch FAIL
 #     TO APPLY rather than apply-and-do-nothing.
@@ -94,14 +94,14 @@ index 73c7e87..db52490 100644
          : void 0;
  }
  
- async function* gce(e) {
+ async function* query(e) {
      let t = [],
          r = performance.now(),
          n = [],
          o;
      try {
--        o = yield* C8n() ? r3v(e, t, n) : R6f(e, t, n);
-+        let __it = C8n() ? r3v(e, t, n) : R6f(e, t, n),
+-        o = yield* isObserverAgentsEnabled() ? queryWithObserverTap(e, t, n) : queryLoop(e, t, n);
++        let __it = isObserverAgentsEnabled() ? queryWithObserverTap(e, t, n) : queryLoop(e, t, n),
 +            __s;
 +        while (!(__s = await __it.next()).done) {
 +            try {

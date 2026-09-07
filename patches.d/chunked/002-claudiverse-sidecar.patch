@@ -38,46 +38,69 @@
 #     Fue. The mapping is inert (it is not applied to this chunk), but it is a
 #     standing trap for anyone who trusts that file instead of reading the code.
 #
-#     Mitigation: the hunk is emitted with -U10 so BOTH the defining line
-#     `async function* EM(e) {` AND the anchored string literal 'subagent_exit'
-#     sit in CONTEXT. Every minified name is context; the only names introduced
-#     on added lines are globalThis.__claudiverse and the __-prefixed locals.
-#     So a rename of the entrypoint, its parameter or the notifier makes this
-#     FAIL TO APPLY rather than apply-and-silently-stop-mirroring.
+#     Mitigation: every minified name sits in CONTEXT or on the REPLACED line;
+#     the only names introduced on added lines are globalThis.__claudiverse and
+#     the __-prefixed locals. So a rename of the entrypoint, its parameter or
+#     the loop generators makes this FAIL TO APPLY rather than
+#     apply-and-silently-stop-mirroring.
+#     (The old header claimed a -U10 emission; that is no longer accurate — see
+#      the 2026-09-07 note below for the context widths actually used.)
 #
 # WHY globalThis: see 001. The custom module's `var` is module-scoped in an ESM
 # graph and would be silently undefined at these try-guarded call sites.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — RE-CONTEXTED TO 2.1.263
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED. Applies to 2.1.263 ONLY (verified); FAILS on
+#         2.1.260 (verified). This patch could NOT be made version-independent
+#         and the blocking symbols are named below rather than papered over.
+#
+# WHAT BLOCKS IT — hunk 2, the generator-delegation rewrite:
+#   The hunk REPLACES the line
+#       d = yield* ble() ? oZo(e, t, o) : Oer(e, t, o);
+#   Every identifier on it is a bundler name that churns:
+#       2.1.260:  Rae / Y4o / I6n  and the array local `n`
+#       2.1.263:  ble / oZo / Oer  and the array local `t`
+#   A REPLACED line is matched content, so it must be reproduced exactly.
+#   There is no anchored alias for any of the three functions: they are
+#   module-local generator helpers with no export and no landed anchor name
+#   (checked against _renames.json for services/compact/precomputedCompact.js).
+#   Rewriting the site to go through a stable global would change evaluation
+#   order inside a generator's try/finally — not a safe blind edit.
+#
+#   Hunk 1 (cli/structuredIO.js) is ALSO version-locked, but only weakly: its
+#   context line is `prependUserMessage(t)` — the METHOD name is anchored and
+#   stable, only the PARAMETER renamed (`n` on .260, `t` on .263). The class
+#   `StructuredIO` IS a landed anchor and appears in the hunk header.
+#
+# ⛔ WHAT WOULD UNBLOCK IT: an anchor rule naming the three generator helpers
+#   (the `Rae`/`ble` pair especially — it is the "is precompute enabled"
+#   predicate). With those three named, hunk 2 becomes version-independent.
+#
+# NO MINIFIED NAME IS INTRODUCED ON AN ADDED LINE that is not also pinned by
+# the replaced line itself, which is inside the hunk — so drift FAILS LOUDLY.
+#
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index 1fc20f4..b867807 100644
+index 1d9da87..5947c7a 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -629,6 +629,9 @@ class Xie {
-     }
-     repliesLeftForNextProcess = 0;
-     prependUserMessage(n) {
+@@ -634,2 +634,5 @@ class StructuredIO {
+     prependUserMessage(t) {
 +        try {
 +            globalThis.__claudiverse.setStructuredIO(this);
 +        } catch (__e) {}
          (this.prependedLines.push(
-             S({
-                 type: 'user',
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index c075166..ec2164f 100644
+index c4ca553..13ad4f1 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -182294,21 +182294,33 @@ function K4o(e, n) {
- `)
-         : void 0;
- }
- 
- async function* EM(e) {
-     let n = [],
-         r = performance.now(),
+@@ -195015,7 +195015,19 @@ async function* FM(e) {
          o = [],
          d;
      try {
--        d = yield* Rae() ? Y4o(e, n, o) : I6n(e, n, o);
-+        let __it = Rae() ? Y4o(e, n, o) : I6n(e, n, o),
+-        d = yield* ble() ? oZo(e, t, o) : Oer(e, t, o);
++        let __it = ble() ? oZo(e, t, o) : Oer(e, t, o),
 +            __s;
 +        while (!(__s = await __it.next()).done) {
 +            try {
@@ -93,10 +116,3 @@ index c075166..ec2164f 100644
      } finally {
          let _ = e.toolUseContext.agentId;
          if (_)
-             Fue(
-                 e.toolUseContext.session.precompute,
-                 _,
-                 'subagent_exit',
-                 e.querySource,
-                 e.toolUseContext.storageV5,
-             );

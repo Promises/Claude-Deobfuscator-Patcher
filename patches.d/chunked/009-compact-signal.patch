@@ -24,23 +24,41 @@
 #
 # ⚠️ NOT EXERCISED BY THE TURN TEST (a one-shot `-p` turn never compacts).
 #   Applying and bundling are VERIFIED; live emission is BELIEVED.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk used wide context that included the enclosing declaration
+#   `function gtt(e, { keepsCachedPrefix: t = !1 } = {})` — and that name is a
+#   bundler name (`crt` on 2.1.263). The statement the patch actually targets
+#   is unchanged between builds.
+#
+# THE ANCHOR:
+#   `        o.replaceLastMainThreadRequest(null, null);`
+#   UNIQUE (1 occurrence) in both trees, verified by grep -c in each. It is a
+#   METHOD call on the request journal — method names on this object survive
+#   minification (they are real API surface), which is what makes it stable.
+#   Context is that line plus the closing `}` of the function.
+#
+# MINIFIED NAME IN CONTEXT: `o` (the request-journal local). It appears ONLY
+# on the context line, never on an added line, and that context line is what
+# pins it. The added line references only `globalThis.__claudiverse`.
+#
+# NOTE: the hunk's line numbers were generated against a tree that also had
+# 001 applied, so its @@ offsets are ~5 lines skewed from a pristine tree.
+# git's normal offset search absorbs this — verified applying standalone to
+# BOTH pristine trees. No renumbering was hand-edited into the body.
+#
 diff --git a/vendor/lodash/memoizeCapped.js b/vendor/lodash/memoizeCapped.js
-index 5ba5d4c..d7516f7 100644
+index 0bae2c1..7ef81cc 100644
 --- a/vendor/lodash/memoizeCapped.js
 +++ b/vendor/lodash/memoizeCapped.js
-@@ -4398,12 +4403,15 @@ function XRt(e) {
- }
- 
- function gtt(e, { keepsCachedPrefix: t = !1 } = {}) {
-     let o = n().requestJournal;
-     if ((o.replacePendingPostCompaction(!0), o.replaceLastMainThreadContextTokens(e), !t))
+@@ -4459,2 +4464,5 @@ function crt(e, { keepsCachedPrefix: t = !1 } = {}) {
          o.replaceLastMainThreadRequest(null, null);
 +    try {
 +        globalThis.__claudiverse.mirrorMessage({ type: 'compact' });
 +    } catch (__e) {}
  }
- 
- function gIn() {
-     let e = n(),
-         t = e.requestJournal.pendingPostCompaction();
-     return (e.requestJournal.replacePendingPostCompaction(!1), t);

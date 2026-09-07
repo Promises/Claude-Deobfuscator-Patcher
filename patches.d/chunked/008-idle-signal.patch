@@ -37,24 +37,45 @@
 #
 # ⚠️ NOT EXERCISED BY THE HEADLESS TURN TEST (no REPL). Applying and bundling are
 #   VERIFIED; live idle emission is BELIEVED.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — RE-CONTEXTED TO 2.1.263
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED. Applies to 2.1.263 (verified); FAILS on 2.1.260
+#         (verified). Not fixable without an anchor; blocking symbols named.
+#
+# WHAT BLOCKS IT:
+#   The guard needs the CURRENT status value and the waiting-for value, and
+#   both are React-compiler-memoized locals destructured from an anonymous
+#   memo slot. Every identifier at the site churns:
+#       2.1.260:  l$e({ status: uie, waitingFor: ZHe }, JHe).catch(aPo)
+#       2.1.263:  xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo)
+#   The added line MUST read `uce`/`eGe` (the .263 spelling) because it tests
+#   their values. There is no stable alias: they come from
+#       let { status: xD, waitingFor: eGe, working: tGe } = IOo;
+#   where `IOo` is itself a memo-cache slot (`cx[15]`), not a named export.
+#
+# WHY IT IS NEVERTHELESS SAFE — option (b) from the brief, applied strictly:
+#   The minified names on the added line are pinned by the CONTEXT line
+#   directly above them, which is the call that DEFINES their meaning:
+#       xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo);
+#   That line is inside the hunk. If any of those names drift, the context
+#   fails and the patch is REJECTED — it cannot apply while binding different
+#   variables. Verified: this patch FAILS on 2.1.260 rather than misapplying.
+#
+# ⛔ WHAT WOULD UNBLOCK IT: an anchor rule naming the status-reporting call
+#   (`l$e`/`xUe` — it is the "report agent status" helper) AND the destructured
+#   status/waitingFor locals. Naming the helper alone is not enough; the guard
+#   reads the VALUES, so the locals are what must become stable.
+#
 diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
-index dc1d67d..eeeb1d9 100644
+index de8c6aa..978385d 100644
 --- a/components/PromptInput/useSwarmBanner.js
 +++ b/components/PromptInput/useSwarmBanner.js
-@@ -68651,12 +68651,16 @@ function die(TFr) {
-     else ((qRo = $C[31]), (GRo = $C[32]));
-     E(qRo, GRo);
-     let KRo, zRo;
-     if ($C[33] !== uie || $C[34] !== JHe || $C[35] !== ZHe)
-         ((KRo = () => {
-             l$e({ status: uie, waitingFor: ZHe }, JHe).catch(aPo);
+@@ -70104,2 +70105,6 @@ function dce(AQr) {
+             xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo);
 +            try {
-+                if (uie === 'idle' && !ZHe)
++                if (uce === 'idle' && !eGe)
 +                    globalThis.__claudiverse.mirrorMessage({ type: 'idle' });
 +            } catch (__e) {}
          }),
-             (zRo = [uie, ZHe, JHe]),
-             ($C[33] = uie),
-             ($C[34] = JHe),
-             ($C[35] = ZHe),
-             ($C[36] = KRo),
