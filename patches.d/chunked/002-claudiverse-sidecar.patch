@@ -81,26 +81,45 @@
 # NO MINIFIED NAME IS INTRODUCED ON AN ADDED LINE that is not also pinned by
 # the replaced line itself, which is inside the hunk — so drift FAILS LOUDLY.
 #
+#
+# 🔴 REGENERATED 2026-09-07 — ANCHOR-DRIVEN. Every identifier in both hunks is
+#   now an anchored name: query / isObserverAgentsEnabled / queryWithObserverTap
+#   / queryLoop / params / consumedCommandUuids, plus the class method
+#   prependUserMessage (a method name, which minifiers preserve). NO minified
+#   identifier appears on any ADDED line.
+#   The manual-iteration shape is preserved deliberately: an earlier
+#   for-await rewrite BROKE the generator protocol and lost the loop's return
+#   value, which the reason switch downstream reads.
+#   Re-derived from the real tree rather than token-swapped — on 008 a pure
+#   token swap produced correct names in an unmatchable hunk, because the
+#   longer names made prettier reflow the call across three lines.
+#
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
 index 1d9da87..5947c7a 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -634,2 +634,5 @@ class StructuredIO {
+@@ -632,6 +632,9 @@ class StructuredIO {
+     }
+     repliesLeftForNextProcess = 0;
      prependUserMessage(t) {
 +        try {
 +            globalThis.__claudiverse.setStructuredIO(this);
 +        } catch (__e) {}
          (this.prependedLines.push(
+             b({
+                 type: 'user',
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index c4ca553..13ad4f1 100644
+index b157e57..51dac18 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -195015,7 +195015,19 @@ async function* FM(e) {
+@@ -195015,7 +195015,21 @@ async function* query(params) {
          o = [],
          d;
      try {
--        d = yield* ble() ? oZo(e, t, o) : Oer(e, t, o);
-+        let __it = ble() ? oZo(e, t, o) : Oer(e, t, o),
+-        d = yield* isObserverAgentsEnabled() ? queryWithObserverTap(params, consumedCommandUuids, o) : queryLoop(params, consumedCommandUuids, o);
++        let __it = isObserverAgentsEnabled()
++                ? queryWithObserverTap(params, consumedCommandUuids, o)
++                : queryLoop(params, consumedCommandUuids, o),
 +            __s;
 +        while (!(__s = await __it.next()).done) {
 +            try {
@@ -110,9 +129,9 @@ index c4ca553..13ad4f1 100644
 +        }
 +        d = __s.value;
 +        try {
-+            if (!e.toolUseContext.agentId)
++            if (!params.toolUseContext.agentId)
 +                globalThis.__claudiverse.mirrorMessage({ type: 'turn_complete' });
 +        } catch (__e) {}
      } finally {
-         let _ = e.toolUseContext.agentId;
-         if (_)
+         let uuid = params.toolUseContext.agentId;
+         if (uuid)
