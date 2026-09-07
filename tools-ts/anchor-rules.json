@@ -909,8 +909,8 @@
       "string_literal": "Find and verify bugs in your branch using Claude Code on the web"
     },
     "description": "The module-init arrow populating the remote/web slash-command array. Keyed on the ultrareview command's user-visible description string (original source copy). MEASURED tree-unique on 168/200/215/238 and exactly 1 bundle-wide across all 16 sweep versions.",
-    "disabled": true,
-    "__retired": "RETIRED 2026-09-07 \u2014 pin collision on 2.1.263. Upstream MERGED this module with the precomputed-compact module: chunk 0260_b2.js (5,591,447 B) contains BOTH this pin's key ('Find and verify bugs in your branch...') and 'tengu_precomputed_compact_discarded'. Neither key is wrong; the two modules are now one chunk, so two pins claiming it is a contradiction. precomputedCompact wins because TWO chunked patches target that path (002, 005) and ZERO target remoteCommands. Before the collision guard existed this resolved silently by last-writer-wins, which is why commands/remoteCommands.js was ABSENT from the built tree while both pins logged success. Re-enable only if the modules split again upstream."
+    "__retired": "RETIRED 2026-09-07 \u2014 pin collision on 2.1.263. Upstream MERGED this module with the precomputed-compact module: chunk 0260_b2.js (5,591,447 B) contains BOTH this pin's key ('Find and verify bugs in your branch...') and 'tengu_precomputed_compact_discarded'. Neither key is wrong; the two modules are now one chunk, so two pins claiming it is a contradiction. precomputedCompact wins because TWO chunked patches target that path (002, 005) and ZERO target remoteCommands. Before the collision guard existed this resolved silently by last-writer-wins, which is why commands/remoteCommands.js was ABSENT from the built tree while both pins logged success. Re-enable only if the modules split again upstream.",
+    "__note": "\u26a0\ufe0f COLLIDES ON 2.1.263 ONLY. Upstream merged this module with the precomputed-compact one there (chunk 0260_b2.js, 5.6 MB, holds BOTH pin keys), so resolvePinRules now THROWS. It does NOT collide on 2.1.238, where the modules are still separate and patch 005 depends on this pin: retiring it orphaned remoteCommandsModule -> remoteWebCommands and silently broke 005 on the FLEET path. Kept enabled. The 263 collision needs a version-aware resolution, not a blanket disable \u2014 `disabled` is version-blind and this rule is correct on one version and impossible on the other."
   },
   {
     "type": "pin",
@@ -938,13 +938,13 @@
   },
   {
     "id": "remoteCommandsModule",
-    "file": "commands/remoteCommands.js",
     "find": {
       "string_literal": "Find and verify bugs in your branch using Claude Code on the web"
     },
     "scope": "module_init",
     "anchor_only": true,
-    "anchor_positional": true
+    "anchor_positional": true,
+    "file": "commands/remoteCommands.js"
   },
   {
     "id": "notifySubagentLifecycle",

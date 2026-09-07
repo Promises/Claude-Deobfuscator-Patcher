@@ -187,8 +187,65 @@ def content_supports(name, body, strict=False):
     return any(t.encode() in flat for t in tokens)
 
 
+def fat_length(data, off):
+    """On-disk length of the universal ("fat") Mach-O at `off`, or None.
+
+    🔴 THIS IS THE 2.1.263 REGRESSION. Two of the embedded addons are FAT
+    binaries (magic `0xcafebabe`, x86_64 + arm64 slices), not thin Mach-Os.
+    `macho_length` understands only the thin magic and returned None for them,
+    so `plain_members` fell back to its "skip to the next zstd frame" rule --
+    and that fallback is a LAYOUT ACCIDENT, not a bound: it discards everything
+    between the header and the next frame, however much that is.
+
+    MEASURED, and this is why the regression looks version-specific while the
+    defect is not: BOTH builds contain the same two fat members and BOTH take
+    the fallback. On 2.1.260 the next frame starts at 193744857, which happens
+    to be BEFORE the two `loopAutonomousPreamble` members at 193773379/193778352,
+    so they survived. On 2.1.263 the next frame starts at 194755832, which is
+    AFTER them (194745478/194750451) -- so the same fallback swallowed 4.2 MB
+    including both, the member walk emitted 72 bodies instead of 74, every later
+    index shifted by 2, and the positional self-check correctly reported 0/3.
+    The content passes were unaffected, which is why only the positional figure
+    collapsed (69 -> 0).
+
+    The header is BIG-endian (unlike the thin header's little-endian fields) and
+    gives each slice's offset and size directly, so the length is the maximum
+    `offset + size` over the arch table. Validated structurally rather than
+    trusted: every slice offset must actually hold a Mach-O magic, which a
+    coincidental `0xcafebabe` inside compressed data will not satisfy. (That
+    magic is also Java's class-file magic, hence the check rather than a bare
+    parse.) Self-validating on this binary -- both computed ends land exactly
+    one NUL before the next member (193053380 -> the second fat header,
+    194745477 -> `# Autonomous loop check`).
+    """
+    if data[off : off + 4] != b"\xca\xfe\xba\xbe":
+        return None
+    try:
+        nfat = struct.unpack_from(">I", data, off + 4)[0]
+    except struct.error:
+        return None
+    if not 0 < nfat < 32:
+        return None
+    end = 0
+    for i in range(nfat):
+        try:
+            offset, size = struct.unpack_from(">II", data, off + 8 + i * 20 + 8)
+        except struct.error:
+            return None
+        if offset == 0 or size == 0 or off + offset + size > len(data):
+            return None
+        # A real slice starts with a Mach-O magic (64- or 32-bit, LE).
+        if data[off + offset : off + offset + 4] not in (
+            b"\xcf\xfa\xed\xfe",
+            b"\xce\xfa\xed\xfe",
+        ):
+            return None
+        end = max(end, offset + size)
+    return end or None
+
+
 def macho_length(data, off):
-    """On-disk length of the 64-bit Mach-O at `off`, or None if not one.
+    """On-disk length of the Mach-O at `off`, thin or fat, or None if not one.
 
     Needed because a Mach-O member must be stepped OVER by its own size. The
     previous rule -- skip to the next zstd frame -- silently discarded every
@@ -198,6 +255,8 @@ def macho_length(data, off):
     The length is the maximum `fileoff + filesize` over the LC_SEGMENT_64 load
     commands, which is how the linker lays the image out.
     """
+    if data[off : off + 4] == b"\xca\xfe\xba\xbe":
+        return fat_length(data, off)
     if data[off : off + 4] != b"\xcf\xfa\xed\xfe":
         return None
     try:
