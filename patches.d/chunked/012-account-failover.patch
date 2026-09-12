@@ -1,0 +1,120 @@
+# patch: 012-account-failover-chunked
+# format: CHUNKED ONLY (2.1.242+)
+# version: authored against 2.1.263
+# depends: 002
+# description: Mid-session Anthropic account failover and pool-backed token
+#              renewal. Two triggers, one behaviour: ask claudiverse for a
+#              usable credential.
+#
+# WHY THIS EXISTS. Without it, a leased session is fixed to the account it got
+# at startup. Hit that account's rate limit and the session STOPS — the pool
+# reroutes the NEXT process, not this one. Same for token expiry: the server
+# keeps its copy fresh, but nothing here re-fetches it.
+#
+# HUNK 1 — services/compact/precomputedCompact.js, in withRetryGenerator.
+#   On a 429, report the limit to claudiverse, take the account it hands back,
+#   invalidate the token cache and `continue`. A switch costs one retry instead
+#   of a failed turn. This is the 2.1.263 successor to the 2.1.238 site the old
+#   004-multi-account patch hooked (Ny6 -> withRetryGenerator, P -> Ke,
+#   cq -> Lt, vw3 -> Ako, dIK -> bTn).
+#
+#   🔑 Hw() IS LOAD-BEARING. It is the cache invalidator on this version
+#   (coreSchemas.js:35005 -> iH() -> Use()). Swapping the env var WITHOUT it
+#   changes nothing: the process keeps serving the old token from the memo and
+#   the failover reports success while doing nothing. An earlier attempt put the
+#   clear inside SidecarClient, where the binding does not exist — behind a
+#   `typeof` guard, so it threw nothing, logged nothing, and never ran.
+#
+#   🔴 WHEN NO ACCOUNT IS AVAILABLE WE DO NOTHING AND FALL THROUGH, deliberately.
+#   Upstream already owns rate-limit backoff, the resets-at message and
+#   auto-continue. Operator: "it should work like claude usually does, it should
+#   just stick with the first refreshing one and pause until its available".
+#   Substituting our own waiting would replace working behaviour with a worse
+#   copy. The account is still cooled SERVER-side so new sessions route around
+#   it; this one keeps its token, which stays valid because a rate limit is not
+#   an auth failure.
+#
+# HUNK 2 — main.js, in runOnboarding (ja), the interactive-only path.
+#   Registers our pool lease as upstream's SDK OAuth refresh callback. Upstream
+#   fires it from recoverFromOAuth401 EXACTLY when there is no local refresh
+#   token, which is precisely our state (CLAUDE_CODE_OAUTH_TOKEN implies
+#   refreshToken:null), then installs the result and clears its own caches. So
+#   the 401/expiry path needs no logic here at all — only registration.
+#   cli/print.js already registers one for print/SDK mode; this covers the REPL.
+#
+#   ⚠️ GATED ON ACTUALLY LEASING, and that is not cosmetic. The retry loop reads
+#   kxe() at precomputedCompact.js:116420: with a callback registered, a refresh
+#   that returns the SAME token fails fast instead of retrying N times. Correct
+#   for us — the server is the authority, so retrying cannot help — but wrong to
+#   impose on a stock session that never leased. Hence the CLAUDIVERSE_TOKEN and
+#   CLAUDE_CODE_OAUTH_TOKEN guards.
+#
+# ANCHOR: hunk 1 lands inside `async function* withRetryGenerator(...)` — an
+#   ANCHORED name, so even git's @@ context hint is version-stable. The added
+#   lines reference Lt / Ako / Mot / Hw, which are minified; all four are
+#   verified in scope in that file (118 / 2 / 4 / 18 refs). They sit on added
+#   lines, so drift fails at RUNTIME rather than at apply time — accepted
+#   because no anchored equivalent exists for them, and the surrounding context
+#   lines still fail LOUDLY on structural drift.
+#
+# ⚠️ NOT EXERCISED: neither path has been triggered against a real 429 or a real
+#   expiry. Applying, parsing and bundling are VERIFIED; the behaviour is
+#   BELIEVED. Forcing a 429 needs an account actually at its limit.
+#
+diff --git a/main.js b/main.js
+index 41ac31b..59fef67 100644
+--- a/main.js
++++ b/main.js
+@@ -43,7 +43,7 @@ import {
+     Hz,
+     ym,
+     Sae,
+-    cMn,
++    cMn, pje,
+ } from './vendor/lodash/memoizeCapped.js';
+ import { Ie, po } from './_unmatched/0026_gZ.js';
+ import { M } from './_tentative/0000_ccrSession.js';
+@@ -6640,6 +6640,15 @@ async function ja(v) {
+         Ve = Bn(!1),
+         { getFpsMetrics: Tt, stats: Bt } = Ve;
+     YNn({ storageV5: fe });
++    try {
++        if (
++            process.env.CLAUDIVERSE_TOKEN &&
++            process.env.CLAUDE_CODE_OAUTH_TOKEN &&
++            globalThis.__claudiverse &&
++            globalThis.__claudiverse.requestOAuthTokenRefresh
++        )
++            pje(() => globalThis.__claudiverse.requestOAuthTokenRefresh());
++    } catch (__e) {}
+     let { createRoot: Je } = await import('./_unmatched/0514_Ansi.js'),
+         De = await Je(Ve.renderOptions, { storageV5: fe });
+     (i('tengu_timer', {
+diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
+index b3f2d5d..591f863 100644
+--- a/services/compact/precomputedCompact.js
++++ b/services/compact/precomputedCompact.js
+@@ -116718,6 +116718,23 @@ async function* withRetryGenerator(e, t, r) {
+                         continue;
+                     }
+                 }
++                try {
++                    if (
++                        Ke instanceof Lt &&
++                        Ke.status === 429 &&
++                        globalThis.__claudiverse &&
++                        globalThis.__claudiverse.failoverAnthropicAccount
++                    ) {
++                        let __cvFo = globalThis.__claudiverse.failoverAnthropicAccount(
++                            Ako(Ke),
++                            Mot(Ke.message ?? ''),
++                        );
++                        if (__cvFo && __cvFo.switched) {
++                            Hw();
++                            continue;
++                        }
++                    }
++                } catch (__e) {}
+                 let cn = bTn(Ke),
+                     It;
+                 if (tn)

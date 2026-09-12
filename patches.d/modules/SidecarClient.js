@@ -40,9 +40,19 @@ var __claudiverse = (function() {
   //
   // Mutating process.env is what upstream itself does in its 401 recovery path
   // (recoverFromOAuth401 sets CLAUDE_CODE_OAUTH_TOKEN then clears caches), so
-  // this is the sanctioned mechanism rather than a trick. The cache clear is
-  // NOT optional: getClaudeAIOAuthTokens is memoized, so without it the process
-  // keeps serving the old token from the memo and the swap does nothing.
+  // this is the sanctioned mechanism rather than a trick.
+  //
+  // 🔴 THIS DOES NOT INVALIDATE THE TOKEN CACHE — THE CALLER MUST.
+  // An earlier version called `getClaudeAIOAuthTokens.cache.clear()` here. DEAD
+  // CODE: that binding does not exist in this module's scope. It sat behind a
+  // `typeof` guard, so it threw nothing, logged nothing, and simply never ran —
+  // the env var would change while the process kept serving the OLD token from
+  // the memo. A failover reporting success and changing nothing, which is the
+  // failure shape this whole feature keeps producing.
+  // On 2.1.263 the invalidator is `Hw()` (coreSchemas.js:35005 -> iH() ->
+  // Use()), which IS in scope at the retry-loop patch site. The 401 path needs
+  // no call: upstream's recoverFromOAuth401 runs Hw() itself immediately after
+  // installing whatever the callback returned.
   function applyLease(body) {
     if (!body || !body.access_token) return false;
     process.env.CLAUDE_CODE_OAUTH_TOKEN = body.access_token;
@@ -54,8 +64,9 @@ var __claudiverse = (function() {
     // Everything gated on scopes.includes("user:profile") then refuses —
     // Remote Control, /code-review ultra — reporting the token as
     // "inference-only", even though the leased token genuinely carries
-    // user:profile (we request org:create_api_key + user:profile +
-    // user:inference at authorize time).
+    // user:profile — the server requests the full set Claude Code itself asks
+    // for (org:create_api_key, user:profile, user:inference,
+    // user:sessions:claude_code, user:mcp_servers, user:file_upload).
     // These are the token's REAL scopes as returned by the exchange, not a
     // claim we invent; upstream populates the same variable the same way at
     // utils/managedEnvConstants.js:7125.
@@ -65,11 +76,6 @@ var __claudiverse = (function() {
     }
 
     leasedAuthId = body.auth_id != null ? body.auth_id : leasedAuthId;
-    try {
-      if (typeof getClaudeAIOAuthTokens !== "undefined" && getClaudeAIOAuthTokens.cache && getClaudeAIOAuthTokens.cache.clear) {
-        getClaudeAIOAuthTokens.cache.clear();
-      }
-    } catch (e) {}
     return true;
   }
 
