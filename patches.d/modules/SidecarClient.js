@@ -22,6 +22,64 @@ var __claudiverse = (function() {
   var TOKEN = process.env.CLAUDIVERSE_TOKEN || "";
   var DEBUG = process.env.CLAUDIVERSE_DEBUG === "1";
 
+  // --- Anthropic account lease (AnthropicAuths) ------------------------------
+  //
+  // Any session connected to claudiverse takes its Anthropic credentials from
+  // the server pool. Not just runner-spawned workers — a hand-launched seat, a
+  // long-lived watcher, anything with CLAUDIVERSE_TOKEN set.
+  //
+  // Setting CLAUDE_CODE_OAUTH_TOKEN is the ENTIRE mechanism. Upstream, that env
+  // var makes getClaudeAIOAuthTokens() return a record with refreshToken:null,
+  // so refreshOAuthTokenWithLock returns 'no_refresh_token' and NEVER posts to
+  // Anthropic. The server becomes the only refresher, with no patch to upstream
+  // code at all. MEASURED: a bogus value gives "401 OAuth access token is
+  // invalid" and does NOT fall back to the keychain, so precedence holds.
+  //
+  // 🔴 THIS MUST BE SYNCHRONOUS, and that is the whole reason it looks like
+  // this. getClaudeAIOAuthTokens is MEMOIZED and reads process.env on its FIRST
+  // call. An async lease races the first API request; if the local keychain
+  // still holds valid credentials the request simply succeeds on them, the
+  // memo is filled, and the pool is silently never used. The failure mode of
+  // getting this wrong is not an error — it is everything appearing to work
+  // while the feature does nothing.
+  //
+  // Costs one curl (~100ms) at startup, once, and only when connected.
+  function leaseAnthropicAccount() {
+    // An explicitly provided token always wins — someone set it on purpose, and
+    // it is also what lets a spawn wrapper pre-lease during a transition.
+    if (process.env.CLAUDE_CODE_OAUTH_TOKEN) return;
+    if (!TOKEN || !BASE_URL) return;
+
+    try {
+      var execSync = require("child_process").execSync;
+      var out = execSync(
+        "curl -sS -m 6 -X POST " +
+          JSON.stringify(BASE_URL + "/api/anthropic_auths/lease") +
+          " -H " + JSON.stringify("Authorization: Bearer " + TOKEN) +
+          " -H 'Content-Type: application/json' -d '{}'",
+        { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] }
+      );
+      var body = JSON.parse(out);
+      if (body && body.access_token) {
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = body.access_token;
+        log("leased Anthropic account:", body.label || "(unlabelled)");
+      } else if (body && body.error) {
+        // Pool reachable but nothing to give — every account cooling down, or
+        // none enrolled. Fall through to local credentials rather than refusing
+        // to start: a human at a terminal should not be blocked by pool state,
+        // and the local keychain account is usually one of the pooled ones
+        // anyway, so it will fail at the API with a real rate-limit message
+        // rather than a confusing startup abort.
+        log("account lease unavailable:", body.error, body.next_available_at || "");
+      }
+    } catch (e) {
+      // Server down, curl missing, malformed JSON — all mean "no pool today".
+      // NEVER let this break startup: the pool is an enhancement, and a seat
+      // that cannot reach claudiverse must still run exactly as it does today.
+      log("account lease skipped:", String((e && e.message) || e).slice(0, 120));
+    }
+  }
+
   // State
   var ws = null;
   var currentJoinRef = null;
@@ -372,6 +430,9 @@ var __claudiverse = (function() {
   function isConnected() { return connected; }
 
   if (TOKEN) log("Token found, will connect on first message");
+  // Runs at module init, BEFORE any API call can memoize the credential lookup.
+  // See the comment on leaseAnthropicAccount for why this cannot be async.
+  leaseAnthropicAccount();
   if (TOKEN) startCvstateFallback();
 
   return {
