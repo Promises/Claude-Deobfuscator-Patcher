@@ -22,6 +22,146 @@ var __claudiverse = (function() {
   var TOKEN = process.env.CLAUDIVERSE_TOKEN || "";
   var DEBUG = process.env.CLAUDIVERSE_DEBUG === "1";
 
+  // --- Anthropic account pool (AnthropicAuths) --------------------------------
+  //
+  // Which account this process is currently running on. Needed so a 429 can
+  // tell the server WHICH account hit the limit — otherwise it would cool the
+  // wrong one, or cool nothing and hand back the same exhausted account.
+  var leasedAuthId = null;
+
+  // Don't switch for a short wait. If the current account frees up in under a
+  // minute, waiting is cheaper than burning the fallback's headroom on a blip —
+  // and upstream already handles a short rate limit gracefully. Carried over
+  // from the previous disk-based implementation, where it was measured to be
+  // the right call.
+  var FAILOVER_THRESHOLD_MS = 60000;
+
+  // Apply a leased credential to this process.
+  //
+  // Mutating process.env is what upstream itself does in its 401 recovery path
+  // (recoverFromOAuth401 sets CLAUDE_CODE_OAUTH_TOKEN then clears caches), so
+  // this is the sanctioned mechanism rather than a trick. The cache clear is
+  // NOT optional: getClaudeAIOAuthTokens is memoized, so without it the process
+  // keeps serving the old token from the memo and the swap does nothing.
+  function applyLease(body) {
+    if (!body || !body.access_token) return false;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = body.access_token;
+
+    // 🔑 SET THE SCOPES TOO, or the session is quietly downgraded.
+    // Upstream builds a synthetic credential record from the env var
+    // (coreSchemas.js `Dfe`), and its `scopes` come from `x0()`, which falls
+    // back to ["user:inference"] when CLAUDE_CODE_OAUTH_SCOPES is unset.
+    // Everything gated on scopes.includes("user:profile") then refuses —
+    // Remote Control, /code-review ultra — reporting the token as
+    // "inference-only", even though the leased token genuinely carries
+    // user:profile (we request org:create_api_key + user:profile +
+    // user:inference at authorize time).
+    // These are the token's REAL scopes as returned by the exchange, not a
+    // claim we invent; upstream populates the same variable the same way at
+    // utils/managedEnvConstants.js:7125.
+    if (body.scopes) {
+      process.env.CLAUDE_CODE_OAUTH_SCOPES =
+        Array.isArray(body.scopes) ? body.scopes.join(" ") : String(body.scopes);
+    }
+
+    leasedAuthId = body.auth_id != null ? body.auth_id : leasedAuthId;
+    try {
+      if (typeof getClaudeAIOAuthTokens !== "undefined" && getClaudeAIOAuthTokens.cache && getClaudeAIOAuthTokens.cache.clear) {
+        getClaudeAIOAuthTokens.cache.clear();
+      }
+    } catch (e) {}
+    return true;
+  }
+
+  // One synchronous POST to claudiverse. Sync for the same reason the startup
+  // lease is: the retry loop reads the result immediately and cannot await.
+  function postSync(path, payload) {
+    var execSync = require("child_process").execSync;
+    var out = execSync(
+      "curl -sS -m 8 -X POST " + JSON.stringify(BASE_URL + path) +
+        " -H " + JSON.stringify("Authorization: Bearer " + TOKEN) +
+        " -H 'Content-Type: application/json' -d " + JSON.stringify(JSON.stringify(payload || {})),
+      { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    return JSON.parse(out);
+  }
+
+  // --- mid-session failover, called from the API retry loop on a 429 ---------
+  //
+  // Returns { switched: bool }. The caller clears its own caches and `continue`s
+  // the retry loop, so a switch costs one retry rather than a failed turn.
+  //
+  // 🔴 WHEN NOTHING IS AVAILABLE WE RETURN switched:false AND DO NOTHING ELSE.
+  // That is deliberate: upstream already has a complete rate-limit path
+  // (backoff, the "resets at" message, the retry schedule). Substituting our own
+  // waiting would replace working behaviour with a worse copy. We only intervene
+  // when we can actually help — i.e. when a different usable account exists.
+  function failoverAnthropicAccount(resetDelayMs, isExtraUsage) {
+    if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return { switched: false };
+
+    // Short waits: sit them out rather than spend the fallback.
+    if (!isExtraUsage && typeof resetDelayMs === "number" && resetDelayMs >= 0 && resetDelayMs < FAILOVER_THRESHOLD_MS) {
+      log("rate limited, resets in " + resetDelayMs + "ms — under threshold, not switching");
+      return { switched: false };
+    }
+
+    try {
+      var resetsAt = typeof resetDelayMs === "number" && resetDelayMs > 0
+        ? new Date(Date.now() + resetDelayMs).toISOString()
+        : null;
+      var body = leasedAuthId != null
+        ? postSync("/api/anthropic_auths/" + leasedAuthId + "/rate_limited", {
+            resets_at: resetsAt,
+            reason: isExtraUsage ? "extra usage required for long context" : "rate limited (429)"
+          })
+        : postSync("/api/anthropic_auths/lease", {});
+
+      var next = body && body.next ? body.next : body;
+      if (applyLease(next)) {
+        var msg = "⚠ Switched to Anthropic account '" + (next.label || "?") + "'";
+        log(msg);
+        // stderr, not stdout: the user should SEE that the account changed —
+        // a silent switch makes later usage numbers inexplicable.
+        try { process.stderr.write("\n" + msg + "\n\n"); } catch (e) {}
+        return { switched: true };
+      }
+
+      log("no account available" + (body && body.next_available_at ? ", next at " + body.next_available_at : ""));
+      return { switched: false };
+    } catch (e) {
+      // Server unreachable mid-session — fall through to upstream's own
+      // handling rather than failing the turn on top of an existing failure.
+      log("failover failed:", String((e && e.message) || e).slice(0, 120));
+      return { switched: false };
+    }
+  }
+
+  // --- token renewal, wired to upstream's SDK refresh callback --------------
+  //
+  // Fires from recoverFromOAuth401 when there is no local refresh token — which
+  // is exactly our state, because CLAUDE_CODE_OAUTH_TOKEN implies refreshToken:
+  // null. Upstream then installs whatever we return and clears its caches, so
+  // this only has to fetch.
+  //
+  // The SERVER refreshes; we never hold a refresh token. A plain lease is the
+  // right call because the server hands back the highest-priority usable
+  // account with a currently-valid token — so this recovers from an expired
+  // token AND from an account that went cold since we leased it.
+  function requestOAuthTokenRefresh() {
+    if (!TOKEN) return null;
+    try {
+      var body = postSync("/api/anthropic_auths/lease", {});
+      if (body && body.access_token) {
+        leasedAuthId = body.auth_id != null ? body.auth_id : leasedAuthId;
+        log("renewed Anthropic token from pool:", body.label || "?");
+        return body.access_token;
+      }
+    } catch (e) {
+      log("token renewal failed:", String((e && e.message) || e).slice(0, 120));
+    }
+    return null;
+  }
+
   // --- Anthropic account lease (AnthropicAuths) ------------------------------
   //
   // Any session connected to claudiverse takes its Anthropic credentials from
@@ -61,8 +201,9 @@ var __claudiverse = (function() {
       );
       var body = JSON.parse(out);
       if (body && body.access_token) {
-        process.env.CLAUDE_CODE_OAUTH_TOKEN = body.access_token;
-        log("leased Anthropic account:", body.label || "(unlabelled)");
+        applyLease(body);
+        log("leased Anthropic account:", body.label || "(unlabelled)",
+            "scopes:", process.env.CLAUDE_CODE_OAUTH_SCOPES || "(default)");
       } else if (body && body.error) {
         // Pool reachable but nothing to give — every account cooling down, or
         // none enrolled. Fall through to local credentials rather than refusing
@@ -439,7 +580,12 @@ var __claudiverse = (function() {
     connect: autoConnect,
     mirrorMessage: mirrorMessage,
     setStructuredIO: setStructuredIO,
-    isConnected: isConnected
+    isConnected: isConnected,
+    // Mid-session account switching. Called from the API retry loop on a 429
+    // (failover) and from upstream's SDK refresh callback on a 401 (renewal).
+    // Both end at the same place: ask claudiverse for a usable credential.
+    failoverAnthropicAccount: failoverAnthropicAccount,
+    requestOAuthTokenRefresh: requestOAuthTokenRefresh
   };
 })();
 
