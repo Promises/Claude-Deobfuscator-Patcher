@@ -14,7 +14,31 @@
 # HUNK 1 — services/compact/precomputedCompact.js, in withRetryGenerator.
 #   On a 429, report the limit to claudiverse, take the account it hands back,
 #   invalidate the token cache and `continue`. A switch costs one retry instead
-#   of a failed turn. This is the 2.1.263 successor to the 2.1.238 site the old
+#   of a failed turn.
+#
+#   🔴 POSITION IS LOAD-BEARING: AT THE TOP OF THE CATCH, NOT NEAR THE BOTTOM.
+#   v1 of this patch inserted at :116721, just before `let cn = bTn(Ke)`, which
+#   is where the 2.1.238 patch sat. It NEVER FIRED. Cause: TWENTY early exits
+#   sit between the catch and that point, and one of them claims 429s first —
+#     let je = Mr() ? d.fastMode && !Sse() : !1;                  (:116385)
+#     if (je && !dR() && Ke instanceof Lt && (Ke.status === 429 || AD(Ke))) {
+#         ... d.fastMode = !1; continue;                          (:116555)
+#   With FAST MODE ON a rate limit disables fast mode and retries, consuming the
+#   error 166 lines before our hook. MEASURED: the sidecar log showed only
+#   `leased Anthropic account` and NOT ONE `Switched`, `no account available`,
+#   or even the under-threshold line — proof the function was never CALLED, as
+#   distinct from returning the wrong answer.
+#   ⚠️ I verified the insertion point was correct and never checked whether
+#   anything UPSTREAM of it claims a 429. A correct anchor in the wrong position
+#   applies cleanly, builds, and does nothing.
+#
+#   Now inserted immediately after `let ct = await r.onError?.(Ke)` — after the
+#   three non-retryable rethrows (O_, Xl, DLP) and after logging and the
+#   onError callback, but BEFORE every handler that can continue. The pool gets
+#   first refusal; when it cannot help it returns switched:false and every
+#   existing handler runs exactly as before. That is also better behaviour on
+#   the merits: switching to a healthy account beats degrading fast mode on an
+#   exhausted one. This is the 2.1.263 successor to the 2.1.238 site the old
 #   004-multi-account patch hooked (Ny6 -> withRetryGenerator, P -> Ke,
 #   cq -> Lt, vw3 -> Ako, dIK -> bTn).
 #
@@ -91,13 +115,13 @@ index 41ac31b..59fef67 100644
          De = await Je(Ve.renderOptions, { storageV5: fe });
      (i('tengu_timer', {
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index b3f2d5d..591f863 100644
+index b3f2d5d..8b7cb17 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -116718,6 +116718,23 @@ async function* withRetryGenerator(e, t, r) {
-                         continue;
-                     }
+@@ -116490,6 +116490,23 @@ async function* withRetryGenerator(e, t, r) {
+                     F.count++;
                  }
+                 let ct = await r.onError?.(Ke);
 +                try {
 +                    if (
 +                        Ke instanceof Lt &&
@@ -115,6 +139,6 @@ index b3f2d5d..591f863 100644
 +                        }
 +                    }
 +                } catch (__e) {}
-                 let cn = bTn(Ke),
-                     It;
-                 if (tn)
+                 if (ct && !ve.has(ct)) {
+                     ve.add(ct);
+                     let gn = Vot(Ke, d.model);

@@ -19,7 +19,47 @@ var __claudiverse = (function() {
 
   var BASE_URL = process.env.CLAUDIVERSE_URL || "http://localhost:4000";
   var WS_URL = BASE_URL.replace(/^http/, "ws") + "/socket/websocket";
-  var TOKEN = process.env.CLAUDIVERSE_TOKEN || "";
+  // The token, with a fallback to the --mcp-config file.
+  //
+  // 🔑 A SEAT MAY DELIBERATELY NOT CARRY THE TOKEN IN ITS ENVIRONMENT.
+  // startup-scripts/watcher-2.sh keeps it OFF the command line on purpose:
+  // "Putting it in this command would expose it to `tmux capture-pane -p` and
+  // to anyone reading the pane or `ps`. The seat process does not need it; only
+  // the MCP child does." That was TRUE until the account lease existed — the
+  // seat process needs it now, and the consequence of not finding it is silent:
+  // no lease, no mirroring, and a seat that looks completely healthy while using
+  // local credentials. MEASURED on watcher-2, which ran the new binary for hours
+  // without ever leasing.
+  //
+  // Reading the config keeps the script's decision intact instead of forcing the
+  // token onto a command line someone deliberately kept it off. cv-spawn.sh
+  // already does exactly this with jq; this is the same idea in-process.
+  function tokenFromMcpConfig() {
+    try {
+      if (!fs) return "";
+      var argv = process.argv || [];
+      for (var i = 0; i < argv.length; i++) {
+        if (argv[i] !== "--mcp-config") continue;
+        var cfgPath = argv[i + 1];
+        if (!cfgPath) continue;
+        var found = "";
+        // Walk the whole object: the key sits under mcpServers.<name>.env, but
+        // hunting a fixed path would break on any config shaped differently.
+        (function walk(node) {
+          if (found || !node || typeof node !== "object") return;
+          if (typeof node.CLAUDIVERSE_TOKEN === "string" && node.CLAUDIVERSE_TOKEN) {
+            found = node.CLAUDIVERSE_TOKEN;
+            return;
+          }
+          for (var k in node) if (Object.prototype.hasOwnProperty.call(node, k)) walk(node[k]);
+        })(JSON.parse(fs.readFileSync(cfgPath, "utf8")));
+        if (found) return found;
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  var TOKEN = process.env.CLAUDIVERSE_TOKEN || tokenFromMcpConfig();
   var DEBUG = process.env.CLAUDIVERSE_DEBUG === "1";
 
   // --- Anthropic account pool (AnthropicAuths) --------------------------------
@@ -102,8 +142,30 @@ var __claudiverse = (function() {
   // (backoff, the "resets at" message, the retry schedule). Substituting our own
   // waiting would replace working behaviour with a worse copy. We only intervene
   // when we can actually help — i.e. when a different usable account exists.
+  // 🔴 A 429 ARRIVING JUST AFTER A SWITCH USUALLY BELONGS TO THE OLD ACCOUNT.
+  // Requests already in flight when we swap the credential come back 429 a
+  // moment later, and the client has no per-request context — it can only
+  // attribute them to whatever is leased NOW. So the report cools the account
+  // we just switched TO.
+  // MEASURED, first live failover: Personal (session 100%) 429'd, we switched to
+  // Work correctly, and an in-flight 429 then cooled WORK — with PERSONAL's
+  // 12:40 reset time — while Work sat at session 3% / weekly 0%. Both accounts
+  // unavailable, and the pool blocked the whole fleet. A failover that disables
+  // the account it just rescued you with.
+  // A short quiet window after a switch is enough: in-flight requests land in
+  // seconds, and a genuine limit on the new account will still 429 after it.
+  var FAILOVER_QUIET_MS = 20000;
+  var lastSwitchAt = 0;
+
   function failoverAnthropicAccount(resetDelayMs, isExtraUsage) {
     if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return { switched: false };
+
+    var sinceSwitch = Date.now() - lastSwitchAt;
+    if (lastSwitchAt && sinceSwitch < FAILOVER_QUIET_MS) {
+      log("429 " + sinceSwitch + "ms after a switch — treating as in-flight from the " +
+          "previous account, not reporting");
+      return { switched: false };
+    }
 
     // Short waits: sit them out rather than spend the fallback.
     if (!isExtraUsage && typeof resetDelayMs === "number" && resetDelayMs >= 0 && resetDelayMs < FAILOVER_THRESHOLD_MS) {
@@ -124,6 +186,7 @@ var __claudiverse = (function() {
 
       var next = body && body.next ? body.next : body;
       if (applyLease(next)) {
+        lastSwitchAt = Date.now();
         var msg = "⚠ Switched to Anthropic account '" + (next.label || "?") + "'";
         log(msg);
         // stderr, not stdout: the user should SEE that the account changed —
@@ -577,6 +640,26 @@ var __claudiverse = (function() {
   function isConnected() { return connected; }
 
   if (TOKEN) log("Token found, will connect on first message");
+
+  // 🔴 SAY SOMETHING WHEN THE SEAT IS CONFIGURED BUT TOKENLESS.
+  // A seat with no claudiverse settings at all is deliberately disconnected and
+  // must stay silent. But one carrying CLAUDIVERSE_URL or CLAUDIVERSE_TITLE and
+  // NO token is a MISCONFIGURATION: it will mirror nothing and lease nothing,
+  // while looking completely healthy from outside.
+  // That is not hypothetical — watcher-2 ran the new binary for hours on local
+  // credentials because its token lives only in the MCP config, and the only
+  // way to notice was `ps eww` on the right pid. Debug logging would not have
+  // helped either: it is off by default, so the one place this was recorded was
+  // a file nobody was writing to.
+  // stderr, once, at startup — the cheapest place a human actually looks.
+  if (!TOKEN && (process.env.CLAUDIVERSE_URL || process.env.CLAUDIVERSE_TITLE)) {
+    try {
+      process.stderr.write(
+        "\nclaudiverse: configured but NO TOKEN found — not mirroring, not leasing an " +
+          "Anthropic account. Set CLAUDIVERSE_TOKEN, or pass --mcp-config with one.\n\n"
+      );
+    } catch (e) {}
+  }
   // Runs at module init, BEFORE any API call can memoize the credential lookup.
   // See the comment on leaseAnthropicAccount for why this cannot be async.
   leaseAnthropicAccount();
