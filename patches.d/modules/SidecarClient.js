@@ -21,19 +21,20 @@ var __claudiverse = (function() {
   var WS_URL = BASE_URL.replace(/^http/, "ws") + "/socket/websocket";
   // The token, with a fallback to the --mcp-config file.
   //
-  // 🔑 A SEAT MAY DELIBERATELY NOT CARRY THE TOKEN IN ITS ENVIRONMENT.
-  // startup-scripts/watcher-2.sh keeps it OFF the command line on purpose:
-  // "Putting it in this command would expose it to `tmux capture-pane -p` and
-  // to anyone reading the pane or `ps`. The seat process does not need it; only
-  // the MCP child does." That was TRUE until the account lease existed — the
-  // seat process needs it now, and the consequence of not finding it is silent:
-  // no lease, no mirroring, and a seat that looks completely healthy while using
+  // 🔑 A SEAT MAY NOT CARRY THE TOKEN IN ITS OWN ENVIRONMENT, ONLY IN ITS MCP
+  // CONFIG — and the consequence of not finding it is SILENT: no lease, no
+  // mirroring, and a seat that looks completely healthy while quietly running on
   // local credentials. MEASURED on watcher-2, which ran the new binary for hours
-  // without ever leasing.
+  // without ever leasing, because its launch script passed the token to the MCP
+  // child only. The reasoning there was sound before the lease existed ("the seat
+  // process does not need it; only the MCP child does") and simply stopped being
+  // true when the seat itself became a consumer.
   //
-  // Reading the config keeps the script's decision intact instead of forcing the
-  // token onto a command line someone deliberately kept it off. cv-spawn.sh
-  // already does exactly this with jq; this is the same idea in-process.
+  // ⚠️ watcher-2.sh has since been fixed to export it directly, so that script is
+  // no longer an example of this — but the fallback stays. Any launcher written
+  // against the old reasoning has the same silent failure, and nothing about a
+  // seat's appearance reveals it. cv-spawn.sh reads the config with jq for the
+  // same purpose; this is that idea in-process.
   function tokenFromMcpConfig() {
     try {
       if (!fs) return "";
@@ -119,17 +120,64 @@ var __claudiverse = (function() {
     return true;
   }
 
-  // One synchronous POST to claudiverse. Sync for the same reason the startup
-  // lease is: the retry loop reads the result immediately and cannot await.
-  function postSync(path, payload) {
-    var execSync = require("child_process").execSync;
-    var out = execSync(
-      "curl -sS -m 8 -X POST " + JSON.stringify(BASE_URL + path) +
-        " -H " + JSON.stringify("Authorization: Bearer " + TOKEN) +
-        " -H 'Content-Type: application/json' -d " + JSON.stringify(JSON.stringify(payload || {})),
-      { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"] }
-    );
-    return JSON.parse(out);
+  // Non-blocking POST. THE ONLY POST THIS MODULE MAKES AFTER STARTUP.
+  //
+  // 🔴 execSync BLOCKS THE ENTIRE NODE EVENT LOOP, AND THAT BROKE MCP.
+  // upgradeAnthropicAccount runs from the WebSocket message handler, at an
+  // arbitrary moment mid-session. Using postSync there stalled the process for
+  // up to 10s while curl ran — during which nothing could service MCP stdio, so
+  // the client timed out and the seat LOST ITS cv_* TOOLS.
+  // MEASURED: the server pushed anthropic_auth_upgrade to every connected seat
+  // at 14:40; watcher-2 reported losing its MCP tools. Its MCP child process was
+  // still alive (pid 88450, parent = the seat), so the server did not crash —
+  // the connection timed out because the parent went unresponsive.
+  // The startup lease gets away with being synchronous only because it runs
+  // BEFORE any MCP server exists. Nothing else does, so nothing else may block:
+  // the failover, the upgrade and the 401 renewal all go through here.
+  function postAsync(path, payload, cb) {
+    try {
+      var url = new URL(BASE_URL + path);
+      var mod = url.protocol === "https:" ? https : http;
+      if (!mod) return cb && cb(new Error("no http module"), null);
+      var body = JSON.stringify(payload || {});
+      var req = mod.request(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname + url.search,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + TOKEN,
+            "Content-Length": Buffer.byteLength(body),
+          },
+          timeout: 8000,
+        },
+        function (res) {
+          var data = "";
+          res.on("data", function (c) { data += c; });
+          res.on("end", function () {
+            try { cb && cb(null, JSON.parse(data)); }
+            catch (e) { cb && cb(e, null); }
+          });
+        }
+      );
+      req.on("error", function (e) { cb && cb(e, null); });
+      req.on("timeout", function () { req.destroy(); cb && cb(new Error("timeout"), null); });
+      req.write(body);
+      req.end();
+    } catch (e) {
+      cb && cb(e, null);
+    }
+  }
+
+  // Promise form, for callers that can await.
+  function post(path, payload) {
+    return new Promise(function (resolve, reject) {
+      postAsync(path, payload, function (err, body) {
+        if (err) reject(err); else resolve(body);
+      });
+    });
   }
 
   // --- mid-session failover, called from the API retry loop on a 429 ---------
@@ -157,8 +205,26 @@ var __claudiverse = (function() {
   var FAILOVER_QUIET_MS = 20000;
   var lastSwitchAt = 0;
 
+  // 🔴 THE QUIET WINDOW ONLY WORKS IF CONCURRENT 429s COALESCE.
+  // This function is ASYNC (the hook site awaits it — see the patch note). That
+  // is required so a failover does not block the event loop and stall MCP, but
+  // it introduces a race the blocking version could not have: two requests
+  // 429ing together both read lastSwitchAt BEFORE either sets it, both pass the
+  // guard, and both POST a rate_limited report. The second lands after the
+  // switch and cools the account we just moved to — the exact fleet-blocking
+  // failure the quiet window exists to prevent, reintroduced by the fix for a
+  // different bug.
+  // So a failover in flight is shared, not repeated: the second caller awaits
+  // the first one's result, which is also the right answer for it.
+  var failoverInFlight = null;
+
   function failoverAnthropicAccount(resetDelayMs, isExtraUsage) {
     if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return { switched: false };
+
+    if (failoverInFlight) {
+      log("429 while a failover is already in flight — joining it");
+      return failoverInFlight;
+    }
 
     var sinceSwitch = Date.now() - lastSwitchAt;
     if (lastSwitchAt && sinceSwitch < FAILOVER_QUIET_MS) {
@@ -173,17 +239,17 @@ var __claudiverse = (function() {
       return { switched: false };
     }
 
-    try {
-      var resetsAt = typeof resetDelayMs === "number" && resetDelayMs > 0
-        ? new Date(Date.now() + resetDelayMs).toISOString()
-        : null;
-      var body = leasedAuthId != null
-        ? postSync("/api/anthropic_auths/" + leasedAuthId + "/rate_limited", {
-            resets_at: resetsAt,
-            reason: isExtraUsage ? "extra usage required for long context" : "rate limited (429)"
-          })
-        : postSync("/api/anthropic_auths/lease", {});
+    var resetsAt = typeof resetDelayMs === "number" && resetDelayMs > 0
+      ? new Date(Date.now() + resetDelayMs).toISOString()
+      : null;
 
+    failoverInFlight = (leasedAuthId != null
+      ? post("/api/anthropic_auths/" + leasedAuthId + "/rate_limited", {
+          resets_at: resetsAt,
+          reason: isExtraUsage ? "extra usage required for long context" : "rate limited (429)"
+        })
+      : post("/api/anthropic_auths/lease", {})
+    ).then(function (body) {
       var next = body && body.next ? body.next : body;
       if (applyLease(next)) {
         lastSwitchAt = Date.now();
@@ -195,15 +261,19 @@ var __claudiverse = (function() {
         try { process.stderr.write("\n" + msg + "\n\n"); } catch (e) {}
         return { switched: true };
       }
-
       log("no account available" + (body && body.next_available_at ? ", next at " + body.next_available_at : ""));
       return { switched: false };
-    } catch (e) {
+    }).catch(function (e) {
       // Server unreachable mid-session — fall through to upstream's own
       // handling rather than failing the turn on top of an existing failure.
       log("failover failed:", String((e && e.message) || e).slice(0, 120));
       return { switched: false };
-    }
+    }).then(function (r) {
+      failoverInFlight = null;
+      return r;
+    });
+
+    return failoverInFlight;
   }
 
   // --- server-initiated upgrade back to a preferred account ------------------
@@ -224,16 +294,30 @@ var __claudiverse = (function() {
   // returns the highest-priority usable account, so if we are ALREADY on it,
   // nothing happens. That keeps the decision in one place (the server's ordering)
   // instead of duplicating priority logic here where it could drift.
+  //
+  // 🔴 THIS ONE IS ASYNC, AND THAT IS NOT A STYLE CHOICE — A SYNC VERSION BROKE
+  // MCP. It used postSync, which blocks the Node event loop for the duration of
+  // the curl. Unlike the startup lease, this runs at an ARBITRARY moment: the
+  // server pushes it the instant a cooldown lapses, to every connected seat at
+  // once. A seat holding an in-flight MCP request goes unresponsive for up to
+  // 10s and the client gives up on the server. MEASURED: the 14:40 upgrade push
+  // went out and watcher-2 lost its cv_* tools; its MCP child (pid 88450) was
+  // still alive under the seat, so nothing crashed — the PARENT stopped
+  // answering. Nothing here needs the result synchronously; the WebSocket
+  // handler discards it.
   function upgradeAnthropicAccount() {
-    if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return { switched: false };
+    if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return;
 
-    try {
-      var body = postSync("/api/anthropic_auths/lease", {});
-      if (!body || !body.access_token) return { switched: false };
+    postAsync("/api/anthropic_auths/lease", {}, function (err, body) {
+      if (err) {
+        log("upgrade failed:", String((err && err.message) || err).slice(0, 120));
+        return;
+      }
+      if (!body || !body.access_token) return;
 
       if (body.auth_id != null && body.auth_id === leasedAuthId) {
         log("upgrade offered but already on " + (body.label || "?"));
-        return { switched: false };
+        return;
       }
 
       var prev = leasedAuthId;
@@ -245,12 +329,8 @@ var __claudiverse = (function() {
         var msg = "⚠ Moved to preferred Anthropic account '" + (body.label || "?") + "'";
         log(msg + " (was auth " + prev + ")");
         try { process.stderr.write("\n" + msg + "\n\n"); } catch (e) {}
-        return { switched: true };
       }
-    } catch (e) {
-      log("upgrade failed:", String((e && e.message) || e).slice(0, 120));
-    }
-    return { switched: false };
+    });
   }
 
   // Invalidate the memoized credential record.
@@ -282,19 +362,31 @@ var __claudiverse = (function() {
   // right call because the server hands back the highest-priority usable
   // account with a currently-valid token — so this recovers from an expired
   // token AND from an account that went cold since we leased it.
+  // Returns a PROMISE, and upstream is fine with that: recoverFromOAuth401 does
+  // `let s = await n()` (utils/auth.js:9671), so a thenable is awaited exactly
+  // like a value. Worth using — see the postAsync note: blocking the event loop
+  // here would stall MCP the same way the upgrade push did, and a 401 recovery
+  // fires at an arbitrary moment mid-session.
+  // Resolve to null rather than rejecting on failure: upstream treats null as
+  // its documented "no token available" branch and logs at debug, whereas a
+  // throw is logged as an error at oauth_401_sdk_callback_failed. Not having a
+  // spare account is a normal state, not a fault.
   function requestOAuthTokenRefresh() {
     if (!TOKEN) return null;
-    try {
-      var body = postSync("/api/anthropic_auths/lease", {});
-      if (body && body.access_token) {
-        leasedAuthId = body.auth_id != null ? body.auth_id : leasedAuthId;
-        log("renewed Anthropic token from pool:", body.label || "?");
-        return body.access_token;
-      }
-    } catch (e) {
-      log("token renewal failed:", String((e && e.message) || e).slice(0, 120));
-    }
-    return null;
+    return new Promise(function (resolve) {
+      postAsync("/api/anthropic_auths/lease", {}, function (err, body) {
+        if (err) {
+          log("token renewal failed:", String((err && err.message) || err).slice(0, 120));
+          return resolve(null);
+        }
+        if (body && body.access_token) {
+          leasedAuthId = body.auth_id != null ? body.auth_id : leasedAuthId;
+          log("renewed Anthropic token from pool:", body.label || "?");
+          return resolve(body.access_token);
+        }
+        resolve(null);
+      });
+    });
   }
 
   // --- Anthropic account lease (AnthropicAuths) ------------------------------

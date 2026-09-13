@@ -42,6 +42,18 @@
 #   004-multi-account patch hooked (Ny6 -> withRetryGenerator, P -> Ke,
 #   cq -> Lt, vw3 -> Ako, dIK -> bTn).
 #
+#   🔑 AWAITED, AND THE SITE ALLOWS IT. The hook lands inside
+#   `async function* withRetryGenerator`, on the line after an existing
+#   `await r.onError?.(Ke)` — so awaiting costs nothing structurally and buys
+#   the thing that matters: the failover no longer BLOCKS THE EVENT LOOP.
+#   The first version called a synchronous curl here. That freezes the whole
+#   process for up to 10s, and anything waiting on the process — notably MCP
+#   stdio — times out. MEASURED on the same mechanism in the upgrade path: the
+#   14:40 server push made watcher-2 drop its cv_* tools while its MCP child was
+#   still alive, i.e. the parent had simply stopped answering.
+#   `await` on a non-thenable is also a no-op, so this stays correct against an
+#   older sidecar module that still returns a plain object.
+#
 #   🔑 Hw() IS LOAD-BEARING. It is the cache invalidator on this version
 #   (coreSchemas.js:35005 -> iH() -> Use()). Swapping the env var WITHOUT it
 #   changes nothing: the process keeps serving the old token from the memo and
@@ -81,9 +93,18 @@
 #   because no anchored equivalent exists for them, and the surrounding context
 #   lines still fail LOUDLY on structural drift.
 #
-# ⚠️ NOT EXERCISED: neither path has been triggered against a real 429 or a real
-#   expiry. Applying, parsing and bundling are VERIFIED; the behaviour is
-#   BELIEVED. Forcing a 429 needs an account actually at its limit.
+# ✅ EXERCISED (2026-09-13, both paths, in production):
+#   - 429 failover: Personal hit its session limit for real, the hook fired and
+#     the seat moved to Work mid-turn. It also exposed the in-flight-429 bug —
+#     a stale 429 from the OLD account cooled the NEW one and blocked the whole
+#     fleet — which is what FAILOVER_QUIET_MS and the server-side suspect-cap
+#     now defend against.
+#   - 401 renewal: forced with a deliberately invalid token; the callback fired
+#     and the pool re-leased.
+#   - switch-back: server push at 14:40 moved a seat from Work to Personal.
+#   What is still BELIEVED, not measured: the coalescing of two SIMULTANEOUS
+#   429s (failoverInFlight). It needs two concurrent requests limiting in the
+#   same tick, which I have not been able to stage.
 #
 #
 # HUNK 3 (added v3) — main.js registers globalThis.__cvClearAuthCache so the
@@ -164,7 +185,7 @@ index b3f2d5d..8b7cb17 100644
 +                        globalThis.__claudiverse &&
 +                        globalThis.__claudiverse.failoverAnthropicAccount
 +                    ) {
-+                        let __cvFo = globalThis.__claudiverse.failoverAnthropicAccount(
++                        let __cvFo = await globalThis.__claudiverse.failoverAnthropicAccount(
 +                            Ako(Ke),
 +                            Mot(Ke.message ?? ''),
 +                        );
