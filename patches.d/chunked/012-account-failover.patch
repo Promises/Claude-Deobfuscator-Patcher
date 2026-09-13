@@ -85,8 +85,22 @@
 #   expiry. Applying, parsing and bundling are VERIFIED; the behaviour is
 #   BELIEVED. Forcing a 429 needs an account actually at its limit.
 #
+#
+# HUNK 3 (added v3) — main.js registers globalThis.__cvClearAuthCache so the
+#   sidecar can invalidate the credential memo from OUTSIDE the retry loop. The
+#   server-push upgrade path needs it: it swaps the token at an arbitrary moment,
+#   and without invalidation the process keeps serving the memoized old one.
+#
+#   🔴 IMPORTED UNDER AN ALIAS, AND THAT IS NOT STYLE. `Hw` in main.js is a
+#   DIFFERENT FUNCTION — `async function Hw(v)` at :6162, exported as `main`.
+#   Registering the local one would have re-entered the application entrypoint on
+#   every token swap. Two modules, same minified name, both in scope; nothing
+#   warns. Caught only by grepping for the definition instead of assuming the
+#   name meant what it meant one file over. Same class as the pje collision.
+#
+
 diff --git a/main.js b/main.js
-index 41ac31b..59fef67 100644
+index 41ac31b..a1ec4ac 100644
 --- a/main.js
 +++ b/main.js
 @@ -43,7 +43,7 @@ import {
@@ -98,10 +112,31 @@ index 41ac31b..59fef67 100644
  } from './vendor/lodash/memoizeCapped.js';
  import { Ie, po } from './_unmatched/0026_gZ.js';
  import { M } from './_tentative/0000_ccrSession.js';
-@@ -6640,6 +6640,15 @@ async function ja(v) {
+@@ -120,6 +120,7 @@ import {
+     Sq,
+     _Q,
+     eBe,
++    Hw as __cvClearOAuthTokenCache,
+ } from './entrypoints/sdk/coreSchemas.js';
+ import { y, f, g } from './_tentative/0029_hooks.js';
+ import { Q } from './_unmatched/0061_yW.js';
+@@ -6640,6 +6641,28 @@ async function ja(v) {
          Ve = Bn(!1),
          { getFpsMetrics: Tt, stats: Bt } = Ve;
      YNn({ storageV5: fe });
++    // Expose the credential-cache invalidator to our own module. It is NOT in
++    // SidecarClient's scope, so without this the sidecar can change the token
++    // while the process keeps serving the memoized old one — a swap that reports
++    // success and does nothing.
++    // ⚠️ IMPORTED UNDER AN ALIAS ON PURPOSE. `Hw` in THIS file is a different
++    // function entirely — `async function Hw(v)`, exported as `main`. Calling
++    // that would re-enter the application entrypoint on every token swap. Same
++    // name, two modules; the collision is invisible because both are in scope.
++    try {
++        globalThis.__cvClearAuthCache = function () {
++            __cvClearOAuthTokenCache();
++        };
++    } catch (__e) {}
 +    try {
 +        if (
 +            process.env.CLAUDIVERSE_TOKEN &&

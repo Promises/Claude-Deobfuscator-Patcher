@@ -187,6 +187,7 @@ var __claudiverse = (function() {
       var next = body && body.next ? body.next : body;
       if (applyLease(next)) {
         lastSwitchAt = Date.now();
+        clearAuthCache();
         var msg = "⚠ Switched to Anthropic account '" + (next.label || "?") + "'";
         log(msg);
         // stderr, not stdout: the user should SEE that the account changed —
@@ -203,6 +204,71 @@ var __claudiverse = (function() {
       log("failover failed:", String((e && e.message) || e).slice(0, 120));
       return { switched: false };
     }
+  }
+
+  // --- server-initiated upgrade back to a preferred account ------------------
+  //
+  // A failover is one-way on its own: a session that switched to Work stays on
+  // Work forever, because nothing re-checks. Meanwhile Personal — the preferred
+  // account, and the only one with a SESSION limit rather than just a weekly one
+  // — comes back within hours and sits unused. The weekly quotas then diverge:
+  // measured 44% on Personal against 1% on Work while Personal was the one being
+  // exhausted daily.
+  //
+  // So the server tells us when a better account is available and we re-lease.
+  // Server-push rather than client-poll: the server already knows the moment a
+  // cooldown lapses, and N seats polling for it would be N times the work to
+  // learn something one party already knows.
+  //
+  // ⚠️ NOT a switch to whatever is offered — we re-lease and compare. The lease
+  // returns the highest-priority usable account, so if we are ALREADY on it,
+  // nothing happens. That keeps the decision in one place (the server's ordering)
+  // instead of duplicating priority logic here where it could drift.
+  function upgradeAnthropicAccount() {
+    if (!TOKEN || !process.env.CLAUDE_CODE_OAUTH_TOKEN) return { switched: false };
+
+    try {
+      var body = postSync("/api/anthropic_auths/lease", {});
+      if (!body || !body.access_token) return { switched: false };
+
+      if (body.auth_id != null && body.auth_id === leasedAuthId) {
+        log("upgrade offered but already on " + (body.label || "?"));
+        return { switched: false };
+      }
+
+      var prev = leasedAuthId;
+      if (applyLease(body)) {
+        // Same quiet window as a failover: an in-flight 429 from the account we
+        // just left must not be blamed on the one we just took.
+        lastSwitchAt = Date.now();
+        clearAuthCache();
+        var msg = "⚠ Moved to preferred Anthropic account '" + (body.label || "?") + "'";
+        log(msg + " (was auth " + prev + ")");
+        try { process.stderr.write("\n" + msg + "\n\n"); } catch (e) {}
+        return { switched: true };
+      }
+    } catch (e) {
+      log("upgrade failed:", String((e && e.message) || e).slice(0, 120));
+    }
+    return { switched: false };
+  }
+
+  // Invalidate the memoized credential record.
+  //
+  // 🔑 The real invalidator (Hw() on 2.1.263) is NOT in this module's scope — an
+  // earlier version called a binding that does not exist here and silently did
+  // nothing for every swap. The patch registers it on globalThis instead, so the
+  // one place that can clear the cache is reachable from the one place that
+  // changes the token.
+  function clearAuthCache() {
+    try {
+      if (typeof globalThis.__cvClearAuthCache === "function") {
+        globalThis.__cvClearAuthCache();
+        return true;
+      }
+      log("WARNING: no cache invalidator registered — token swap may not take effect");
+    } catch (e) {}
+    return false;
   }
 
   // --- token renewal, wired to upstream's SDK refresh callback --------------
@@ -459,6 +525,10 @@ var __claudiverse = (function() {
 
           // Handle remote commands
           if (topic === sessionTopic && channelJoined) {
+            if (event === "anthropic_auth_upgrade") {
+              log("server signalled a preferred account is available");
+              upgradeAnthropicAccount();
+            }
             if (event === "remote_input" && payload && payload.content) {
               log("Remote input:", payload.content.substring(0, 50));
               try {
@@ -674,7 +744,8 @@ var __claudiverse = (function() {
     // (failover) and from upstream's SDK refresh callback on a 401 (renewal).
     // Both end at the same place: ask claudiverse for a usable credential.
     failoverAnthropicAccount: failoverAnthropicAccount,
-    requestOAuthTokenRefresh: requestOAuthTokenRefresh
+    requestOAuthTokenRefresh: requestOAuthTokenRefresh,
+    upgradeAnthropicAccount: upgradeAnthropicAccount
   };
 })();
 
