@@ -92,7 +92,7 @@ index de8c6aa..978385d 100644
 +globalThis.__cvSubmitHelpers = $k;
  function V7(kpn) {
      let Qbe = _(8),
-@@ -77084,10 +77089,14 @@ class Qce {
+@@ -77084,10 +77089,33 @@ class Qce {
      constructor(w) {
          this.#e = w;
      }
@@ -101,6 +101,25 @@ index de8c6aa..978385d 100644
 +        try {
 +            globalThis.__claudiverseSubmit = (__text) =>
 +                this.submit(__text, globalThis.__cvSubmitHelpers);
++            // 🔴 WRAP submit ITSELF, not just expose it. A prompt TYPED IN THE
++            // TERMINAL is never mirrored to claudiverse — measured with a probe
++            // string sent through the TUI: Claude Code's own Remote Control
++            // showed it as a user turn, and it appeared in NONE of the 180
++            // messages the sidecar had mirrored. Only the model's OUTPUT stream
++            // is mirrored, and the operator's own words are not in it.
++            // submit is the one funnel both paths pass through: the REPL calls
++            // it for typed input, and __claudiverseSubmit above calls it for
++            // remote input, so wrapping it captures both with one hook.
++            if (!this.__cvWrapped) {
++                let __origSubmit = this.submit.bind(this);
++                this.submit = (__text, ...__rest) => {
++                    try {
++                        globalThis.__claudiverseNoteUserPrompt?.(__text);
++                    } catch (__e2) {}
++                    return __origSubmit(__text, ...__rest);
++                };
++                this.__cvWrapped = true;
++            }
 +        } catch (__e) {}
      }
      #o() {

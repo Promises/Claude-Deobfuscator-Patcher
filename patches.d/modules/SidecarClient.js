@@ -1150,8 +1150,49 @@ var __claudiverse = (function() {
     }
   }
 
+  // --- the operator's own words ----------------------------------------------
+  //
+  // 🔴 TYPED INPUT WAS NEVER MIRRORED. The sidecar mirrors Claude Code's OUTPUT
+  // stream, and the operator's prompt is not in it. MEASURED with a probe typed
+  // into the TUI: Claude Code's own Remote Control rendered it as a user turn,
+  // and it appeared in NONE of the 180 messages claudiverse had. Every session
+  // in the panel was therefore half a conversation — replies with nothing to
+  // reply to — and no amount of rendering could recover what was never sent.
+  //
+  // Patch 003 wraps PromptSubmitController.submit, the single funnel both the
+  // REPL (typed) and __claudiverseSubmit (remote) pass through, and calls this.
+  var lastUserPrompt = null;
+
+  function noteUserPrompt(text) {
+    try {
+      if (typeof text !== "string" || !text.trim()) return;
+      lastUserPrompt = text;
+      mirrorMessage({ type: "user", message: { role: "user", content: text } });
+    } catch (e) {}
+  }
+
+  // ⛔ REMOTE INPUT IS ECHOED BACK AS AN ASSISTANT MESSAGE, and that echo is
+  //    indistinguishable from a real reply — same outer keys, same block shape,
+  //    same usage object (measured on a live session, where an injected prompt
+  //    was recorded as something Claude said). Now that submit reports the
+  //    prompt properly, the echo would render the same words TWICE: once
+  //    correctly as the operator, once wrongly as Claude.
+  //    Dropping it here is safe because the comparison is exact and scoped to
+  //    the prompt we just saw go out.
+  function isEchoOfLastPrompt(msg) {
+    try {
+      if (!lastUserPrompt || !msg || msg.type !== "assistant") return false;
+      var blocks = (msg.message && msg.message.content) || [];
+      if (blocks.length !== 1 || blocks[0].type !== "text") return false;
+      return blocks[0].text === lastUserPrompt;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function mirrorMessage(msg) {
     if (!TOKEN) return;
+    if (isEchoOfLastPrompt(msg)) return;
     noteMirrored(msg);
     if (!connected && !connecting) autoConnect();
     if (channelJoined) {
@@ -1207,7 +1248,8 @@ var __claudiverse = (function() {
     // Both end at the same place: ask claudiverse for a usable credential.
     failoverAnthropicAccount: failoverAnthropicAccount,
     requestOAuthTokenRefresh: requestOAuthTokenRefresh,
-    upgradeAnthropicAccount: upgradeAnthropicAccount
+    upgradeAnthropicAccount: upgradeAnthropicAccount,
+    noteUserPrompt: noteUserPrompt
   };
 })();
 
@@ -1218,6 +1260,11 @@ var __claudiverse = (function() {
 // mirroring is silently absent. No-op on the monolithic path.
 try {
   globalThis.__claudiverse = __claudiverse;
+  // Patch 003 wraps PromptSubmitController.submit and calls this for every
+  // prompt, typed or injected. Registered as its own global rather than reached
+  // through __claudiverse, so the patch site stays a one-line call that cannot
+  // break on a shape change in this module.
+  globalThis.__claudiverseNoteUserPrompt = __claudiverse.noteUserPrompt;
 } catch (e) {}
 
 // Register with session hooks (runs on first getSessionId call).
