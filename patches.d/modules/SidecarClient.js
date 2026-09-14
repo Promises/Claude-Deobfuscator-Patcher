@@ -120,6 +120,42 @@ var __claudiverse = (function() {
     return true;
   }
 
+  // --- who is asking -----------------------------------------------------
+  //
+  // The pool's bearer token is SHARED by every seat, so a lease request carries
+  // no identity: the server decides which account a seat gets and then cannot
+  // say which seat got it. MEASURED — "which seat is on Work?" was unanswerable
+  // three times in one day, and the fallback (correlating last_leased_at against
+  // process start times) collapses the moment two seats start together, which is
+  // exactly when workers come up.
+  //
+  // TWO PARTS, because neither alone is enough:
+  //   title — CLAUDIVERSE_TITLE, the human-meaningful seat name ("pe-ceo"). Set
+  //           on every seat, including cv-spawn workers (cv-spawn.sh:116). But
+  //           it is NOT unique: a restarted seat reuses it, and two seats can be
+  //           misconfigured onto the same one.
+  //   id    — Claude's own session UUID. Unique, and the server already matches
+  //           sessions on it (claude_session_id), so it joins straight to a row.
+  //           NOT available during the startup lease, which runs before the
+  //           session hook fires — hence a title that is always present and an
+  //           id that fills in from the first switch onward.
+  //
+  // ⛔ ENCODED, NOT INTERPOLATED. A header value must be ASCII, and the fallback
+  //    title is `"Claude " + toLocaleTimeString()` — spaces already, and a
+  //    non-ASCII CLAUDIVERSE_TITLE would make Node THROW on the request rather
+  //    than fail soft. encodeURIComponent also neutralises the "; " separator,
+  //    so a title containing it cannot forge a second field.
+  function clientIdentity() {
+    try {
+      var title = process.env.CLAUDIVERSE_TITLE || "";
+      var id = claudeSessionId || "";
+      if (!title && !id) return "";
+      return "title=" + encodeURIComponent(title) + "; id=" + encodeURIComponent(id);
+    } catch (e) {
+      return "";
+    }
+  }
+
   // Non-blocking POST. THE ONLY POST THIS MODULE MAKES AFTER STARTUP.
   //
   // 🔴 execSync BLOCKS THE ENTIRE NODE EVENT LOOP, AND THAT BROKE MCP.
@@ -150,6 +186,7 @@ var __claudiverse = (function() {
             "Content-Type": "application/json",
             Authorization: "Bearer " + TOKEN,
             "Content-Length": Buffer.byteLength(body),
+            "X-Claudiverse-Client": clientIdentity(),
           },
           timeout: 8000,
         },
@@ -419,10 +456,18 @@ var __claudiverse = (function() {
 
     try {
       var execSync = require("child_process").execSync;
+      // Identity here carries the TITLE ONLY: this runs before the session hook,
+      // so claudeSessionId is still null. That is the intended shape — the seat
+      // is named from its first request, and the id fills in from the first
+      // switch onward. Emitted only when non-empty so an unnamed seat sends no
+      // half-formed header.
+      var ident = clientIdentity();
+      var identArg = ident ? " -H " + JSON.stringify("X-Claudiverse-Client: " + ident) : "";
       var out = execSync(
         "curl -sS -m 6 -X POST " +
           JSON.stringify(BASE_URL + "/api/anthropic_auths/lease") +
           " -H " + JSON.stringify("Authorization: Bearer " + TOKEN) +
+          identArg +
           " -H 'Content-Type: application/json' -d '{}'",
         { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] }
       );
@@ -534,7 +579,10 @@ var __claudiverse = (function() {
       headers: {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + TOKEN,
-        "Content-Length": Buffer.byteLength(postData)
+        "Content-Length": Buffer.byteLength(postData),
+        // Same identity as the pool calls, so the server can read it in ONE
+        // place (the auth plug) for every request rather than per-endpoint.
+        "X-Claudiverse-Client": clientIdentity()
       },
       timeout: 3000
     }, function(res) {
