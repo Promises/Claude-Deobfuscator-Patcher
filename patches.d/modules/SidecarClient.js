@@ -211,6 +211,73 @@ var __claudiverse = (function() {
     return "Claude " + new Date().toLocaleTimeString();
   }
 
+  // --- the name a HUMAN recognises ------------------------------------------
+  //
+  // Claude Code runs TWO namers and they are not the same thing:
+  //   name     ~/.claude/sessions/<pid>.json, kebab ("runejs-38"). Addressable:
+  //            `--resume <name>` resolves it and upstream de-duplicates it
+  //            across live processes. This is what resolveTitle uses.
+  //   aiTitle  an {"type":"ai-title"} record appended to the transcript,
+  //            sentence case ("Knights of Ni dialogue"). This is what the
+  //            session picker shows, so it is the name the operator recognises.
+  //
+  // Both are wanted, for different jobs — one to ADDRESS a seat, one to
+  // RECOGNISE it — so this is reported alongside the title rather than instead
+  // of it.
+  //
+  // ⛔ TAIL-READ, NEVER THE WHOLE FILE. Transcripts reach 100MB+ (one on this
+  //    machine is 102MB) and ai-title records are APPENDED, so the newest is at
+  //    the end. Reading the whole file to find a display string would be a
+  //    pathological cost on a hot-ish path.
+  var DISPLAY_TAIL_BYTES = 262144;
+  var displayTitleCache = null;
+
+  function transcriptPath() {
+    try {
+      if (!claudeSessionId) return null;
+      var home = process.env.HOME || "";
+      if (!home) return null;
+      // Project dirs are the cwd with every "/" replaced by "-".
+      var slug = String(process.cwd()).replace(/\//g, "-");
+      return home + "/.claude/projects/" + slug + "/" + claudeSessionId + ".jsonl";
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function readDisplayTitle() {
+    try {
+      if (!fs) return null;
+      var path = transcriptPath();
+      if (!path) return null;
+
+      var st = fs.statSync(path);
+      var start = Math.max(0, st.size - DISPLAY_TAIL_BYTES);
+      var len = st.size - start;
+      if (len <= 0) return null;
+
+      var fd = fs.openSync(path, "r");
+      var buf = Buffer.alloc(len);
+      try {
+        fs.readSync(fd, buf, 0, len, start);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      // Last occurrence wins: the title is re-generated as the session evolves.
+      var text = buf.toString("utf8");
+      var idx = text.lastIndexOf('"type":"ai-title"');
+      if (idx === -1) return null;
+      var m = /"aiTitle":"((?:[^"\\]|\\.)*)"/.exec(text.slice(idx));
+      if (!m) return null;
+      return JSON.parse('"' + m[1] + '"');
+    } catch (e) {
+      // No transcript yet, mid-write, or a shape change upstream. A display
+      // name is a nicety; never let its absence disturb anything.
+      return null;
+    }
+  }
+
   // --- who is asking -----------------------------------------------------
   //
   // The pool's bearer token is SHARED by every seat, so a lease request carries
@@ -707,7 +774,13 @@ var __claudiverse = (function() {
       try {
         if (!serverSessionId) return;
         var next = resolveTitle();
-        if (!next || next === lastPushedTitle) return;
+        var disp = readDisplayTitle();
+        // Either name changing is worth a push: the addressable one because
+        // orchestration resolves on it, the display one because it is what a
+        // human is reading in the panel.
+        if ((!next || next === lastPushedTitle) && disp === displayTitleCache) return;
+        if (disp) displayTitleCache = disp;
+        if (!next) return;
         // Re-POST is the update path. Reuse autoConnect's own request by simply
         // recording and letting the next reconnect carry it would be wrong —
         // a stable session never reconnects, so the name would never land.
@@ -718,7 +791,8 @@ var __claudiverse = (function() {
   function pushTitle(title) {
     var body = JSON.stringify({
       title: title,
-      claude_session_id: claudeSessionId || undefined
+      claude_session_id: claudeSessionId || undefined,
+      display_title: displayTitleCache || undefined
     });
     try {
       var url = new URL(BASE_URL + "/api/sessions");
@@ -780,6 +854,12 @@ var __claudiverse = (function() {
     var postBody = {
       title: resolveTitle()
     };
+    // Display-only; the server keeps it beside the title rather than as one.
+    var disp = readDisplayTitle();
+    if (disp) {
+      postBody.display_title = disp;
+      displayTitleCache = disp;
+    }
     if (claudeSessionId) postBody.claude_session_id = claudeSessionId;
     var postData = JSON.stringify(postBody);
     var parsed = new URL(BASE_URL + "/api/sessions");
