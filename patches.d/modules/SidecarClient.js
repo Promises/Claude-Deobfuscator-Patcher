@@ -236,12 +236,43 @@ var __claudiverse = (function() {
   //    non-ASCII CLAUDIVERSE_TITLE would make Node THROW on the request rather
   //    than fail soft. encodeURIComponent also neutralises the "; " separator,
   //    so a title containing it cannot forge a second field.
+  // 🔴 THE ONLY IDENTIFIER THAT EXISTS ON THE FIRST REQUEST AND NEVER CHANGES.
+  //
+  // Minted here, at module load, deliberately NOT derived from anything Claude
+  // Code provides — because everything it provides arrives too late or moves:
+  //   title  is resolved fresh on every call and CHANGES as the session is
+  //          named; it is different at the startup lease than at session
+  //          creation moments later.
+  //   id     (Claude's session UUID) is null until the session hook fires,
+  //          which is AFTER the startup lease.
+  //
+  // MEASURED, and this is why the field exists: a seat leased under
+  // "Claude 11:41:02 AM" (pre-hook, no id) and created its session under its
+  // UUID (post-hook) seconds later. The two records shared NO value, so the
+  // server could never connect them — every later rename tried to match on a
+  // title or an id that the other record had never held. Two attempts at fixing
+  // the match order could not work, because the problem was that there was
+  // nothing to match ON.
+  var INSTANCE_ID = (function () {
+    try {
+      var c = require("crypto");
+      if (c && typeof c.randomUUID === "function") return c.randomUUID();
+    } catch (e) {}
+    // Fallback for an environment without crypto: still unique enough, since it
+    // only has to distinguish concurrent seats on one machine.
+    return "i-" + process.pid + "-" + Date.now().toString(36) +
+           "-" + Math.floor(Math.random() * 1e9).toString(36);
+  })();
+
   function clientIdentity() {
     try {
       var title = resolveTitle() || "";
       var id = claudeSessionId || "";
-      if (!title && !id) return "";
-      return "title=" + encodeURIComponent(title) + "; id=" + encodeURIComponent(id);
+      // instance is unconditional: it is the join key, and a request without it
+      // is one the server cannot attribute to a seat.
+      return "title=" + encodeURIComponent(title) +
+             "; id=" + encodeURIComponent(id) +
+             "; instance=" + encodeURIComponent(INSTANCE_ID);
     } catch (e) {
       return "";
     }
