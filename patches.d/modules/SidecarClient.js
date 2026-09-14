@@ -160,8 +160,15 @@ var __claudiverse = (function() {
       if (!home) return null;
       var raw = fs.readFileSync(home + "/.claude/sessions/" + process.pid + ".json", "utf8");
       var rec = JSON.parse(raw);
-      if (!rec || typeof rec.name !== "string" || !rec.name) return null;
-      return { name: rec.name, source: rec.nameSource || null };
+      if (!rec) return null;
+      return {
+        name: typeof rec.name === "string" && rec.name ? rec.name : null,
+        source: rec.nameSource || null,
+        // The record carries Claude's session UUID too, and that is worth
+        // having on its own: the sidecar's own claudeSessionId is NOT set yet
+        // when a message is mirrored before the session hook fires.
+        sessionId: typeof rec.sessionId === "string" && rec.sessionId ? rec.sessionId : null
+      };
     } catch (e) {
       // Absent (too early), mid-write, or a layout change upstream. All mean
       // "no name from here"; none is worth a log line every few seconds.
@@ -169,15 +176,38 @@ var __claudiverse = (function() {
     }
   }
 
+  // Set by the server pushing "set_title". Ranks BELOW the env var and above
+  // everything Claude Code derives — see resolveTitle.
+  var serverTitle = null;
+
   function resolveTitle() {
     var envTitle = process.env.CLAUDIVERSE_TITLE;
     if (envTitle) return envTitle;
 
+    // ⚠️ SERVER OVERRIDE OUTRANKS THE REGISTRY BUT NOT THE ENV, and the reason
+    // is that env WINS ANYWAY over time: a launcher re-applies CLAUDIVERSE_TITLE
+    // on every restart, so a server override of a pinned seat would silently
+    // revert on the next bounce and leave the operator chasing a name that
+    // keeps coming back. Better that the pin is honest and the override is
+    // refused than that it appears to work and does not.
+    if (serverTitle) return serverTitle;
+
     var reg = registryName();
-    if (reg) return reg.name;
+    if (reg && reg.name) return reg.name;
 
+    // 🔴 THE SESSION ID IS NOT RELIABLY OURS YET. mirrorMessage() calls
+    // autoConnect() with NO ARGUMENT, so a message mirrored before the session
+    // hook fires leaves claudeSessionId null — and that is the common case, not
+    // an edge one. MEASURED: a seat launched without CLAUDIVERSE_TITLE
+    // registered as "Claude 10:09:35 AM" rather than its id, because the hook
+    // had not run. Falling back to the registry's copy of the same UUID closes
+    // that window whenever the record exists.
     if (claudeSessionId) return claudeSessionId;
+    if (reg && reg.sessionId) return reg.sessionId;
 
+    // Last resort, and a poor one: this COLLIDES for two seats started in the
+    // same second, and the server resolves seats by title. Anything above is
+    // better; watchTitle() replaces it as soon as a real name appears.
     return "Claude " + new Date().toLocaleTimeString();
   }
 
@@ -630,7 +660,19 @@ var __claudiverse = (function() {
     // this is a slow poll of one small local file, not a hot loop. Deliberately
     // NOT tied to the 3s cvstate heartbeat — that would be 20x the file reads
     // for a value that moves once or twice in a session's life.
-    titleWatchTimer = setInterval(function () {
+    // An early check as well as the slow poll. A seat that registered under the
+    // timestamp is publishing a COLLIDING name until it is replaced, so the
+    // first correction should not wait a full interval; after that a name
+    // changes rarely and 30s is plenty.
+    setTimeout(checkTitle, 5000).unref?.();
+
+    titleWatchTimer = setInterval(checkTitle, 30000);
+    if (titleWatchTimer && typeof titleWatchTimer.unref === "function") {
+      titleWatchTimer.unref();
+    }
+  }
+
+  function checkTitle() {
       try {
         if (!serverSessionId) return;
         var next = resolveTitle();
@@ -640,10 +682,6 @@ var __claudiverse = (function() {
         // a stable session never reconnects, so the name would never land.
         pushTitle(next);
       } catch (e) {}
-    }, 30000);
-    if (titleWatchTimer && typeof titleWatchTimer.unref === "function") {
-      titleWatchTimer.unref();
-    }
   }
 
   function pushTitle(title) {
@@ -820,6 +858,27 @@ var __claudiverse = (function() {
             if (event === "anthropic_auth_upgrade") {
               log("server signalled a preferred account is available");
               upgradeAnthropicAccount();
+            }
+            // Rename this seat from the server — the remote counterpart of
+            // CLAUDIVERSE_TITLE, for fixing a seat that came up misnamed
+            // without restarting it.
+            if (event === "set_title" && payload && typeof payload.title === "string") {
+              var wanted = payload.title.trim();
+              if (!wanted) {
+                log("set_title ignored: empty title");
+              } else if (process.env.CLAUDIVERSE_TITLE) {
+                // Refused LOUDLY rather than silently. A pinned seat would
+                // revert on its next restart, so accepting this would be a
+                // change that quietly undoes itself.
+                log("set_title refused: CLAUDIVERSE_TITLE=" +
+                    process.env.CLAUDIVERSE_TITLE + " is pinned by the launcher");
+              } else {
+                serverTitle = wanted;
+                // Push immediately rather than waiting for the poll: this is an
+                // operator action and should land now.
+                if (serverSessionId && wanted !== lastPushedTitle) pushTitle(wanted);
+                log("set_title accepted:", wanted);
+              }
             }
             if (event === "remote_input" && payload && payload.content) {
               log("Remote input:", payload.content.substring(0, 50));
