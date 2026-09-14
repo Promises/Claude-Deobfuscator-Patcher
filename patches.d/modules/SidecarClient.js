@@ -120,6 +120,67 @@ var __claudiverse = (function() {
     return true;
   }
 
+  // --- what this seat is called ----------------------------------------------
+  //
+  // Claude Code ALREADY maintains a name for every session and publishes it to
+  // ~/.claude/sessions/<pid>.json — a live registry it rewrites continuously,
+  // carrying {name, nameSource, sessionId, cwd, status}. Reading that file is
+  // strictly better than hooking the naming internals: it is a plain read with
+  // no binding to re-anchor when upstream reshuffles, and upstream already
+  // solves the hard part for us — cross-process name COLLISIONS, where a second
+  // session wanting a taken name yields and takes a suffixed one.
+  //
+  // PRECEDENCE, most authoritative first:
+  //   1. CLAUDIVERSE_TITLE  — absolute. Fleet seats (watcher, orchestrators,
+  //      pe-*) must keep a FIXED name: cv_send resolves a seat BY TITLE, so a
+  //      name that drifts with the conversation silently breaks addressing.
+  //      This is why auto-naming can never be allowed to override it.
+  //   2. registry name, nameSource "user"    — someone ran /rename or -n.
+  //   3. registry name, nameSource "derived" — Claude auto-named it from the
+  //      conversation ("fix-login-bug"). Fine for an ad-hoc seat, and it
+  //      improves as the session takes shape.
+  //   4. claudeSessionId — resolvable and unique, so an unnamed seat is still
+  //      addressable and still joins to the server's claude_session_id.
+  //   5. a timestamp — last resort only.
+  //
+  // ⛔ WHY NOT THE OLD TIMESTAMP DEFAULT. `"Claude " + toLocaleTimeString()`
+  //    identifies nothing and COLLIDES: two seats started in the same second get
+  //    the same name, and the server resolves titles for addressing. A session
+  //    id cannot collide and can be resumed.
+  //
+  // ⚠️ THE REGISTRY IS NOT THERE AT STARTUP. Measured on three seats: the record
+  //    appears some seconds after the process does (mtimes sat ~20s after start,
+  //    and mtime is an upper bound on creation since the file is rewritten
+  //    continuously). So the first lease is named by env or not at all, and the
+  //    name is picked up later — which is what maybeRefreshTitle handles.
+  function registryName() {
+    try {
+      if (!fs) return null;
+      var home = process.env.HOME || "";
+      if (!home) return null;
+      var raw = fs.readFileSync(home + "/.claude/sessions/" + process.pid + ".json", "utf8");
+      var rec = JSON.parse(raw);
+      if (!rec || typeof rec.name !== "string" || !rec.name) return null;
+      return { name: rec.name, source: rec.nameSource || null };
+    } catch (e) {
+      // Absent (too early), mid-write, or a layout change upstream. All mean
+      // "no name from here"; none is worth a log line every few seconds.
+      return null;
+    }
+  }
+
+  function resolveTitle() {
+    var envTitle = process.env.CLAUDIVERSE_TITLE;
+    if (envTitle) return envTitle;
+
+    var reg = registryName();
+    if (reg) return reg.name;
+
+    if (claudeSessionId) return claudeSessionId;
+
+    return "Claude " + new Date().toLocaleTimeString();
+  }
+
   // --- who is asking -----------------------------------------------------
   //
   // The pool's bearer token is SHARED by every seat, so a lease request carries
@@ -147,7 +208,7 @@ var __claudiverse = (function() {
   //    so a title containing it cannot forge a second field.
   function clientIdentity() {
     try {
-      var title = process.env.CLAUDIVERSE_TITLE || "";
+      var title = resolveTitle() || "";
       var id = claudeSessionId || "";
       if (!title && !id) return "";
       return "title=" + encodeURIComponent(title) + "; id=" + encodeURIComponent(id);
@@ -539,6 +600,87 @@ var __claudiverse = (function() {
     }
   }
 
+
+  // --- adopting Claude Code's name once it exists -----------------------------
+  //
+  // A seat launched without CLAUDIVERSE_TITLE starts life named by its session
+  // id, because the registry record does not exist yet (see resolveTitle). It
+  // gets a real name later — auto-derived from the conversation, or from
+  // /rename — and the server should follow, or the panel keeps showing a UUID
+  // for a session everyone else calls "fix-login-bug".
+  //
+  // 🔑 NO NEW SERVER SURFACE. Re-POSTing /api/sessions with the same
+  // claude_session_id UPDATES the existing row rather than inserting: the server
+  // reuses it and lets incoming attrs win ("title/cwd/model may legitimately
+  // have changed across a relaunch" — Sessions.create_session/1). start_room is
+  // idempotent too, mapping {:already_started, pid} to {:ok, pid}, so a repeat
+  // POST cannot 500. Verified in both before relying on it.
+  //
+  // ⛔ NEVER FOR AN ENV-NAMED SEAT. CLAUDIVERSE_TITLE is how the fleet addresses
+  //    watcher and the orchestrators; letting an auto-derived name overwrite it
+  //    would break cv_send addressing silently. Those seats never poll at all.
+  var titleWatchTimer = null;
+  var lastPushedTitle = null;
+
+  function watchTitle() {
+    if (process.env.CLAUDIVERSE_TITLE) return;   // pinned by the operator
+    if (titleWatchTimer) return;
+
+    // 30s: a name appears within seconds of startup and then changes rarely, so
+    // this is a slow poll of one small local file, not a hot loop. Deliberately
+    // NOT tied to the 3s cvstate heartbeat — that would be 20x the file reads
+    // for a value that moves once or twice in a session's life.
+    titleWatchTimer = setInterval(function () {
+      try {
+        if (!serverSessionId) return;
+        var next = resolveTitle();
+        if (!next || next === lastPushedTitle) return;
+        // Re-POST is the update path. Reuse autoConnect's own request by simply
+        // recording and letting the next reconnect carry it would be wrong —
+        // a stable session never reconnects, so the name would never land.
+        pushTitle(next);
+      } catch (e) {}
+    }, 30000);
+    if (titleWatchTimer && typeof titleWatchTimer.unref === "function") {
+      titleWatchTimer.unref();
+    }
+  }
+
+  function pushTitle(title) {
+    var body = JSON.stringify({
+      title: title,
+      claude_session_id: claudeSessionId || undefined
+    });
+    try {
+      var url = new URL(BASE_URL + "/api/sessions");
+      var mod = url.protocol === "https:" ? https : http;
+      if (!mod) return;
+      var req = mod.request({
+        hostname: url.hostname,
+        port: url.port,
+        path: url.pathname,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + TOKEN,
+          "Content-Length": Buffer.byteLength(body),
+          "X-Claudiverse-Client": clientIdentity()
+        },
+        timeout: 5000
+      }, function (res) {
+        res.resume();
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          lastPushedTitle = title;
+          log("title is now:", title);
+        }
+      });
+      req.on("error", function () {});
+      req.on("timeout", function () { req.destroy(); });
+      req.write(body);
+      req.end();
+    } catch (e) {}
+  }
+
   function startHeartbeat() {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(function() {
@@ -556,15 +698,18 @@ var __claudiverse = (function() {
     connecting = true;
     log("Creating session...");
 
-    // CLAUDIVERSE_TITLE gives this instance a stable, human-friendly name
-    // (e.g. "decomper" / "tester") so an orchestrator can resolve it by title
-    // via GET /api/sessions?title=. Falls back to a timestamp when unset.
+    // The title an orchestrator resolves this seat by, via
+    // GET /api/sessions?title=. See resolveTitle() for the precedence —
+    // CLAUDIVERSE_TITLE wins absolutely, then Claude Code's own session name,
+    // then the session id. It can CHANGE after this point, because a seat that
+    // starts unnamed gets auto-named once the conversation takes shape; that is
+    // what watchTitle() below is for.
     // claude_session_id is Claude's OWN session UUID. The server matches on it
     // and REUSES the existing row, so a reconnect/blip no longer inserts a new
     // session every time (that churn grew the table to ~38k rows and left
     // same-title zombies that title-resolution could wake).
     var postBody = {
-      title: process.env.CLAUDIVERSE_TITLE || ("Claude " + new Date().toLocaleTimeString())
+      title: resolveTitle()
     };
     if (claudeSessionId) postBody.claude_session_id = claudeSessionId;
     var postData = JSON.stringify(postBody);
@@ -594,7 +739,14 @@ var __claudiverse = (function() {
           if (data.session && data.session.id) {
             serverSessionId = data.session.id;
             log("Session:", serverSessionId);
+            // Whatever title we just registered under is, by definition, the
+            // one the server now holds — record it so the watcher only pushes
+            // an actual CHANGE rather than re-POSTing the same value forever.
+            lastPushedTitle = resolveTitle();
             connectWs(serverSessionId);
+            // Only meaningful once a session exists, and a no-op for a seat
+            // pinned by CLAUDIVERSE_TITLE.
+            watchTitle();
           } else {
             log("No session in response:", body);
             connecting = false;
