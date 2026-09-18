@@ -431,6 +431,26 @@ var __claudiverse = (function() {
   var FAILOVER_QUIET_MS = 20000;
   var lastSwitchAt = 0;
 
+  // 🔴 DECLINING TO REPORT IS NOT THE SAME AS DECLINING TO ACT.
+  // The first version of the quiet window returned switched:false for an
+  // in-flight 429, which the hook reads as "fall through to upstream". Upstream
+  // then saw a 429 carrying the OLD account's limit headers and did exactly what
+  // it does for a live limit: declared the session rate-limited, opened
+  // /rate-limit-options and aborted the turn — with the credential ALREADY
+  // swapped to an account that had two thirds of its week left.
+  // MEASURED 2026-09-18 22:14 on two seats at once: Personal weekly_all 100% ->
+  // "Switched to Work" -> "429 420ms after a switch … not reporting" -> dialog.
+  // Server showed Work at session 27% / weekly 34%. The seats sat behind a
+  // modal until the operator chose "Stop", at which point the very next request
+  // went straight through on Work. Nothing was out of quota; the guard had the
+  // right diagnosis and the wrong remedy.
+  // A 429 attributed to the previous account is simply retried on the current
+  // one — that is what a switch MEANS. Bounded, so that if the new account is
+  // genuinely limited too we spend a handful of requests and then fall through
+  // to upstream as before, rather than burning the retry budget in a tight loop.
+  var RETRIES_PER_QUIET_WINDOW = 5;
+  var retriesSinceSwitch = 0;
+
   // 🔴 THE QUIET WINDOW ONLY WORKS IF CONCURRENT 429s COALESCE.
   // This function is ASYNC (the hook site awaits it — see the patch note). That
   // is required so a failover does not block the event loop and stall MCP, but
@@ -454,8 +474,18 @@ var __claudiverse = (function() {
 
     var sinceSwitch = Date.now() - lastSwitchAt;
     if (lastSwitchAt && sinceSwitch < FAILOVER_QUIET_MS) {
-      log("429 " + sinceSwitch + "ms after a switch — treating as in-flight from the " +
-          "previous account, not reporting");
+      if (retriesSinceSwitch < RETRIES_PER_QUIET_WINDOW) {
+        retriesSinceSwitch++;
+        log("429 " + sinceSwitch + "ms after a switch — in-flight from the previous " +
+            "account; retrying on the current one (" + retriesSinceSwitch + "/" +
+            RETRIES_PER_QUIET_WINDOW + "), not reporting");
+        // Not `switched`: nothing changed hands. The hook treats `retry` the
+        // same way — clear the token cache and `continue` — which re-issues the
+        // request on the credential the switch already installed.
+        return { switched: false, retry: true };
+      }
+      log("429 " + sinceSwitch + "ms after a switch — retry budget spent; the new " +
+          "account may be limited too, letting upstream handle it");
       return { switched: false };
     }
 
@@ -479,6 +509,7 @@ var __claudiverse = (function() {
       var next = body && body.next ? body.next : body;
       if (applyLease(next)) {
         lastSwitchAt = Date.now();
+        retriesSinceSwitch = 0;
         clearAuthCache();
         var msg = "⚠ Switched to Anthropic account '" + (next.label || "?") + "'";
         log(msg);
@@ -551,6 +582,7 @@ var __claudiverse = (function() {
         // Same quiet window as a failover: an in-flight 429 from the account we
         // just left must not be blamed on the one we just took.
         lastSwitchAt = Date.now();
+        retriesSinceSwitch = 0;
         clearAuthCache();
         var msg = "⚠ Moved to preferred Anthropic account '" + (body.label || "?") + "'";
         log(msg + " (was auth " + prev + ")");

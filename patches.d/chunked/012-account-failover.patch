@@ -61,6 +61,21 @@
 #   clear inside SidecarClient, where the binding does not exist — behind a
 #   `typeof` guard, so it threw nothing, logged nothing, and never ran.
 #
+#   🔑 `retry` IS HONOURED THE SAME AS `switched` (2026-09-18). A 429 that
+#   arrives inside the sidecar's post-switch quiet window is attributed to the
+#   account we just LEFT, and the sidecar declines to report it — correctly, or
+#   it would cool the account we just switched to. But the first version then
+#   returned switched:false, and this hook fell through to upstream, which saw
+#   a 429 carrying the OLD account's weekly-limit headers and did what it does
+#   for a live limit: opened /rate-limit-options and aborted the turn. With the
+#   credential ALREADY on an account at weekly 34%. MEASURED on two seats at
+#   once: "Switched to Work" -> "429 420ms after a switch … not reporting" ->
+#   modal, until the operator chose Stop and the next request went straight
+#   through. The remedy for a stale 429 is to re-issue the request on the
+#   credential the switch installed — Hw() + continue — which is exactly the
+#   switched path, minus the switch. The sidecar bounds it so a genuinely
+#   limited new account still falls through after a few attempts.
+#
 #   🔴 WHEN NO ACCOUNT IS AVAILABLE WE DO NOTHING AND FALL THROUGH, deliberately.
 #   Upstream already owns rate-limit backoff, the resets-at message and
 #   auto-continue. Operator: "it should work like claude usually does, it should
@@ -189,7 +204,7 @@ index b3f2d5d..8b7cb17 100644
 +                            Ako(Ke),
 +                            Mot(Ke.message ?? ''),
 +                        );
-+                        if (__cvFo && __cvFo.switched) {
++                        if (__cvFo && (__cvFo.switched || __cvFo.retry)) {
 +                            Hw();
 +                            continue;
 +                        }
