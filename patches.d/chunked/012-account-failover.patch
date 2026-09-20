@@ -134,12 +134,54 @@
 #   warns. Caught only by grepping for the definition instead of assuming the
 #   name meant what it meant one file over. Same class as the pje collision.
 #
+#
+# ============================================================================
+# 2026-09-20 — THE IN-TURN FAILOVER HAD NEVER ACTUALLY COMPLETED
+# ============================================================================
+# MEASURED, sidecar log, ~20:45:
+#     ⚠ Switched to Anthropic account 'Work'
+#     429 1277ms after a switch — retrying on the current one (1/5)
+#     429 2557ms … 3499ms … 4490ms … 5418ms — (5/5)
+#     429 6368ms — retry budget spent, letting upstream handle it
+#   Five retries ~1s apart, all 429, against an account at weekly 10%. Those
+#   were not stale in-flight requests. The retry loop was re-sending with the
+#   OLD credential.
+#
+# CAUSE: `Hw(); continue;` clears the memo the credential getter reads, but
+#   `continue` re-enters the loop holding the credential object `p` it already
+#   has. `p = await e()` runs only when the predicate at the top of the try
+#   fires — p === null, 401, Kot (401/403), 407+proxy, CJ, TTn (Bedrock/401),
+#   NIe (Vertex/401), stale connection, proxy retry — and NO arm is true for a
+#   429. So every "switched" failover since this patch was written re-sent the
+#   previous token, 429'd again, and fell through to upstream. Only the NEXT
+#   query() invocation picked up the new env token, which is exactly why
+#   "choose Stop, then it goes through" was the observed pattern from the very
+#   first live failover. The mechanism was verified at the hook site and never
+#   one line further down the loop.
+#
+# FIX — three hunks in withRetryGenerator, no minified name on any added line:
+#   · the hook sets globalThis.__cvCredentialStale = true before `continue`
+#   · the predicate gains `globalThis.__cvCredentialStale === true ||` as an
+#     arm, anchored on the context line `p === null ||`
+#   · the refetch site clears the flag on the line after
+#     `((p = await e()), …)`, so it is consumed exactly where the getter runs
+#   The flag is process-global on purpose: concurrent requests that 429 around
+#   the same switch each want the new credential, and an extra getter call is
+#   cheap. A tree that renames `p` or restructures the predicate fails BOTH
+#   anchor hunks loudly.
+#
+# ⚠️ NOT reproduced end-to-end. That requires an account at a real limit with a
+#   switch mid-turn. The 20:45 log is the reproduction of the BUG; the fix is
+#   verified to apply, parse, and by reading the loop.
 
 diff --git a/main.js b/main.js
 index 41ac31b..a1ec4ac 100644
 --- a/main.js
 +++ b/main.js
-@@ -43,7 +43,7 @@ import {
+@@ -40,13 +40,13 @@ import {
+     Cje,
+     Nn,
+     kz,
      Hz,
      ym,
      Sae,
@@ -148,7 +190,13 @@ index 41ac31b..a1ec4ac 100644
  } from './vendor/lodash/memoizeCapped.js';
  import { Ie, po } from './_unmatched/0026_gZ.js';
  import { M } from './_tentative/0000_ccrSession.js';
-@@ -120,6 +120,7 @@ import {
+ import { Dt } from './_unmatched/0025_Z.js';
+ import { i, qs } from './_tentative/0028_index.js';
+ import { S, u, we, Ga } from './_unmatched/0001_S.js';
+@@ -117,12 +117,13 @@ import {
+     XRn,
+     es,
+     FZe,
      Sq,
      _Q,
      eBe,
@@ -156,7 +204,13 @@ index 41ac31b..a1ec4ac 100644
  } from './entrypoints/sdk/coreSchemas.js';
  import { y, f, g } from './_tentative/0029_hooks.js';
  import { Q } from './_unmatched/0061_yW.js';
-@@ -6640,6 +6641,28 @@ async function ja(v) {
+ import './_unmatched/0053_q.js';
+ import './_unmatched/0068__xt.js';
+ import './_unmatched/0069_fn.js';
+@@ -6637,12 +6638,34 @@ async function ja(v) {
+         } = v,
+         Nt = !1,
+         Kt = null,
          Ve = Bn(!1),
          { getFpsMetrics: Tt, stats: Bt } = Ve;
      YNn({ storageV5: fe });
@@ -185,11 +239,45 @@ index 41ac31b..a1ec4ac 100644
      let { createRoot: Je } = await import('./_unmatched/0514_Ansi.js'),
          De = await Je(Ve.renderOptions, { storageV5: fe });
      (i('tengu_timer', {
+         event: S('startup'),
+         durationMs: Math.round(process.uptime() * 1000),
+         resumed: !!(O.resume || O.continue),
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index b3f2d5d..8b7cb17 100644
+index b157e57..07d2ea6 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -116490,6 +116490,23 @@ async function* withRetryGenerator(e, t, r) {
+@@ -116390,12 +116390,13 @@ async function* withRetryGenerator(e, t, r) {
+                 if (pko(E)) {
+                     let ut = await mko(!_e);
+                     if (((ct = ut.attempted), ut.reportedFailure)) _e = !0;
+                 }
+                 if (
+                     p === null ||
++                    globalThis.__cvCredentialStale === true ||
+                     (E instanceof Lt && E.status === 401) ||
+                     Kot(E) ||
+                     (E instanceof Lt && E.status === 407 && p2e()) ||
+                     CJ(E) ||
+                     TTn(E, d.model) ||
+                     NIe(E) ||
+@@ -116462,12 +116463,13 @@ async function* withRetryGenerator(e, t, r) {
+                             throw (
+                                 f('api_request', 'api_request_host_managed_auth_fail'),
+                                 new O_(E, d)
+                             );
+                     }
+                     ((p = await e()), (Se = cl() ? Yt()?.accessToken : void 0));
++                    globalThis.__cvCredentialStale = false;
+                 }
+                 xe = Wu() && cL();
+                 let vt = await t(p, De, d);
+                 if ((y('api_request'), Ne)) Lie(Oe);
+                 return vt;
+             } catch (Ke) {
+@@ -116487,12 +116489,45 @@ async function* withRetryGenerator(e, t, r) {
+                             f('api_request', 'api_request_no_response_exhausted'),
+                             new O_(Ke, d)
+                         );
                      F.count++;
                  }
                  let ct = await r.onError?.(Ke);
@@ -205,6 +293,22 @@ index b3f2d5d..8b7cb17 100644
 +                            Mot(Ke.message ?? ''),
 +                        );
 +                        if (__cvFo && (__cvFo.switched || __cvFo.retry)) {
++                            // 🔴 Hw() ALONE WAS NEVER ENOUGH. It clears the memo
++                            // that the credential getter reads, but `continue`
++                            // re-enters the loop with the credential object it
++                            // ALREADY HOLDS — the getter is only re-run when the
++                            // predicate at the top of the try fires, and no arm of
++                            // it is true for a 429. So the retry re-sent the OLD
++                            // token: MEASURED 2026-09-20, "Switched to Work" then
++                            // five 429s ~1s apart on an account at weekly 10%,
++                            // then the weekly-limit dialog. The failover had never
++                            // once completed inside a turn; only the NEXT query()
++                            // picked up the new token, which is why "Stop, then it
++                            // goes through" was the pattern from the start.
++                            // The flag is consumed by the predicate arm added
++                            // alongside `p === null`, at the one place the getter
++                            // is legitimately re-run.
++                            globalThis.__cvCredentialStale = true;
 +                            Hw();
 +                            continue;
 +                        }
@@ -213,3 +317,6 @@ index b3f2d5d..8b7cb17 100644
                  if (ct && !ve.has(ct)) {
                      ve.add(ct);
                      let gn = Vot(Ke, d.model);
+                     if (gn?.noResponse) {
+                         Me = !0;
+                         let Qt = fTn(gn, De, o, F.count);
