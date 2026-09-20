@@ -94,11 +94,45 @@
 #   token swap produced correct names in an unmatchable hunk, because the
 #   longer names made prettier reflow the call across three lines.
 #
+#
+# ============================================================================
+# 2026-09-20 — AUXILIARY QUERIES WERE BEING MIRRORED AS CONVERSATION
+# ============================================================================
+# REPORTED: claudiverse showed watcher-2 saying "status?" and "what is filling
+#   up the db?" — lines that exist nowhere in its local JSONL transcript.
+#
+# CAUSE: query() is not only the conversation. Claude Code forks it for
+#   internal side-requests — prompt suggestion, session title, memory
+#   extraction, away summary, narration, ~25 querySource values — each run
+#   with skipTranscript so it never reaches the local JSONL. The mirror hook
+#   in query() saw every one of them. The prompt-suggestion fork is the one
+#   that made it visible: its system prompt asks the model to predict what the
+#   OPERATOR would type next, so its output reads as a user line, and the panel
+#   rendered it as an assistant bubble. Measured: three per replay window on
+#   watcher-2, message ids absent locally, 1 output token over 763k cached
+#   input each.
+#
+# FIX: mirror only main and subagent sources. The split is upstream's own —
+#   coreSchemas ji(): repl_main_thread*/sdk -> main, agent:*/hook_agent ->
+#   subagent, undefined -> main, anything else auxiliary. Reproduced inline
+#   with string tests on `params.querySource` (both real names: `params` is
+#   query()'s own parameter, in the hunk context) so the added lines carry no
+#   minified identifier. turn_complete is gated the same way, so a finished
+#   side-query cannot look like a finished turn to an orchestrator.
+#
+# ⚠️ WHAT THIS CHANGES DOWNSTREAM: the Room's idle/busy and note_model no
+#   longer see auxiliary traffic. That is the intended direction — a title
+#   generation is not the seat being busy — but the idle debounce (patch 008)
+#   and any client that counted on those extra frames will see fewer.
+
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
 index 1d9da87..5947c7a 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
-@@ -632,6 +632,9 @@ class StructuredIO {
+@@ -629,12 +629,15 @@ class StructuredIO {
+     }
+     get internalEventsPending() {
+         return 0;
      }
      repliesLeftForNextProcess = 0;
      prependUserMessage(t) {
@@ -108,30 +142,62 @@ index 1d9da87..5947c7a 100644
          (this.prependedLines.push(
              b({
                  type: 'user',
+                 session_id: '',
+                 message: { role: 'user', content: t },
+                 parent_tool_use_id: null,
 diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index b157e57..51dac18 100644
+index b157e57..69e67c9 100644
 --- a/services/compact/precomputedCompact.js
 +++ b/services/compact/precomputedCompact.js
-@@ -195015,7 +195015,21 @@ async function* query(params) {
+@@ -195012,13 +195012,50 @@ function rZo(e, t) {
+ async function* query(params) {
+     let consumedCommandUuids = [],
+         r = performance.now(),
          o = [],
          d;
      try {
 -        d = yield* isObserverAgentsEnabled() ? queryWithObserverTap(params, consumedCommandUuids, o) : queryLoop(params, consumedCommandUuids, o);
++        // ⛔ AUXILIARY QUERIES ARE NOT THE CONVERSATION. query() also serves
++        // Claude Code's internal side-requests — prompt suggestion, session
++        // title, memory extraction, away summary, narration, ~25 sources —
++        // which fork the full context, run with skipTranscript, and are never
++        // written to the local JSONL. Mirroring them put phantom assistant
++        // messages in claudiverse: the prompt-suggestion fork predicted the
++        // operator's next line ("status?", "what is filling up the db?") and
++        // the panel showed Claude saying it. MEASURED on watcher-2 2026-09-20:
++        // three such messages in one replay window, message ids absent from
++        // the local transcript, each 1 output token over 763k cached input.
++        // This is upstream's own main|subagent|auxiliary split
++        // (coreSchemas ji(): repl_main_thread*/sdk = main, agent:*/hook_agent
++        // = subagent, everything else auxiliary; undefined = main), spelled
++        // out rather than called so no minified name lands on an added line.
++        let __qs = params.querySource,
++            __mirror =
++                typeof __qs !== 'string' ||
++                __qs.startsWith('repl_main_thread') ||
++                __qs === 'sdk' ||
++                __qs.startsWith('agent:') ||
++                __qs === 'hook_agent';
 +        let __it = isObserverAgentsEnabled()
 +                ? queryWithObserverTap(params, consumedCommandUuids, o)
 +                : queryLoop(params, consumedCommandUuids, o),
 +            __s;
 +        while (!(__s = await __it.next()).done) {
-+            try {
-+                globalThis.__claudiverse.mirrorMessage(__s.value);
-+            } catch (__e) {}
++            if (__mirror) {
++                try {
++                    globalThis.__claudiverse.mirrorMessage(__s.value);
++                } catch (__e) {}
++            }
 +            yield __s.value;
 +        }
 +        d = __s.value;
 +        try {
-+            if (!params.toolUseContext.agentId)
++            if (__mirror && !params.toolUseContext.agentId)
 +                globalThis.__claudiverse.mirrorMessage({ type: 'turn_complete' });
 +        } catch (__e) {}
      } finally {
          let uuid = params.toolUseContext.agentId;
          if (uuid)
+             notifySubagentLifecycle(
+                 params.toolUseContext.session.precompute,
+                 uuid,
