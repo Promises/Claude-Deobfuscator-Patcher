@@ -7,14 +7,22 @@ deobfuscated/
 .build-state.json
 
 # Compiled binaries built alongside the live one. `claude` above matches ONLY the
-# exact name, so every parked//backup build was untracked-but-not-ignored and showed
-# up as a `??` staging candidate — 601 MB of them as of 2026-09-03. Listed
-# explicitly rather than as `claude-*`, which would also swallow claude-renamer.md.
-claude-2.1.*
-claude-test
-claude-prev-*
-claude-rel
-claude-rel-*
+# exact name, so every parked/backup build is untracked-but-not-ignored and shows
+# up as a `??` staging candidate — 601 MB of them as of 2026-09-03.
+#
+# 🔴 THE EXPLICIT LIST DID NOT HOLD. It enumerated the names that existed at the
+# time (claude-2.1.*, claude-test, claude-prev-*, claude-rel*) and every build
+# named afterwards escaped it: claude-238-*, claude-259/260/261-*, claude-263-*,
+# claude-pre-refetch. Measured 2026-09-21: 25 binaries, ~2.8 GB, all `??` again —
+# the exact condition this block was added to end. A pattern that must be
+# extended by hand every time someone parks a build is not a rule, it is a
+# reminder, and it was not read.
+#
+# So: ignore the whole prefix and carve out the one tracked exception. That is
+# what the original note rejected `claude-*` for; the negation covers it, and
+# `git ls-files | grep ^claude` confirms it is the only one.
+claude-*
+!claude-renamer.md
 *.backup
 
 # TS build
