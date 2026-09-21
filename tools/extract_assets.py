@@ -182,9 +182,35 @@ def content_supports(name, body, strict=False):
     # MISMATCH on permissions_external-0f27b1d1.txt.zst, whose body says
     # "permission" 11 times but not within the first 4 KB.
     flat = re.sub(rb"[^a-z0-9]", b"", body.lower())
+
+    def present(t):
+        """Is token `t` supported by the body, tolerating an English plural?
+
+        🔴 A PLURAL NAME AGAINST A SINGULAR BODY IS NOT A MISPAIRING.
+        MEASURED on 2.1.278: `kit-modules.js-ef8b6d2e.txt.zst` reduces to the
+        SINGLE token "modules". Its body is a 256-member concatenated bundle of
+        collector/*.js files — a bundle of modules, so the name is exactly
+        right — but the text says "module" twice and "modules" never. One
+        absent plural was enough to mark the pair contradicted, and --verify
+        then refused the whole build: `extract_assets` is step 2, so the
+        failure landed long before any patch was tried and read as "2.1.278 is
+        unpatchable" rather than "one heuristic token missed".
+        Stemming only the trailing plural, and only on a token long enough that
+        dropping a letter still leaves a real word, keeps this from becoming a
+        general loosening.
+        """
+        if t.encode() in flat:
+            return True
+        return len(t) > 4 and t.endswith("s") and t[:-1].encode() in flat
+
     if strict:
+        # ⛔ CLAIMING STAYS EXACT. The plural tolerance is for CHECKING a
+        # pairing the pool order already established. Establishing one is the
+        # direction where a looser match invents a wrong answer, and the
+        # docstring above is explicit that the loose form is far too weak for
+        # it — so strict keeps demanding the literal token.
         return all(t.encode() in flat for t in tokens)
-    return any(t.encode() in flat for t in tokens)
+    return any(present(t) for t in tokens)
 
 
 def fat_length(data, off):
