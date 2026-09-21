@@ -7,52 +7,52 @@ patch set is version-specific and there is currently no mechanism selecting one
 by version — `build.sh` picks a directory by FORMAT (monolithic vs chunked),
 not by version. Wiring that up is a prerequisite for supporting both.
 
-## State against 2.1.278
+## State against 2.1.278 — 8/11 apply
 
 | patch | state |
 |---|---|
 | 001-session-hooks | applies unchanged |
-| 002-claudiverse-sidecar | **ported here** — locals renamed `o`→`s`, `d`→`g` |
-| 003-interactive-inject | **ported here** — stub `$k`→`Ey`, param `w`→`h` |
-| 005-command-hooks | BLOCKED — see below |
+| 002-claudiverse-sidecar | **ported** — locals `o`→`s`, `d`→`g` |
+| 003-interactive-inject | **ported** — stub `$k`→`Ey`, param `w`→`h` |
+| 005-command-hooks | **BLOCKED — needs rediscovery** |
 | 006-account-banner | applies unchanged |
-| 007-remote-answer | not started |
-| 008-idle-signal | **regenerated here** (fuzzy placement, then re-diffed) |
+| 007-remote-answer | **ported** — store local `v`→`dialogStore` |
+| 008-idle-signal | **regenerated** (fuzzy placement, then re-diffed) |
 | 009-compact-signal | applies unchanged |
-| 010-cvstate-heartbeat | not started — injects minified `E`, `qc` |
-| 011-spawn-trust | site found, not ported: unique `trustAccepted` in coreSchemas.js |
-| 012-account-failover | not started — injects minified `Ako`, `Hw`, `Mot`, `pje` |
+| 010-cvstate-heartbeat | **BLOCKED — needs rediscovery** |
+| 011-spawn-trust | **ported** — unique `trustAccepted` in coreSchemas.js |
+| 012-account-failover | **BLOCKED — needs rediscovery** |
 
-## What the port actually costs
+## The three that remain are NOT re-contexting
 
-Two different problems, and only one is mechanical.
+Each lost the landmark itself, so there is nothing to re-context against.
 
-**Context drift** — identifiers renamed around the hunk. Mechanical once the new
-name is found. The editor-helpers stub renames EVERY release:
-`$k` (2.1.263) → `iv` (2.1.265) → `Ey` (2.1.278), which is exactly why 003
-aliases it at its definition site instead of naming it in the injected code.
+**005 — command registry.** All three 2.1.263 locators are gone from 2.1.278:
+`'skillDoctor'` and `'pluginTypes'` (command groups, deleted upstream) and
+`builtinCommandTable` (the property the registry was memoised on, 0 hits).
+The nearest lookalike, `GP()`, is the TOOL list — it carries
+`underlyingV1ToolName` and holds TWO `...[],` slots, so keying on that shape
+would inject slash commands into the tool table. Needs a fresh tree-unique key
+for the command table as 2.1.278 now builds it.
 
-**Module relocation** — the FILE the patch names no longer holds the code. Not
-fixable by context at all; needs a pin in `tools-ts/anchor-rules.json`.
-Already hit twice:
-  * the query module (`query`/`queryLoop`/`queryWithObserverTap`/
-    `withRetryGenerator`) → landed in `tools/LSPTool/formatters.js`.
-    FIXED by the pin keyed on the `queryWithObserverTap` error string.
-  * **005's command registry** → the command-group literals it sits among
-    (`'daemon'`, `'logout'`) are scattered across `main.js` and several
-    `_unmatched/` modules on 2.1.278. Needs its own pin, keyed on something
-    still tree-unique — `'skillDoctor'`, used on 2.1.263, NO LONGER EXISTS.
+**010 — cvstate heartbeat.** Its anchor is the line
+`(E($Oo, WOo), YVe(IQr, replStatusForActivity, EQr));` inside
+`useReplStatusEffects`. On 2.1.278 that region is React-Compiler memo-cache
+output and has been reshaped: `replStatusForActivity` survives, but only as a
+DEFINITION, and the combined call line does not exist. One of its two injected
+identifiers is already bound — the queue hook `qc` is `$d` on 2.1.278
+(`$d().getMainThreadQueueLength()`); the effect alias `E` still needs binding,
+and should be read off whatever anchor replaces that line rather than assumed.
 
-## The hazard that must not be skipped on 010 and 012
-
-Both inject MINIFIED identifiers on added lines (`E`, `qc` / `Ako`, `Hw`,
-`Mot`, `pje`). A context-only re-anchor can apply cleanly while emitting a
-reference to a name that means something ELSE in the new tree — 012's own
-header records that happening on 2.1.260, where the injected `$k` was a live
-message queue rather than the helpers stub: a green check that shipped a dead
-feature, swallowed by the try/catch. Each of these must be bound at its
-DEFINITION site and shown tree-unique, the way `__cvSubmitHelpers` already is.
-For these two, "applies cleanly" is not evidence the patch works.
+**012 — account failover.** `withRetryGenerator` has 0 hits on 2.1.278. 🔴 That
+name is a DEOBFUSCATOR RENAME, not a source symbol — this patch has been
+anchored on a rename rule firing, and on 2.1.278 the withRetry rules decline
+(`getRetryAfterHeader`, `getUnifiedRateLimitResetMs` both report
+"declared file does not exist (services/api/withRetry.js)"). So the fix is
+probably upstream of the patch: repair the rename rules, then re-context.
+It also injects `Hw`, `Ako`, `Mot`, `pje`, each of which must be bound at its
+definition site — 012's own header records a 2.1.260 case where a context-only
+anchor applied cleanly and emitted a reference to a DIFFERENT live variable.
 
 ## Reproducing
 
