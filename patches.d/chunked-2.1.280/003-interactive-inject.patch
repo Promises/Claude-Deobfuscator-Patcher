@@ -1,0 +1,201 @@
+# patch: 003-interactive-inject-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 003-interactive-inject.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: Make remote_input work in the interactive Ink TTY REPL.
+#              The sidecar (002) injects via StructuredIO.prependUserMessage,
+#              which only the stream-json input loop drains — so injected prompts
+#              never execute in interactive mode. This registers
+#              globalThis.__claudiverseSubmit pointing at the live submit path.
+#
+# RE-ANCHORED ONTO A BETTER LANDMARK THAN THE MONOLITHIC PATCH HAD.
+#   The 2.1.238 hunk hung off `Sut = React_REPL.useRef(vse); Sut.current = vse;`
+#   inside the REPL component, and its own header flagged `Sut` as a minified
+#   name on an ADDED line — the dangerous case. That shape is GONE on chunked:
+#   the REPL component body is now React-Compiler output, a long run of
+#   `if (Vi[413] !== Uu.submit)` memo-cache slots where every local is an
+#   unanchorable minified name in a numbered slot. Re-contexting was not an
+#   option, so the hook was moved UPSTREAM to the owner of the submit path.
+#
+#   New site: class `PromptSubmitController`.bindHost(), which is the
+#   host-binding step the REPL performs on mount — the same lifecycle moment the
+#   old useEffect used, one layer closer to the submitter.
+#
+# ANCHOR QUALITY (better than the patch it replaces):
+#   The hunk's context contains the STRING LITERAL
+#     'PromptSubmitController used before its host was bound'
+#   which is unique across the whole tree and identical on 2.1.259 AND 2.1.260
+#   (measured on both). A string literal cannot be renamed by a minifier, so
+#   this hunk is anchored on something that does not drift with the bundler.
+#
+# 🔴 ONE MINIFIED NAME ON AN ADDED LINE: `Tb`.
+#   `Tb` is the shared no-op input-controls object
+#     var Tb = { setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} };
+#   i.e. exactly the literal the monolithic patch inlined by hand. It is used
+#   because this file ALREADY calls `this.submit(w, Tb)` in submitSurveyFollowUp,
+#   so the added line reproduces an existing in-tree call shape rather than
+#   inventing one. Mitigation is honest but PARTIAL: `this.submit` and the class
+#   are pinned by the string-literal context above, so a wrong binding cannot be
+#   a wrong SUBMITTER — but a future reassignment of `Tb` would silently pass the
+#   wrong options object. Inlining the literal instead would remove the last
+#   minified name; it is left as-is to match the file's own idiom, and flagged
+#   here rather than hidden.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, AND DELIBERATELY MADE LOUDER
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED BY CHOICE. Applies to 2.1.263 (verified); FAILS on
+#         2.1.260 (verified). An EARLIER draft of this patch applied cleanly to
+#         BOTH trees — and that version was WRONG. See below; this is the one
+#         finding in this batch that a green check would have hidden.
+#
+# THE TRAP THAT WAS CAUGHT:
+#   The injected line passes an editor-helpers stub as submit()'s 2nd arg.
+#   On 2.1.263 that stub is `$k`; on 2.1.260 the SAME object is named `Tb`.
+#   A context-only anchoring (unique string 'PromptSubmitController used
+#   before its host was bound', identical in both trees) made the hunk APPLY
+#   to both. But `git apply` matches CONTEXT only — never added lines — so on
+#   .260 it would have emitted a reference to `$k`, and on .260 `$k` IS A
+#   DIFFERENT, LIVE LOCAL (`$k = Fc()`, a message queue, declared ~line 85128
+#   inside another function and NOT in scope at the injection site ~75513).
+#   Result: a clean `git apply --check` PASS that silently produces a
+#   ReferenceError, swallowed by the try/catch — the feature dies quietly.
+#   This is exactly the "applies but binds something entirely different"
+#   failure the anchor work exists to prevent.
+#
+# THE FIX — bind the name where it is DEFINED, not where it is used:
+#   Hunk 1 aliases the stub at its definition site:
+#       globalThis.__cvSubmitHelpers = $k;
+#   Hunk 2's added line then references ONLY `globalThis.__cvSubmitHelpers`.
+#   Because hunk 1's context necessarily contains `var $k = {...}`, the patch
+#   now FAILS LOUDLY on a tree where the stub is renamed, instead of applying
+#   and misbinding. That is the intended trade: a loud, correct failure over a
+#   green check that ships a dead feature.
+#
+#   ⚠️ ONE MINIFIED NAME IS BACK ON AN ADDED LINE — `this.#e`, the deps object,
+#   added 2026-09-17 by the draft-preservation block below. It carries the SAME
+#   loud-failure guarantee for free, and by the same rule: hunk 2's context
+#   already contains the line `this.#e = w;` in the constructor, so a tree that
+#   renames the field fails the apply rather than binding something else. Noted
+#   here because the sentence this replaces claimed no added line had one, and
+#   a stale guarantee is worse than an acknowledged exception.
+#
+# ANCHORS USED: 'PromptSubmitController used before its host was bound'
+#   (UNIQUE, 1 occurrence, byte-identical in both trees — `bindHost` alone is
+#   NOT usable: 7 occurrences in each tree) and the stub's own body literal
+#   `{ setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} }`.
+#
+# ⛔ WHAT WOULD UNBLOCK IT: an anchor rule naming the editor-helpers stub.
+#   Then hunk 1 anchors on a stable name and the whole patch goes
+#   version-independent with no loss of loudness.
+#
+#
+# ============================================================================
+# 2026-09-17 — A REMOTE MESSAGE WAS DELETING WHAT THE OPERATOR WAS TYPING
+# ============================================================================
+# REPORTED: typing in the TUI, a message arrives from claudiverse, the input
+# bar goes empty and the half-written prompt is gone.
+#
+# CAUSE, in submit() — NOT in anything this patch passes:
+#     if (it.stashedPrompt !== void 0 && !Ro && Wo) it.popStash('outside');
+#     else if (Wo) { if (!ne?.fromKeybinding) it.clear(); }
+#   `it` is the draft STORE and `Wo = !isLoading || isRemoteMode`, so the clear
+#   fires whenever the seat is IDLE — precisely the moment someone is most
+#   likely mid-sentence. The no-op `clearBuffer` in __cvSubmitHelpers does not
+#   prevent it: the draft store and the editor buffer are different things, and
+#   the input bar follows the store.
+#
+# ⛔ REJECTED: passing `{fromKeybinding: true}` as submit's 3rd arg. It does
+#   skip the clear, but it also drops the history entry, changes the slash
+#   guard, and skips the bash-history write — it would be lying about where the
+#   input came from to get one side effect suppressed.
+#
+# THE FIX uses the store's OWN stash: draft.stash() before submit, and submit
+#   restores it through the branch above, with cursor offset and pasted
+#   contents intact and its own "Draft restored" notice. Nothing about how the
+#   remote message is submitted changes.
+#
+#   The explicit popStash after the call is for the paths that RETURN EARLY —
+#   an immediate local-jsx slash command, which /model is, and the web model
+#   switcher sends exactly that. Those never reach submit's own pop, and the
+#   draft would sit stashed and invisible until the next submit restored it.
+#   Safe to call unconditionally-guarded: on the normal path submit has already
+#   popped, so `stashedPrompt` is undefined and it is skipped.
+#
+#   Not awaited, on purpose: every draft-clearing path runs in submit's
+#   SYNCHRONOUS prefix, before its first await, so the stash state is settled
+#   by the time submit() returns its promise.
+#
+# DEGRADES QUIETLY IF `.draft` IS EVER RENAMED: __draft is undefined, the guard
+#   skips, and the behaviour falls back to exactly today's (draft cleared). That
+#   is a silent loss of the fix, not a crash — the loud half is `#e`, above.
+#
+diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
+index 7353cdb..8bf1bfe 100644
+--- a/components/PromptInput/useSwarmBanner.js
++++ b/components/PromptInput/useSwarmBanner.js
+@@ -8518,12 +8518,13 @@ function nwe({ allow: h, persistToSettings: v, persistRow: D }, Q, Z) {
+     } else if (h) Ve.addSessionAllowedHost(Q);
+ }
+ L();
+ L();
+ L();
+ var nm = { setCursorOffset: () => {}, clearBuffer: () => {}, resetHistory: () => {} };
++globalThis.__cvSubmitHelpers = nm;
+ function zH(h) {
+     let we = w(8),
+         { onSubmit: v } = h,
+         D = fl(),
+         Q = j2(),
+         Z = zv(yf.kind),
+@@ -73219,12 +73220,50 @@ class PromptSubmitController {
+     #t = null;
+     constructor(h) {
+         this.#e = h;
+     }
+     bindHost(h) {
+         this.#t = h;
++        try {
++            globalThis.__claudiverseSubmit = (__text) => {
++                // 🔴 PRESERVE THE OPERATOR'S HALF-TYPED DRAFT. submit() wipes it
++                // whenever the seat is IDLE — exactly when someone is mid
++                // sentence. Uses the draft store's OWN stash/popStash, the
++                // mechanism Claude Code already uses to carry a draft across a
++                // submit (value, cursor offset and pasted contents together).
++                let __draft = this.#e?.draft,
++                    __stashed = false;
++                try {
++                    if (__draft && __draft.stashedPrompt === undefined && __draft.value?.trim()) {
++                        (__draft.stash(), (__stashed = true));
++                    }
++                } catch (__e3) {}
++                // Not awaited: every draft-clearing path runs in submit's
++                // SYNCHRONOUS prefix, before its first await.
++                let __result = this.submit(__text, globalThis.__cvSubmitHelpers);
++                // Covers paths that RETURN EARLY (an immediate local-jsx slash
++                // command, which /model is) and never reach submit's own pop.
++                try {
++                    if (__stashed && __draft.stashedPrompt !== undefined)
++                        __draft.popStash('outside');
++                } catch (__e4) {}
++                return __result;
++            };
++            // 🔴 WRAP submit ITSELF — a prompt TYPED in the terminal is never
++            // mirrored otherwise; only the model's OUTPUT stream is.
++            if (!this.__cvWrapped) {
++                let __origSubmit = this.submit.bind(this);
++                this.submit = (__text, ...__rest) => {
++                    try {
++                        globalThis.__claudiverseNoteUserPrompt?.(__text);
++                    } catch (__e2) {}
++                    return __origSubmit(__text, ...__rest);
++                };
++                this.__cvWrapped = true;
++            }
++        } catch (__e) {}
+     }
+     #o() {
+         if (!this.#t) throw Error('PromptSubmitController used before its host was bound');
+         return this.#t;
+     }
+     submit = async (h, v, D) => {

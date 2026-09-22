@@ -1,0 +1,110 @@
+# patch: 007-remote-answer-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 007-remote-answer.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: globalThis.__claudiverseAnswer / __claudiverseDecline /
+#              __claudiverseListQuestions, so a permission / ask-user-question
+#              dialog can be answered remotely by the sidecar.
+#
+# SAME STRUCTURE AS THE MONOLITHIC PATCH, RE-CONTEXTED (not re-designed):
+#   services/dialogs/dialogStore.js SURVIVES under its own name on chunked, and
+#   the store is still a factory that builds an object of methods and returns it.
+#   The hook is installed on the last statement before that return, so the
+#   closure captures the finished store.
+#   The store local is `v` here (it was `r` on 2.1.238) — a minified name, but it
+#   appears on added lines ONLY as the object the hunk was generated against, and
+#   the immediately preceding CONTEXT line `dismissKind(w) { ... v.dismiss(T.id); }`
+#   pins `v` to the store itself: that line both names `v` and proves it is the
+#   object owning dismiss/answer. A rename therefore fails the apply.
+#   The kind discriminator 'permission_ask_user_question' is a STRING LITERAL and
+#   is the real semantic anchor; it is unchanged from the monolithic patch.
+#
+# The catch binding is `__e` (the monolithic patch used `e2`): `e` is not in
+# scope here, but __-prefixing every introduced binding is the convention used
+# across the chunked patch set so an added local can never shadow a captured one.
+#
+# ⚠️ COVERAGE NOTE: not exercised by the turn test — a headless `-p` run opens no
+#   permission dialog. Applying cleanly is VERIFIED; "answers a live dialog" is
+#   BELIEVED, and is the same code path the 2.1.238 fleet has been running.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk's leading context included
+#       for (let T of o.getState().open) ...
+#   whose receiver is the raw store local — `o` on 2.1.260 but `t` on 2.1.263.
+#   That single token broke the whole patch. The body it targets is otherwise
+#   unchanged between the two builds.
+#
+# THE ANCHOR:
+#   `    return v;` — UNIQUE (1 occurrence) in both trees, verified by
+#   grep -c in each. Context is now exactly the object-literal terminator
+#   `};` plus that return, so the churning `t.`/`o.` line is OUTSIDE the hunk.
+#
+# MINIFIED NAME ON ADDED LINES: `v` — WHY IT IS SAFE.
+#   `v` is the finished store object. It is VERSION-STABLE across .260 and
+#   .263 (both trees measured: `v.dismiss`, `return v;` identical), and more
+#   importantly the CONTEXT line `return v;` is immediately adjacent to every
+#   added line that uses it — the hunk cannot apply unless `v` is still the
+#   thing being returned from this factory. A rename fails the apply.
+#   NOTE the hunk header shows `function createDialogStore()`, which is a
+#   LANDED ANCHOR on 2.1.263 (grep-verified present in the built tree) but is
+#   ABSENT on 2.1.260, where the same function is `go`. This is harmless:
+#   git treats the @@-header trailer as a COMMENT and never matches it. That
+#   was verified by applying this exact hunk to both trees.
+#
+# The kind discriminator 'permission_ask_user_question' is a STRING LITERAL on
+# an added line and is the real semantic pin — unchanged since 2.1.238.
+#
+diff --git a/services/dialogs/dialogStore.js b/services/dialogs/dialogStore.js
+index 608824b..155ca8b 100644
+--- a/services/dialogs/dialogStore.js
++++ b/services/dialogs/dialogStore.js
+@@ -84,12 +84,44 @@ function createDialogStore() {
+                 return s.has(a(t, n));
+             },
+             dismissKind(t) {
+                 for (let n of e.getState().open) if (n.kind === t) dialogStore.dismiss(n.id);
+             },
+         };
++    try {
++        var __cvOpen = function () {
++            return dialogStore.getState().open.filter((d) => d && d.kind === 'permission_ask_user_question');
++        };
++        var __cvPick = function (toolUseId) {
++            var open = __cvOpen();
++            return toolUseId
++                ? open.find((d) => d.payload && d.payload.requestId === toolUseId)
++                : open[open.length - 1];
++        };
++        globalThis.__claudiverseListQuestions = function () {
++            return __cvOpen().map((d) => ({
++                toolUseId: d.payload && d.payload.requestId,
++                questions: d.payload && d.payload.questions,
++            }));
++        };
++        globalThis.__claudiverseAnswer = function (toolUseId, answerPayload) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            dialogStore.answer(req.id, {
++                behavior: 'allow',
++                updatedInput: Object.assign({}, req.payload.input, answerPayload),
++            });
++            return true;
++        };
++        globalThis.__claudiverseDecline = function (toolUseId) {
++            var req = __cvPick(toolUseId);
++            if (!req) return false;
++            dialogStore.answer(req.id, { behavior: 'deny' });
++            return true;
++        };
++    } catch (__e) {}
+     return dialogStore;
+ }
+ 
+ function b(e, o) {
+     let i = !1,
+         s = !1;

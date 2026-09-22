@@ -1,0 +1,101 @@
+# patch: 008-idle-signal-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 008-idle-signal.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: Emits {type:"idle"} when the REPL is at rest. The orchestrator
+#              keys on this to know a seat is free.
+#
+# 🔴 REDUCED IN SCOPE ON PURPOSE — READ BEFORE RELYING ON IT.
+#   The 2.1.238 patch installed its OWN useEffect with a 400 ms settle timer and
+#   a three-part rest test: `_h !== 'waiting' && !mi && z.getMainThreadQueueLength() === 0`.
+#   None of those three locals is addressable on a chunked tree: the REPL body is
+#   React-Compiler output (`if (Vi[230] !== TDt || Vi[231] !== LDt)` …), where
+#   every local is a minified name held in a numbered memo-cache slot and adding
+#   a hook that reads three of them would be exactly the silent-misbinding hazard
+#   the patch rules forbid.
+#
+#   So this emits from INSIDE the existing session-activity effect instead, whose
+#   callback already receives the REPL's own computed status:
+#       l$e({ status: uie, waitingFor: ZHe }, JHe)
+#   and fires when `uie === 'idle'` with no `waitingFor`. That is upstream's own
+#   idea of idle, not a reconstruction of it.
+#
+#   DIFFERENCES FROM THE MONOLITHIC BEHAVIOUR, stated rather than glossed:
+#     - NO 400 ms debounce. The signal fires on the status transition, so a
+#       consumer that expects the settle delay may see it marginally earlier.
+#     - The message-queue depth is NOT consulted. If upstream reports 'idle'
+#       while a queued prompt is pending, this would emit where the old one
+#       would not.
+#   Both are behaviour changes in the emit CONDITION, not in the message shape;
+#   {type:"idle"} is unchanged, so the orchestrator contract holds.
+#
+# ANCHOR: `l$e` and `uie` are minified and appear as CONTEXT (the added lines
+#   reference `uie`/`ZHe`, which the context line directly above binds and gives
+#   meaning to via the literal property names `status:` and `waitingFor:` —
+#   those property names are the real anchor and cannot be minified).
+#   `uie === 'idle'` compares against a STRING LITERAL.
+#
+# ⚠️ NOT EXERCISED BY THE HEADLESS TURN TEST (no REPL). Applying and bundling are
+#   VERIFIED; live idle emission is BELIEVED.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — RE-CONTEXTED TO 2.1.263
+# ============================================================================
+# STATUS: 🔴 VERSION-LOCKED. Applies to 2.1.263 (verified); FAILS on 2.1.260
+#         (verified). Not fixable without an anchor; blocking symbols named.
+#
+# WHAT BLOCKS IT:
+#   The guard needs the CURRENT status value and the waiting-for value, and
+#   both are React-compiler-memoized locals destructured from an anonymous
+#   memo slot. Every identifier at the site churns:
+#       2.1.260:  l$e({ status: uie, waitingFor: ZHe }, JHe).catch(aPo)
+#       2.1.263:  xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo)
+#   The added line MUST read `uce`/`eGe` (the .263 spelling) because it tests
+#   their values. There is no stable alias: they come from
+#       let { status: xD, waitingFor: eGe, working: tGe } = IOo;
+#   where `IOo` is itself a memo-cache slot (`cx[15]`), not a named export.
+#
+# WHY IT IS NEVERTHELESS SAFE — option (b) from the brief, applied strictly:
+#   The minified names on the added line are pinned by the CONTEXT line
+#   directly above them, which is the call that DEFINES their meaning:
+#       xUe({ status: uce, waitingFor: eGe }, ZVe).catch(oFo);
+#   That line is inside the hunk. If any of those names drift, the context
+#   fails and the patch is REJECTED — it cannot apply while binding different
+#   variables. Verified: this patch FAILS on 2.1.260 rather than misapplying.
+#
+# ⛔ WHAT WOULD UNBLOCK IT: an anchor rule naming the status-reporting call
+#   (`l$e`/`xUe` — it is the "report agent status" helper) AND the destructured
+#   status/waitingFor locals. Naming the helper alone is not enough; the guard
+#   reads the VALUES, so the locals are what must become stable.
+#
+#
+# 🔴 REGENERATED 2026-09-07 against the anchored tree, and the reason matters:
+#   the hunk now uses replStatusForActivity / replWaitingForActivity instead of
+#   the minified uce / eGe. Swapping the TOKENS was not enough — the longer
+#   names made prettier REFLOW the call across three lines, so the old
+#   single-line context could never match. The hunk was re-derived from the
+#   real tree rather than hand-edited.
+#   Note the @@ header now reads `function useReplStatusEffects(...)`: that is
+#   an anchored name too, so even git's context hint is version-stable.
+#
+diff --git a/components/PromptInput/useSwarmBanner.js b/components/PromptInput/useSwarmBanner.js
+index 8bf1bfe..f3f8cf8 100644
+--- a/components/PromptInput/useSwarmBanner.js
++++ b/components/PromptInput/useSwarmBanner.js
+@@ -70842,12 +70842,16 @@ function gJe(h, v, D, Q, Z, be, we, Re, Pe, Ie, Le, Be) {
+                     fromKeybinding: !1,
+                     bridgeOrigin: !0,
+                 }),
+                 Pe(qs.target, qs.args, qs.displayName, is),
+                 !0
+             );
++            try {
++                if (replStatusForActivity === 'idle' && !replWaitingForActivity)
++                    globalThis.__claudiverse.mirrorMessage({ type: 'idle' });
++            } catch (__e) {}
+         }),
+         Ps = pr(),
+         ei = qg(),
+         { addNotification: ri, removeNotification: Ls } = Xr(),
+         vi = j((In) => In.replBridgeEnabled),
+         bs = j((In) => In.replBridgeConnected),
