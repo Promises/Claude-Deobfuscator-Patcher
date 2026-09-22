@@ -1151,13 +1151,5 @@
       "text": "queryWithObserverTap: missing"
     },
     "description": "The query module -- query()/queryLoop()/queryWithObserverTap() and withRetryGenerator(). THE FILE PATH IS A PATCH TARGET, and until now it was unpinned: it happened to land in services/compact/precomputedCompact.js through signature matching alone. On 2.1.278 the same module landed in tools/LSPTool/formatters.js instead, so 002 and 012 -- whose hunks name services/compact/precomputedCompact.js -- could not apply, and the failure read as drifted context rather than a moved file. Keyed on the queryWithObserverTap error-message STRING, an original-source literal that survives minification: MEASURED present in exactly one module in the raw minified cache, and tree-unique on BOTH 2.1.263 (where it resolves to precomputedCompact.js, i.e. the pin is a no-op there) and 2.1.278 (where it does the work)."
-  },
-  {
-    "type": "pin",
-    "source": "utils/config.js",
-    "find": {
-      "text": "trustAccepted)return!0"
-    },
-    "description": "The trust-gate module (checkHasTrustDialogAccepted and friends). ANOTHER UNPINNED PATCH TARGET: 011 names its file, and the module moved from entrypoints/sdk/coreSchemas.js on 2.1.278 to utils/auth.js on 2.1.280 \u2014 the gate LINE is byte-identical across both, so the patch failed purely on path. Measured control in the same pair of trees: the two PINNED modules (dialogStore, the query module) kept their paths across that jump while this one moved, which is the evidence that pinning is what makes a patch target survive a release. Keyed on the minified form of the gate test rather than `trustAccepted` alone, which appears in 14 modules of the raw cache; this pattern resolves to exactly one. Pinned to utils/config.js because several existing anchor rules already declare trust symbols there and currently DECLINE with 'declared file does not exist'."
   }
 ]
