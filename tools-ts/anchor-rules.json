@@ -1151,5 +1151,13 @@
       "text": "queryWithObserverTap: missing"
     },
     "description": "The query module -- query()/queryLoop()/queryWithObserverTap() and withRetryGenerator(). THE FILE PATH IS A PATCH TARGET, and until now it was unpinned: it happened to land in services/compact/precomputedCompact.js through signature matching alone. On 2.1.278 the same module landed in tools/LSPTool/formatters.js instead, so 002 and 012 -- whose hunks name services/compact/precomputedCompact.js -- could not apply, and the failure read as drifted context rather than a moved file. Keyed on the queryWithObserverTap error-message STRING, an original-source literal that survives minification: MEASURED present in exactly one module in the raw minified cache, and tree-unique on BOTH 2.1.263 (where it resolves to precomputedCompact.js, i.e. the pin is a no-op there) and 2.1.278 (where it does the work)."
+  },
+  {
+    "type": "pin",
+    "source": "entrypoints/sdk/coreSchemas.ts",
+    "find": {
+      "text": "trustAccepted)return!0"
+    },
+    "description": "The trust-gate module that 011 patches. Pinned to the path 2.1.263 ALREADY puts it at, so the pin is a no-op there and forces the same layout on newer releases \u2014 on 2.1.280 the module otherwise lands in an unprettified _unmatched/ chunk where a context patch cannot apply at all. \ud83d\udd34 An earlier version of this pin targeted utils/config.js and broke 2.1.263 (11/11 -> 9/11, coreSchemas.js ceased to exist and 011 could not find it). Pins are GLOBAL: they relocate the module on every version, so a pin must be validated by building EVERY version still in use, not just the one being ported. Keyed on the minified gate test; `trustAccepted` alone matches 14 modules in the raw cache, this pattern exactly one."
   }
 ]
