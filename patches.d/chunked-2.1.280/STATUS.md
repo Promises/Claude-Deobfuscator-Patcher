@@ -1,12 +1,26 @@
-# 2.1.280 port — 8/11. NO BINARY YET.
+# 2.1.280 port — BLOCKED UPSTREAM OF PATCHES. Do not build from this yet.
 
-🔴 **2.1.280-ONLY. Do not copy into `patches.d/chunked/`** — the live fleet
-builds from 2.1.263 and these do not apply to it.
+🔴 **2.1.280 CANNOT BE BUILT AT ALL — and not because of patches.**
+Every 2.1.280 build fails in bun's bundling step:
 
-⚠️ **8/11 does not build.** `build.sh` refuses a partially-patched tree, and it
-is right to: such a binary compiles, runs, reports the right version, and the
-missing hooks simply never fire. All three below must land before there is a
-2.1.280 binary.
+    error: No matching export in ".../_unmatched/....js"
+
+including `SKIP_PATCHES=1 ALLOW_UNPATCHED_BUILD=1` builds with no patches
+applied. The defect is in the deobfuscator's module reconstruction, upstream of
+the patch set. **Fix that first; until then no patch work here can yield a
+binary.**
+
+⚠️ **The .patch files in this directory are STALE.** They were generated against
+a tree produced with an earlier trust-pin target (utils/config.js). That pin
+BROKE 2.1.263 and was re-targeted to entrypoints/sdk/coreSchemas.ts, which
+reshuffles module→file assignments again. Regenerate with the `.py` port
+scripts against a current tree; do not trust the committed diffs.
+
+🔴 **Lesson paid for twice in one session:** a pin is GLOBAL. It relocates its
+module on every version, and relocating one module reshuffles the file the
+others land in. After any pin change, re-run BOTH builds — 2.1.263 first,
+because that is what the live fleet uses. The .py scripts survive this; the
+generated .patch files do not.
 
 ## Applying (8)
 
