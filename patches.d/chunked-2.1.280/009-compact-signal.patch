@@ -1,0 +1,64 @@
+# patch: 009-compact-signal-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic keeps 009-compact-signal.patch.
+# version: authored against 2.1.260
+# depends: 002
+# description: Mirrors {type:"compact"} at the post-compaction chokepoint.
+#
+# WHERE IT MOVED: bootstrap/sessionState.js still EXISTS on chunked but is a pure
+#   re-export BARREL with no function bodies (see 001). markPostCompaction's real
+#   body is `gtt` in vendor/lodash/memoizeCapped.js.
+#
+# IDENTITY IS PROVEN, NOT GUESSED. `gtt` is confirmed to be markPostCompaction by
+#   the barrel's own export line `gtt as markPostCompaction,` in
+#   bootstrap/sessionState.js — i.e. by upstream's export map as recovered by the
+#   anchor pass, not by shape-matching. The remaining minified names (`n` for the
+#   root-session getter) appear only in CONTEXT.
+#
+# UPSTREAM SIGNATURE CHANGE (handled, not carried over): on 2.1.238 the body was
+#   the single line `ROOT_SESSION.requestJournal.replacePendingPostCompaction(!0);`.
+#   It now takes `(e, { keepsCachedPrefix = !1 } = {})` and performs three journal
+#   updates. The emit is placed at the END of the function so it fires after the
+#   post-compaction state is fully written, matching the monolithic patch's intent
+#   (mirror once compaction has been recorded) rather than its line position.
+#   The anchored method name `replacePendingPostCompaction` is retained in context.
+#
+# ⚠️ NOT EXERCISED BY THE TURN TEST (a one-shot `-p` turn never compacts).
+#   Applying and bundling are VERIFIED; live emission is BELIEVED.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk used wide context that included the enclosing declaration
+#   `function gtt(e, { keepsCachedPrefix: t = !1 } = {})` — and that name is a
+#   bundler name (`crt` on 2.1.263). The statement the patch actually targets
+#   is unchanged between builds.
+#
+# THE ANCHOR:
+#   `        o.replaceLastMainThreadRequest(null, null);`
+#   UNIQUE (1 occurrence) in both trees, verified by grep -c in each. It is a
+#   METHOD call on the request journal — method names on this object survive
+#   minification (they are real API surface), which is what makes it stable.
+#   Context is that line plus the closing `}` of the function.
+#
+# MINIFIED NAME IN CONTEXT: `o` (the request-journal local). It appears ONLY
+# on the context line, never on an added line, and that context line is what
+# pins it. The added line references only `globalThis.__claudiverse`.
+#
+# NOTE: the hunk's line numbers were generated against a tree that also had
+# 001 applied, so its @@ offsets are ~5 lines skewed from a pristine tree.
+# git's normal offset search absorbs this — verified applying standalone to
+# BOTH pristine trees. No renumbering was hand-edited into the body.
+#
+diff --git a/vendor/lodash/memoizeCapped.js b/vendor/lodash/memoizeCapped.js
+index 0bae2c1..7ef81cc 100644
+--- a/vendor/lodash/memoizeCapped.js
++++ b/vendor/lodash/memoizeCapped.js
+@@ -4459,2 +4464,5 @@ function crt(e, { keepsCachedPrefix: t = !1 } = {}) {
+         o.replaceLastMainThreadRequest(null, null);
++    try {
++        globalThis.__claudiverse.mirrorMessage({ type: 'compact' });
++    } catch (__e) {}
+ }

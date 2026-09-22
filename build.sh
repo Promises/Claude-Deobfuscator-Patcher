@@ -321,10 +321,29 @@ elif [ -d "$SCRIPT_DIR/patches.d" ]; then
     # Same $FORMAT the rest of the script dispatches on, which is MEASURED from
     # the source in step 1, never inferred from a version number.
     if [ "$FORMAT" = "chunked" ]; then
-        PATCH_DIR="$SCRIPT_DIR/patches.d/chunked"
-        echo "  patch set: patches.d/chunked/ (chunked tree)"
+        # VERSION-SPECIFIC SET WINS WHEN ONE EXISTS.
+        #
+        # 🔴 A PATCH SET IS VERSION-SPECIFIC, NOT MERELY FORMAT-SPECIFIC, and
+        # this script assumed otherwise for a long time. MEASURED: the set
+        # hand-ported to 2.1.278 applies 8/11 there and 3/11 on 2.1.280, three
+        # days later; the 2.1.263 set applies 11/11 on .263 and 3/11 on .280.
+        # With one directory per format there was nowhere to put a second set,
+        # so porting forward meant overwriting the set the live fleet builds
+        # from — i.e. you could not have a working 263 binary and a 280 one at
+        # the same time.
+        #
+        # patches.d/chunked-<version>/ is preferred when present; otherwise the
+        # shared patches.d/chunked/ is used exactly as before, so the 2.1.263
+        # path is untouched.
+        if [ -d "$SCRIPT_DIR/patches.d/chunked-$VERSION" ]; then
+            PATCH_DIR="$SCRIPT_DIR/patches.d/chunked-$VERSION"
+            echo "  patch set: patches.d/chunked-$VERSION/ (version-specific)"
+        else
+            PATCH_DIR="$SCRIPT_DIR/patches.d/chunked"
+            echo "  patch set: patches.d/chunked/ (chunked tree)"
+        fi
         if [ ! -d "$PATCH_DIR" ]; then
-            echo "🔴 No patches.d/chunked/ — refusing to build an unpatched binary."
+            echo "🔴 No $PATCH_DIR — refusing to build an unpatched binary."
             exit 1
         fi
     else

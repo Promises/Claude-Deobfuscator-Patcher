@@ -1,0 +1,88 @@
+# patch: 006-account-banner-chunked
+# format: CHUNKED ONLY (2.1.242+). Monolithic trees keep using
+#         006-account-banner.patch, which is unchanged.
+# version: VERSION-INDEPENDENT. Verified apply-clean against the emitted-file
+#          content of BOTH 2.1.263 and 2.1.260.
+# depends: the PIN rule for utils/versionSuffix.ts (delivered as
+#          /tmp/anchors-263/006-pin.json, to be merged into
+#          tools-ts/anchor-rules.json). THIS PATCH DOES NOT APPLY WITHOUT IT --
+#          without the pin there is no utils/versionSuffix.js in the tree.
+# description: getVersionSuffix() returns ' [claudiverse]' so every version
+#              readout is identifiably patched. This is the build's canary.
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 -- VERSION-LOCK RESOLVED BY A PIN, NOT BY A REWRITE
+# ============================================================================
+#
+# WHAT WAS BROKEN, AND WHY NO HUNK COULD FIX IT:
+#   The target is a standalone chunk that the emitter named by its MINIFIED
+#   export, so the FILENAME ITSELF drifted every release:
+#       2.1.260:  _unmatched/0003_Px.js
+#       2.1.263:  _unmatched/0003_$x.js
+#   `git apply` matches paths LITERALLY -- no glob, no fuzz, no rename
+#   detection. The failure therefore happened in the `--- / +++` header BEFORE
+#   a single context line was consulted. Anchoring inside the hunk, which is
+#   what unblocked every other patch in this set, is inert against a path
+#   mismatch. The FILE had to acquire a stable name.
+#
+# HOW IT IS FIXED:
+#   A `type: "pin"` rule keyed on BUILD_REF_NAME gives that module the stable
+#   path utils/versionSuffix.js at build step 2 (emitter.ts:48 calls
+#   resolvePinRules), which is BEFORE patches are applied at step 3. This patch
+#   targets the pinned path, so the minified name never appears in a path.
+#   The pin key is a build-CONSTANT property KEY, not a build-varying value:
+#   VERSION / BUILD_TIME / GIT_SHA sit in the very same object literal and
+#   change every release, but BUILD_REF_NAME is an upstream source identifier
+#   preserved by minification. MEASURED tree-unique -- exactly 1 manifest
+#   section of 1650 on 2.1.263 and 1 of 1643 on 2.1.260.
+#
+# THE HUNK BODY IS VERSION-INDEPENDENT BY CONSTRUCTION:
+#   Context is trimmed to `) {` and `}` and the changed line is `return '';`.
+#   All three are BYTE-IDENTICAL on 2.1.263 and 2.1.260 (verified). Every
+#   version-varying token in this file -- the minified name `$x`/`Px`, VERSION,
+#   BUILD_TIME, GIT_SHA -- lives in the parameter object ABOVE the context
+#   window and is never matched. The added line introduces no identifier at
+#   all, only a string literal.
+#
+#   NOTE the `function $x(` text after the `@@` marker: that is git's function
+#   -context hint, which `git apply` does NOT match against. VERIFIED by
+#   positive control -- the patch applies cleanly to the 2.1.260 file, where
+#   that function is named `Px`.
+#
+# 🔴 THE PIN CHANGES THIS FILE'S HEADER, so the patch is authored against the
+#   PINNED emit, not against today's _unmatched/ file. A pinned module is
+#   emitted with confidence "high", which routes it through beautify()
+#   (emitter.ts) -- and beautify COLLAPSES the two blank lines in the Anthropic
+#   banner that the unmatched file still carries. Measured: exactly 2 blank
+#   lines removed, which shifts the hunk's start line from 22 to 20. Authoring
+#   this against the current _unmatched/ file would have produced an off-by-two
+#   that only surfaced after the pin landed.
+#
+# HOW THE EXPECTED FILE WAS DERIVED (reproducible):
+#   The 2.1.263 and 2.1.260 module trees were regenerated from
+#   versionref/2.1.263-bin and versionref/2.1.260-bin with
+#   `tools/extract_chunks.py --splitter-compat` into a private scratch dir (the
+#   shared .deob_cache was NOT touched -- it holds 2.1.238), then the emitted
+#   content was reproduced by calling the pipeline's own beautify() followed by
+#   prettifyCode() from tools-ts/src. That is the exact transform chain a real
+#   build applies to a pinned module before step 3.
+#
+# ⚠️ WHAT IS NOT YET VERIFIED: no build has been run with the pin merged, so
+#   utils/versionSuffix.js does not exist in any on-disk tree yet. The apply
+#   check above is against the RECONSTRUCTED emit, not against build output.
+#   The residual risk is that the real pipeline's step 2.6 renamer alters this
+#   file (it would rename `$x`/`Px` if an anchor rule named it) -- the pin
+#   itself emits no rename, and the shipped getVersionSuffix_* rules cannot
+#   fire here (both declare hardcoded version-specific files with
+#   no_tree_scan:true), so the expectation is no change to the context window.
+#   Confirm on the first build after the pin merges.
+#
+diff --git a/utils/versionSuffix.js b/utils/versionSuffix.js
+index 7db8d43..50b6857 100644
+--- a/utils/versionSuffix.js
++++ b/utils/versionSuffix.js
+@@ -20,3 +20,3 @@ function $x(
+ ) {
+-    return '';
++    return ' [claudiverse]';
+ }

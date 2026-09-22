@@ -1290,6 +1290,20 @@ var __claudiverse = (function() {
 // module, so `var __claudiverse` is module-scoped and invisible to the patched
 // call sites in other chunks; those sites are `try`-guarded, so without this the
 // mirroring is silently absent. No-op on the monolithic path.
+// 🔴 SAY WHAT THIS BUILD CANNOT DO. A binary built from a partially ported
+// patch set compiles, runs and reports the right version while the missing
+// hooks simply never fire — invisible from the outside, and this project has
+// shipped that failure before. 013-unwired-features sets the list; builds with
+// a complete patch set set nothing and this logs nothing.
+try {
+  if (Array.isArray(globalThis.__claudiverseUnwired) && globalThis.__claudiverseUnwired.length) {
+    var __cvMissing = "\u26a0 claudiverse: features NOT wired in this binary: " +
+      globalThis.__claudiverseUnwired.join(", ");
+    try { log(__cvMissing); } catch (e) {}
+    try { process.stderr.write("\n" + __cvMissing + "\n\n"); } catch (e) {}
+  }
+} catch (e) {}
+
 try {
   globalThis.__claudiverse = __claudiverse;
   // Patch 003 wraps PromptSubmitController.submit and calls this for every

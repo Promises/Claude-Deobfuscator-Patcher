@@ -1,0 +1,47 @@
+# patch: 013-unwired-features-2.1.280
+# format: CHUNKED, 2.1.280 ONLY
+# description: Record, at runtime, which patches are ABSENT from this build.
+#
+# 🔴 WHY A PATCH EXISTS TO SAY SOMETHING IS MISSING.
+#   005, 010 and 012 could not be re-anchored for 2.1.280 (see
+#   PORTING-GUIDE.md). The tempting alternative was to ship them re-contexted
+#   onto a best-guess anchor so the set stayed at 11/11. That is precisely the
+#   failure mode this project keeps hitting: a patch that APPLIES CLEANLY and
+#   silently does nothing. 012's own header records a 2.1.260 instance where a
+#   context-only anchor emitted a reference to a different live variable and
+#   the feature died behind a try/catch, invisibly.
+#   So the gap is made explicit instead. The sidecar reads
+#   globalThis.__claudiverseUnwired at startup and logs it, so a seat running
+#   this binary SAYS what it cannot do rather than appearing whole.
+#
+# ⚠️ DELETE THIS PATCH once 005/010/012 are properly ported — leaving it in
+#   place after they land would report a lie in the other direction.
+diff --git a/_custom/SidecarClient.js b/_custom/SidecarClient.js
+index 3480a2b..e7a3935 100644
+--- a/_custom/SidecarClient.js
++++ b/_custom/SidecarClient.js
+@@ -8,12 +8,24 @@
+ //   CLAUDIVERSE_TOKEN  — API bearer token (required)
+ //   CLAUDIVERSE_URL    — Server base URL (default: http://localhost:4000)
+ //   CLAUDIVERSE_TITLE  — Stable session name (e.g. "decomper"); default: timestamp
+ //   CLAUDIVERSE_DEBUG  — "1" for debug logging to /tmp/claudiverse.log
+ 
+ var __claudiverse = (function () {
++    // 🔴 FEATURES NOT WIRED ON THIS BUILD — see
++    // patches.d/chunked-2.1.280/PORTING-GUIDE.md
++    // These three patches could not be re-anchored for 2.1.280 and are ABSENT
++    // from this binary. Recorded loudly rather than left silent: a missing hook
++    // is invisible from the outside — the binary compiles, runs, and reports
++    // the right version while the feature simply never fires, which is the
++    // exact failure this project has been bitten by before.
++    globalThis.__claudiverseUnwired = [
++        '005-command-hooks',
++        '010-cvstate-heartbeat',
++        '012-account-failover',
++    ];
+     var WebSocket, http, https, fs;
+     try {
+         WebSocket = require('ws');
+     } catch (e) {
+         try {
+             WebSocket = globalThis.WebSocket;

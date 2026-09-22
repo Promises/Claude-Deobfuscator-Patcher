@@ -1,0 +1,78 @@
+# patch: 001-session-hooks-chunked
+# format: CHUNKED ONLY (2.1.242+). The monolithic tree is served by
+#         001-session-hooks.patch, which is unchanged and still applies to
+#         2.1.238. Both are present on purpose: no single hunk can serve both
+#         trees, because the file the function lives in does not exist in both.
+# version: authored against 2.1.260
+# depends: none
+# description: getSessionId() invokes __sessionHooks.runAll() (foundation hook
+#              point). runAll() is idempotent (hasRun latch in
+#              modules/AAASessionHooks.js), so firing it on every getSessionId()
+#              runs the callbacks exactly once.
+#
+# WHY A SEPARATE FILE FROM 001-session-hooks.patch:
+#   On the chunked format bun's bundler hoisted the session-state module into a
+#   shared chunk. bootstrap/sessionState.js still EXISTS on 2.1.260 but is now a
+#   pure re-export BARREL (`import {...} from '../vendor/lodash/memoizeCapped.js'`
+#   then `export { K as getSessionId, ... }`); it contains no function bodies at
+#   all. The real definition sits in vendor/lodash/memoizeCapped.js, a 142 KB
+#   chunk named after one of its ~160 constituents. So the monolithic hunk cannot
+#   be "path-fixed" — its target file has no body to patch.
+#
+# 🔴 MINIFIED NAMES ON CONTEXT LINES (K, g, n) — UNAVOIDABLE, AND MITIGATED.
+#   The anchor renamer rewrites only the EXPORT ALIASES in the barrel; the
+#   declarations in the shared chunk keep their bundler names. On 2.1.260 the
+#   function is `K`, `getSessionOverrides` is `g` and the root-session getter is
+#   `n`. On 2.1.259 the SAME function is `Q` — measured, not assumed — so this
+#   patch is version-locked by construction and a bump WILL require re-authoring.
+#   Mitigation: every minified name appears in CONTEXT, never introduced on an
+#   added line. The added lines name only `globalThis.__sessionHooks`. The hunk
+#   therefore FAILS TO APPLY on drift rather than applying and binding something
+#   else. The body line `return g()?.sessionId ?? n().id;` was verified UNIQUE
+#   across the whole 2.1.260 tree (1 occurrence), so it cannot match elsewhere.
+#
+# WHY globalThis RATHER THAN A BARE `__sessionHooks`:
+#   A chunked build is a real ESM graph; the custom module's top-level `var` is
+#   MODULE-scoped and unreachable from here. The bare-var form used by the
+#   monolithic patch would be permanently `undefined` and, because the site is
+#   try-guarded, would fail SILENTLY. modules/AAASessionHooks.js now publishes
+#   itself onto globalThis for exactly this reason (no-op on monolithic).
+#
+# ============================================================================
+# RE-AUTHORED 2026-09-07 — ANCHOR-DRIVEN, CROSS-VERSION VERIFIED
+# ============================================================================
+# STATUS: VERSION-INDEPENDENT (verified on 2.1.263 AND 2.1.260).
+#
+# WHAT CHANGED AND WHY THE OLD HUNK BROKE:
+#   The old hunk used 3 lines of leading context, which swept in the line
+#   `function y_r(e) {` — a bundler name that churns every build (it is `Cbr`
+#   on 2.1.263). The BODY it targets never changed; only a neighbour did. The
+#   patch was failing on a line it did not care about.
+#
+# THE ANCHOR:
+#   `return g()?.sessionId ?? n().id;` is BYTE-IDENTICAL and UNIQUE (1
+#   occurrence) in both 2.1.260 and 2.1.263 — verified by grep -c in each
+#   tree. Context is now exactly `function K() {` + that return line, so the
+#   churning neighbour is outside the hunk.
+#
+# MINIFIED NAMES STILL PRESENT (`K`, `g`, `n`) — WHY THIS IS SAFE:
+#   `g` and `n` DO appear on an added line. They are safe here only because
+#   the immediately following CONTEXT line is the identical expression
+#   `return g()?.sessionId ?? n().id;`: the patch cannot apply unless `g` and
+#   `n` still mean exactly what the added line assumes. If either is renamed,
+#   the context no longer matches and the hunk FAILS LOUDLY rather than
+#   binding a different function. `K` is version-stable across .260/.263 (both
+#   trees measured) but is not relied on for correctness — only for locating.
+#
+diff --git a/vendor/lodash/memoizeCapped.js b/vendor/lodash/memoizeCapped.js
+index 0bae2c1..580d56b 100644
+--- a/vendor/lodash/memoizeCapped.js
++++ b/vendor/lodash/memoizeCapped.js
+@@ -4010,2 +4010,7 @@ function Cbr(e) {
+ function K() {
++    try {
++        if (globalThis.__sessionHooks) {
++            globalThis.__sessionHooks.runAll(g()?.sessionId ?? n().id);
++        }
++    } catch (__e) {}
+     return g()?.sessionId ?? n().id;
