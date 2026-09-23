@@ -247,3 +247,75 @@ def repack(g, edits, out_path):
     if r.returncode:
         raise SystemExit(f"codesign failed: {r.stderr.strip()}")
     print(f"  wrote {out_path}  (payload {grown:+,} bytes, slack {g.sec.slack:,})")
+
+
+# ---------------------------------------------------------------------------
+# LENGTH-NEUTRAL IN-PLACE PATCHING — the approach that actually works.
+#
+# repack() above is unusable: 13% of the blob is not reachable through the
+# StringPointers, so rebuilding it drops 19.4 MB. But none of that matters if
+# no length ever changes — then every offset stays valid and the undecodable
+# records ride along untouched.
+#
+# The bytes to trade come from the licence banner every chunk carries: 1,997 of
+# 2,213 modules on 2.1.280 begin with one, ~600 usable bytes each. Inject code,
+# pad the remainder back to a comment, total length unchanged.
+#
+# PROVEN on versionref/2.1.280-bin: injected a stderr marker into the entry
+# module, re-signed ad-hoc, and the binary printed the marker, answered
+# --version, AND started the full TUI. That last part is the point — it keeps
+# Anthropic's runtime, so Bun.ant.CellSegmenter is present and the REPL lives,
+# which is exactly what a public-bun rebuild cannot do.
+#
+# Zeroing the source hash is load-bearing: the first attempt proved the source
+# really executes, because a deliberate syntax error in the injection surfaced
+# as a SyntaxError instead of being masked by stale bytecode.
+# ---------------------------------------------------------------------------
+
+def banner_slab(contents):
+    """Byte range of the leading comment banner, EXCLUDING the first line.
+
+    The first line carries pragmas (`// @bun @bytecode`) that the runtime reads,
+    so it is never touched. Everything after it up to the first real code line
+    is licence prose — expendable, and the only place we can take bytes from to
+    keep an edit length-neutral.
+    """
+    lines = contents.split(b"\n")
+    run = 0
+    for i, l in enumerate(lines):
+        if l.startswith(b"//") or not l.strip():
+            run = i + 1
+        else:
+            break
+    start = len(lines[0]) + 1
+    stop = sum(len(l) + 1 for l in lines[:run])
+    return start, stop
+
+def inject(contents, code):
+    """Splice `code` into the banner, padding so the length is unchanged."""
+    start, stop = banner_slab(contents)
+    room = stop - start
+    if len(code) + 4 > room:
+        raise SystemExit(f"injection {len(code)}B exceeds banner room {room}B")
+    pad = room - len(code) - 3            # "//" + filler + "\n"
+    out = contents[:start] + code + b"//" + b" " * pad + b"\n" + contents[stop:]
+    assert len(out) == len(contents), (len(out), len(contents))
+    return out
+
+def patch_in_place(g, edits, out_path):
+    raw = bytearray(g.raw)
+    for i, new in edits.items():
+        m = g.modules[i]
+        assert len(new) == len(m.contents)
+        off, ln = struct.unpack_from("<II", g.blob, g.modules_off + i * 52 + 8)
+        raw[g.blob_start + off : g.blob_start + off + ln] = new
+        if g.hashes_off is not None:
+            struct.pack_into("<I", raw, g.blob_start + g.hashes_off + i * 4, 0)
+    assert len(raw) == len(g.raw)
+    open(out_path, "wb").write(raw)
+    subprocess.run(["chmod", "+x", out_path], check=True)
+    r = subprocess.run(["codesign", "-f", "-s", "-", out_path], capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit("codesign: " + r.stderr.strip())
+    print(f"  wrote {out_path} ({len(edits)} module(s), length-neutral)")
+
