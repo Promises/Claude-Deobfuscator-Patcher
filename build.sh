@@ -463,7 +463,17 @@ fi
 # while the code still calls readFileSync("/$bunfs/root/<the original name>").
 # MEASURED with a two-file probe: the default rewrote a test asset's name and
 # "[name].[ext]" reproduced the upstream path byte-for-byte.
-BUN_CONFIG_FILE="" bun build "$SCRIPT_DIR/cli-runnable.js" --compile \
+# Which bun compiles the binary. Overridable because the required version is a
+# property of the CLAUDE CODE RELEASE, not of this repo: 2.1.280 calls
+# Bun.ant.CellSegmenter, which bun 1.3.11 does not provide, so a .280 binary
+# built with it compiles fine and then dies at REPL start with
+#   "This build of @anthropic-ai/bun-internal has no Bun.ant.CellSegmenter"
+# 2.1.263 does not reference it at all (measured: 0 occurrences in that binary,
+# 3 in the .280 one). Point BUN at a newer toolchain for newer releases instead
+# of upgrading the system one, so the version that builds the live fleet binary
+# stays exactly where it was.
+BUN="${BUN:-bun}"
+BUN_CONFIG_FILE="" "$BUN" build "$SCRIPT_DIR/cli-runnable.js" --compile \
     --asset-naming='[name].[ext]' \
     --external 'claudiverse-unresolved-chunk:*' --outfile "$OUT_PATH" 2>&1
 

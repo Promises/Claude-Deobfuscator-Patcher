@@ -126,7 +126,7 @@
 #   and any client that counted on those extra frames will see fewer.
 
 diff --git a/cli/structuredIO.js b/cli/structuredIO.js
-index dcbff65..7d02670 100644
+index 3b2d919..ce9df33 100644
 --- a/cli/structuredIO.js
 +++ b/cli/structuredIO.js
 @@ -752,12 +752,15 @@ class StructuredIO {
@@ -145,27 +145,27 @@ index dcbff65..7d02670 100644
                  session_id: '',
                  message: { role: 'user', content: n },
                  parent_tool_use_id: null,
-diff --git a/services/compact/precomputedCompact.js b/services/compact/precomputedCompact.js
-index be0cecf..ceca16c 100644
---- a/services/compact/precomputedCompact.js
-+++ b/services/compact/precomputedCompact.js
-@@ -6821,13 +6821,44 @@ function Q_(e, n) {
- async function* query(params) {
-     let consumedCommandUuids = [],
+diff --git a/tools/LSPTool/formatters.js b/tools/LSPTool/formatters.js
+index 19de6bb..c5b9a5e 100644
+--- a/tools/LSPTool/formatters.js
++++ b/tools/LSPTool/formatters.js
+@@ -6819,13 +6819,44 @@ function Q_(e, n) {
+ async function* query(e) {
+     let n = [],
          r = performance.now(),
          s = [],
          g;
      try {
--        g = yield* isObserverAgentsEnabled() ? queryWithObserverTap(params, consumedCommandUuids, s) : queryLoop(params, consumedCommandUuids, s);
-+        // ⛔ AUXILIARY QUERIES ARE NOT THE CONVERSATION. query() also serves
+-        g = yield* isObserverAgentsEnabled() ? queryWithObserverTap(e, n, s) : Em(e, n, s);
++        // AUXILIARY QUERIES ARE NOT THE CONVERSATION. query() also serves
 +        // Claude Code's internal side-requests — prompt suggestion, session
 +        // title, memory extraction, narration — which fork the full context,
 +        // run with skipTranscript, and never reach the local JSONL. Mirroring
 +        // them put phantom assistant messages in claudiverse: the suggestion
 +        // fork predicts what the OPERATOR would type, so the panel showed
-+        // Claude saying "status?".
-+        // Upstream's own split, spelled out so no minified name is injected.
-+        let __qs = params.querySource,
++        // Claude saying "status?". Upstream's own main/subagent/auxiliary
++        // split, spelled out so no minified name is injected.
++        let __qs = e.querySource,
 +            __mirror =
 +                typeof __qs !== 'string' ||
 +                __qs.startsWith('repl_main_thread') ||
@@ -173,8 +173,8 @@ index be0cecf..ceca16c 100644
 +                __qs.startsWith('agent:') ||
 +                __qs === 'hook_agent';
 +        let __it = isObserverAgentsEnabled()
-+                ? queryWithObserverTap(params, consumedCommandUuids, s)
-+                : queryLoop(params, consumedCommandUuids, s),
++                ? queryWithObserverTap(e, n, s)
++                : Em(e, n, s),
 +            __st;
 +        while (!(__st = await __it.next()).done) {
 +            if (__mirror) {
@@ -186,12 +186,12 @@ index be0cecf..ceca16c 100644
 +        }
 +        g = __st.value;
 +        try {
-+            if (__mirror && !params.toolUseContext.agentId)
++            if (__mirror && !e.toolUseContext.agentId)
 +                globalThis.__claudiverse.mirrorMessage({ type: 'turn_complete' });
 +        } catch (__e) {}
      } finally {
-         let uuid = params.toolUseContext.agentId;
-         if (uuid)
-             Vke(
-                 params.toolUseContext.session.precompute,
-                 uuid,
+         let h = e.toolUseContext.agentId;
+         if (h)
+             notifySubagentLifecycle(
+                 e.toolUseContext.session.precompute,
+                 h,

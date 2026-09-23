@@ -59,10 +59,10 @@
 # The catch binding was renamed `e` -> `__e` so it cannot shadow the outer
 # `e` now that the guard sits after that declaration.
 #
-diff --git a/utils/config.js b/utils/config.js
-index 2bf53d2..9f5abf0 100644
---- a/utils/config.js
-+++ b/utils/config.js
+diff --git a/utils/auth.js b/utils/auth.js
+index e5cfe16..8c1bc1d 100644
+--- a/utils/auth.js
++++ b/utils/auth.js
 @@ -16786,12 +16786,15 @@ var Pvo = ['allowedTools', 'hasTrustDialogAccepted'];
  function PRt() {
      Q().setTrustAccepted(!1);
@@ -74,7 +74,7 @@ index 2bf53d2..9f5abf0 100644
 +        if (process.env.CLAUDIVERSE_SKIP_TRUST) return !0;
 +    } catch (__e) {}
      if (e.trustAccepted) return !0;
-     let n = computeHasTrustDialogAccepted();
+     let n = SO();
      if (n) e.setTrustAccepted(!0);
      return n;
  }
