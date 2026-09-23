@@ -1143,21 +1143,5 @@
       "text": "BUILD_REF_NAME"
     },
     "description": "getVersionSuffix's module -- the standalone chunk whose whole body is the version-banner suffix getter (`function <min>(e = {...}.BUILD_REF_NAME) { return '' }`), the shared hook every version readout interpolates. Bundler-numbered and named by its MINIFIED export on chunked trees (_unmatched/0003_Px.js as Px on 2.1.260, _unmatched/0003_$x.js as $x on 2.1.263), so patch 006-account-banner could not name it in a git patch header. Pinned to a stable path so 006 becomes version-independent. Keyed on BUILD_REF_NAME, a property KEY on the build-metadata object (source-level, survives minification), NOT on any of the sibling values VERSION/BUILD_TIME/GIT_SHA that change every release. MEASURED tree-unique: exactly 1 manifest section of 1650 on 2.1.263 and 1 of 1643 on 2.1.260. Target path MEASURED unoccupied on both trees, by all 138 anchor rules, and by the signature DB."
-  },
-  {
-    "type": "pin",
-    "source": "services/compact/precomputedCompact.ts",
-    "find": {
-      "text": "queryWithObserverTap: missing"
-    },
-    "description": "The query module -- query()/queryLoop()/queryWithObserverTap() and withRetryGenerator(). THE FILE PATH IS A PATCH TARGET, and until now it was unpinned: it happened to land in services/compact/precomputedCompact.js through signature matching alone. On 2.1.278 the same module landed in tools/LSPTool/formatters.js instead, so 002 and 012 -- whose hunks name services/compact/precomputedCompact.js -- could not apply, and the failure read as drifted context rather than a moved file. Keyed on the queryWithObserverTap error-message STRING, an original-source literal that survives minification: MEASURED present in exactly one module in the raw minified cache, and tree-unique on BOTH 2.1.263 (where it resolves to precomputedCompact.js, i.e. the pin is a no-op there) and 2.1.278 (where it does the work)."
-  },
-  {
-    "type": "pin",
-    "source": "entrypoints/sdk/coreSchemas.ts",
-    "find": {
-      "text": "trustAccepted)return!0"
-    },
-    "description": "The trust-gate module that 011 patches. Pinned to the path 2.1.263 ALREADY puts it at, so the pin is a no-op there and forces the same layout on newer releases \u2014 on 2.1.280 the module otherwise lands in an unprettified _unmatched/ chunk where a context patch cannot apply at all. \ud83d\udd34 An earlier version of this pin targeted utils/config.js and broke 2.1.263 (11/11 -> 9/11, coreSchemas.js ceased to exist and 011 could not find it). Pins are GLOBAL: they relocate the module on every version, so a pin must be validated by building EVERY version still in use, not just the one being ported. Keyed on the minified gate test; `trustAccepted` alone matches 14 modules in the raw cache, this pattern exactly one."
   }
 ]
