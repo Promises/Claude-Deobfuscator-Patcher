@@ -81,7 +81,7 @@ def find_module(g, token, label):
 #
 # Every hook is guarded so an unconfigured binary is stock.
 
-def _trust(c):
+def _trust(c, g=None):
     # Capture the config local rather than assume `e` — it is minified and
     # renames per release. Only `trustAccepted` is original-source.
     mm = re.search(rb"if\((\w+)\.trustAccepted\)return!0;", c)
@@ -91,14 +91,14 @@ def _trust(c):
                        b"if(process.env.CLAUDIVERSE_SKIP_TRUST)return!0;")
 
 
-def _structio(c):
+def _structio(c, g=None):
     mm = re.search(rb"prependUserMessage\((\w+)\)\{", c)
     if not mm:
         raise SystemExit("002-io: prependUserMessage shape changed")
     return splice_paid(c, mm.end(), b"try{globalThis.__cvSetIO?.(this)}catch(e){}")
 
 
-def _querytap(c):
+def _querytap(c, g=None):
     # `g=yield* COND ? tap(e,n,s) : loop(e,n,s)` — every identifier here is
     # minified (MH/V_/Em/e/n/s/g on 2.1.280) so all of them are captured.
     # The tap wraps the iterator so the runtime sees each yielded value; it
@@ -115,7 +115,7 @@ def _querytap(c):
     return replace_paid(c, mm.group(0), new)
 
 
-def _bindhost(c):
+def _bindhost(c, g=None):
     """003 — hand the submit controller and its deps to the runtime.
 
     🔴 THE DEPS OBJECT MUST BE PASSED OUT, NOT FETCHED. Draft preservation needs
@@ -140,7 +140,41 @@ def _bindhost(c):
     return splice_paid(c, at, code)
 
 
-def _failover(c):
+def _auth_cache_clear(g):
+    """(name, chunk) of upstream's OAuth-credential cache invalidator.
+
+    🔴 THIS IS THE HALF THAT MAKES THE OTHER HALF MEAN ANYTHING. Raising the
+    stale flag only forces the gate to fire so `<cred>=await <getter>()` runs
+    again. The getter is MEMOISED — without invalidating that memo it hands back
+    the credential we just failed over from, which is precisely the 2.1.263 bug:
+    every "switched" failover re-sent the stale token.
+
+    ⛔ IT CANNOT BE FOUND BY NAME. On 2.1.263 it is `Hw` in coreSchemas.js — and
+    there is a DIFFERENT `Hw` in main.js, exported as `main`. The 2.1.263 patch
+    imports it under an alias for exactly that reason. I hit the same collision
+    from the other side: I grepped `function Hw(` in the merged deobfuscated file,
+    found the unrelated store accessor `return <store>.of(<host>)`, concluded the
+    call was a no-op, and dropped it. It is not a no-op.
+
+    So it is bound by an OBSERVABLE instead: upstream calls it immediately after
+    testing for the CLAUDE_CODE_OAUTH_TOKEN env var by name, and an env var name
+    survives minification. That site is unique across all modules.
+    """
+    PAT = rb'includes\("CLAUDE_CODE_OAUTH_TOKEN"\)\)(\w+)\(\)'
+    hits = [(m.index, mm.group(1)) for m in g.modules
+            for mm in re.finditer(PAT, m.contents)]
+    names = {n for _, n in hits}
+    if len(names) != 1:
+        raise SystemExit(f"012: auth-cache clear resolved to {sorted(names)}, need 1")
+    name = names.pop()
+    im = re.search(rb'import\{[^}]*\b' + re.escape(name) + rb'\b[^}]*\}from"([^"]+)"',
+                   g.modules[hits[0][0]].contents)
+    if not im:
+        raise SystemExit("012: auth-cache clear is not a shared-chunk import")
+    return name, im.group(1)
+
+
+def _failover(c, g=None):
     """012 — mid-session account failover on a 429.
 
     🔴 THREE INJECTIONS, AND THE FLAG IS NOT OPTIONAL. `continue` alone re-enters
@@ -176,11 +210,24 @@ def _failover(c):
     `if(h===null||`), so the second search returns 0 matches. Measured: that is
     exactly the "credential refetch matched 0x" failure this ordering fixes.
 
-    DELIBERATE DEVIATION FROM THE 2.1.263 PATCH: it also called Hw() here. Hw is
-    `return <store>.of(<host>)` — a get-or-create accessor whose return value the
-    patch discards. It has no side effect this port can demonstrate, so it is
-    omitted rather than carried forward as cargo.
+    The 2.1.263 patch also calls the auth-cache clear here, and so do we — see
+    _auth_cache_clear for why omitting it silently reproduces the original bug.
     """
+    if g is None:
+        raise SystemExit("012: needs the module graph to bind the auth-cache clear")
+
+    # ⛔ THE CLEAR CANNOT BE IMPORTED INTO THIS MODULE. It lives in a shared chunk
+    # this module does not import, and adding a name to an import statement's
+    # TEXT does not create a binding: bun links the standalone graph from
+    # precomputed module records, so the edited specifier list is ignored.
+    # MEASURED — splicing `,KC as __cvKC` into the import list built cleanly and
+    # then died at startup with "ReferenceError: __cvKC is not defined". Loud,
+    # which is the good failure, but the technique is invalid. Referencing an
+    # ALREADY-IMPORTED name in spliced text is fine; only new bindings fail.
+    # So _clearreg publishes it from modules that already import it, and this
+    # site reaches it through globalThis.
+    _clear_name, _chunk = _auth_cache_clear(g)   # validates it is still findable
+
     RF = rb"((\w+)=await \w+\(\),)\w+=\w+\(\)\?\w+\(\)\?\.accessToken:void 0"
 
     def locate_gate(buf):
@@ -234,7 +281,7 @@ def _failover(c):
             b"?.failoverAnthropicAccount?.(" + reset_delay + b"(" + err + b"),"
             + extra_usage + b"(" + err + b'.message??""));'
             b"if(__cvF&&(__cvF.switched||__cvF.retry)){globalThis.__cvStale=!0;"
-            b"continue}}}catch(__e){}")
+            b"globalThis.__cvClearAuthCache?.();continue}}}catch(__e){}")
     out = splice_paid(c, oe.end(), code)
 
     # --- 2 & 3. the predicate arm, then the clear ---
@@ -251,7 +298,7 @@ def _failover(c):
     return splice_paid(out, clear_at, b"globalThis.__cvStale=!1,")
 
 
-def _session(c):
+def _session(c, g=None):
     """001 — hand Claude's own session UUID to the runtime.
 
     getSessionId() is `function K(){return g()?.sessionId??n().id}` on 2.1.280.
@@ -270,10 +317,26 @@ def _session(c):
     ov, root = mm.group(1), mm.group(2)
     code = (b"if(!globalThis.__cvSid)try{globalThis.__cvSid=" + ov + b"()?.sessionId??"
             + root + b"().id,globalThis.__cvSession?.(globalThis.__cvSid)}catch(e){}")
-    return splice_paid(c, mm.end(), code)
+    out = splice_paid(c, mm.end(), code)
+
+    # 012's 401-renewal leg. Upstream re-asks a registered callback for a fresh
+    # credential on a 401; pointing it at the sidecar is what makes the pool the
+    # source of truth for renewals as well as failovers.
+    #
+    # A REFERENCE IS PUBLISHED, NOT A CALL. The registrar dereferences the root
+    # session, which does not exist at module-eval time — the 2.1.263 patch
+    # registers from inside app startup for that reason. Here the runtime calls
+    # it from the session-connect path instead, where the session provably
+    # exists, and the policy stays in editable JS.
+    reg = re.search(rb"function (\w+)\((\w+)\)\{\w+\(\)\.host\.credentialSlots"
+                    rb"\.replaceSdkOAuthTokenRefreshCallback\(\2\)\}", out)
+    if not reg:
+        raise SystemExit("001/012: SDK OAuth refresh registrar shape changed")
+    return splice_paid(out, reg.end(),
+                       b"globalThis.__cvSetRefreshCb=" + reg.group(1) + b";")
 
 
-def _compact(c):
+def _compact(c, g=None):
     """009 — emit {type:"compact"} so a watcher knows context was dropped.
 
     markPostCompaction is the single chokepoint every compaction path funnels
@@ -295,7 +358,7 @@ def _compact(c):
                        b'try{globalThis.__claudiverse?.mirrorMessage?.({type:"compact"})}catch(e){}')
 
 
-def _dialogstore(c):
+def _dialogstore(c, g=None):
     """007 — hand the dialog store to the runtime so questions can be answered.
 
     🔴 THE STORE MUST BE PASSED OUT, NOT LOOKED UP. It is built by a factory
@@ -317,7 +380,7 @@ def _dialogstore(c):
                        b"try{globalThis.__cvDialogStore?.(" + hits[0].group(3) + b")}catch(e){}")
 
 
-def _mainloop(c):
+def _mainloop(c, g=None):
     """008 + 010 — hand the main-loop controller and its host to the runtime.
 
     🔴 THIS REPLACES THE PATCH-ROUTE REACT EFFECT, DELIBERATELY. 2.1.280's REPL is
@@ -348,7 +411,7 @@ def _mainloop(c):
                        b"try{globalThis.__cvMainLoop?.(this," + hits[0].group(1) + b")}catch(e){}")
 
 
-def _commands(c):
+def _commands(c, g=None):
     """005 — let the runtime append slash commands to the builtin table.
 
     ⛔ DO NOT ANCHOR ON THE ARRAY LITERAL. The patch route appended inside the
@@ -367,7 +430,7 @@ def _commands(c):
     return replace_paid(c, mm.group(0), new)
 
 
-def _canary(c):
+def _canary(c, g=None):
     """006 (version canary) — make every version readout identifiably patched.
 
     getVersionSuffix() is the common suffix already interpolated by all seven
@@ -414,7 +477,18 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
 
     if bootstrap:
         ep = g.modules[g.entry_point_id]
-        boot = (b'try{let f=process.env.CLAUDIVERSE_RUNTIME;if(f)import(f).catch(e=>{'
+        # 012 needs upstream's auth-cache clear, which lives in a shared chunk.
+        # ⛔ NEITHER OBVIOUS ROUTE WORKS. It cannot be imported into the retry
+        # loop's module (editing an import list does not create a binding — see
+        # _failover), and it cannot be published from the modules that DO import
+        # it: measured, not one of the five is evaluated on the interactive REPL
+        # path, so the global was still absent 38s into a session. What does work
+        # is that a bun standalone chunk is importable by its virtual path at
+        # runtime — verified: 1216 exports, the clear among them. So the binary
+        # carries only the REFERENCE and the runtime resolves it.
+        clear_name, chunk = _auth_cache_clear(g)
+        boot = (b'globalThis.__cvClearRef=["' + chunk + b'","' + clear_name + b'"];'
+                b'try{let f=process.env.CLAUDIVERSE_RUNTIME;if(f)import(f).catch(e=>{'
                 b'try{process.stderr.write("cv-load-failed "+e.message+"\\n")}catch(_){}'
                 b'})}catch(e){}')
         start, stop = banner_slab(ep.contents)
@@ -430,7 +504,7 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
             continue
         m = find_module(g, h["token"], h["name"])
         base = edits.get(m.index, m.contents)
-        edits[m.index] = h["build"](base)
+        edits[m.index] = h["build"](base, g)
         print(f"  {h['name']:16} -> module[{m.index}]")
 
     raw = bytearray(g.raw)

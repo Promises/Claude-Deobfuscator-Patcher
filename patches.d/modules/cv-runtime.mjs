@@ -46,6 +46,36 @@ try {
     } catch (_) {}
 }
 
+// --- 012: upstream's auth-credential cache clear ----------------------------
+// The sidecar calls globalThis.__cvClearAuthCache after swapping the token, so
+// the process stops serving the memoised old one. The binary cannot hand us the
+// function — only a reference to it — for two measured reasons recorded in
+// cvinject: an import list cannot be extended by editing its text, and none of
+// the modules that already import it is evaluated on the interactive path.
+//
+// A bun standalone chunk IS importable by its virtual path, so we resolve it
+// here. Done EAGERLY at load, not lazily inside the clear: the sidecar calls
+// that synchronously and a dynamic import would resolve after the retry had
+// already re-read the credential.
+//
+// ⚠️ This evaluates that chunk, possibly earlier than upstream otherwise would.
+// It is a shared library chunk of definitions, and the alternative is a failover
+// that swaps a token nothing picks up.
+try {
+    const [chunkPath, exportName] = globalThis.__cvClearRef || [];
+    if (chunkPath) {
+        const chunk = await import(chunkPath);
+        if (typeof chunk[exportName] === "function") {
+            globalThis.__cvClearAuthCache = chunk[exportName];
+            log("authCacheClear resolved from", chunkPath);
+        } else {
+            log("authCacheClear MISSING export", exportName);
+        }
+    }
+} catch (e) {
+    log("authCacheClear resolve failed:", e.message);
+}
+
 // --- 001-session-hooks ------------------------------------------------------
 // Hand Claude's OWN session UUID to the sidecar. The server matches on it and
 // REUSES this session's row, so a reconnect no longer inserts a new one — that
@@ -64,6 +94,16 @@ function cvConnect(sessionId) {
         globalThis.__claudiverse?.connect?.(sessionId);
         log("connect", sessionId);
     } catch (e) {}
+    // 012's 401-renewal leg. Registered HERE rather than at runtime load: the
+    // registrar dereferences the root session, which does not exist that early.
+    // By the time getSessionId has fired, it does.
+    try {
+        if (globalThis.__cvSetRefreshCb && globalThis.__claudiverse?.requestOAuthTokenRefresh) {
+            globalThis.__cvSetRefreshCb(() =>
+                globalThis.__claudiverse.requestOAuthTokenRefresh());
+            log("oauth refresh callback registered");
+        }
+    } catch (e) {}
 }
 globalThis.__cvSession = cvConnect;
 if (globalThis.__cvSid) cvConnect(globalThis.__cvSid);
@@ -75,6 +115,7 @@ globalThis.__cvSetIO = function (io) {
     globalThis.__claudiverseStructuredIO = io;
     try {
         globalThis.__claudiverse?.setStructuredIO?.(io);
+        log("structIO set");
     } catch (e) {}
 };
 
