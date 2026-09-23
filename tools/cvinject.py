@@ -487,9 +487,21 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
         # runtime — verified: 1216 exports, the clear among them. So the binary
         # carries only the REFERENCE and the runtime resolves it.
         clear_name, chunk = _auth_cache_clear(g)
+        # 🔴 THE RUNTIME IS FOUND NEXT TO THE BINARY when $CLAUDIVERSE_RUNTIME is
+        # unset: <dir of process.execPath>/patches.d/modules/cv-runtime.mjs.
+        # Without this the binary is only usable by launch paths that set the
+        # variable — and none do: cv-spawn.sh builds an explicit env prefix with
+        # no pass-through, and hand-written tmux lines predate it. Swapping the
+        # binary in would then give every restarted seat a healthy-looking TUI
+        # and NO claudiverse, silently. Measured: process.execPath inside the
+        # standalone binary is the binary's own path.
+        # An explicit $CLAUDIVERSE_RUNTIME still wins. A binary copied somewhere
+        # with no runtime beside it fails the import SILENTLY and runs as stock —
+        # the load error is only printed when the variable was set on purpose.
         boot = (b'globalThis.__cvClearRef=["' + chunk + b'","' + clear_name + b'"];'
-                b'try{let f=process.env.CLAUDIVERSE_RUNTIME;if(f)import(f).catch(e=>{'
-                b'try{process.stderr.write("cv-load-failed "+e.message+"\\n")}catch(_){}'
+                b'try{let f=process.env.CLAUDIVERSE_RUNTIME,x=!f,p=process.execPath;'
+                b'if(x)f=p.slice(0,p.lastIndexOf("/"))+"/patches.d/modules/cv-runtime.mjs";'
+                b'import(f).catch(e=>{if(!x)try{process.stderr.write("cv-load-failed "+e.message+"\\n")}catch(_){}'
                 b'})}catch(e){}')
         start, stop = banner_slab(ep.contents)
         pad = (stop - start) - len(boot) - 3
