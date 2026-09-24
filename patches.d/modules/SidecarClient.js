@@ -193,6 +193,20 @@ var __claudiverse = (function() {
     if (serverTitle) return serverTitle;
 
     var reg = registryName();
+    if (reg && reg.name && reg.source !== "derived") return reg.name;
+
+    // 🔴 A NAME THE OPERATOR GAVE THE SESSION OUTRANKS A DERIVED ONE. On a
+    // --resume, 2.1.280 writes a freshly DERIVED name into the per-process
+    // registry ("ps2-gc-re-f1", nameSource "derived") while the TUI shows the
+    // conversation's own custom title, which the resume carried over. MEASURED
+    // 2026-09-24: the operator's terminal read "claudiverse-account-failover"
+    // and the seat registered as "ps2-gc-re-f1", so every watcher subscribed by
+    // name silently lost it. The custom title is a {"type":"custom-title"}
+    // record in the transcript, re-appended as the session runs.
+    var custom = readTranscriptRecord("custom-title", "customTitle",
+                                      claudeSessionId || (reg && reg.sessionId));
+    if (custom) return custom;
+
     if (reg && reg.name) return reg.name;
 
     // 🔴 THE SESSION ID IS NOT RELIABLY OURS YET. mirrorMessage() calls
@@ -240,23 +254,27 @@ var __claudiverse = (function() {
   var DISPLAY_TAIL_BYTES = 262144;
   var displayTitleCache = null;
 
-  function transcriptPath() {
+  function transcriptPath(sessionId) {
     try {
-      if (!claudeSessionId) return null;
+      var id = sessionId || claudeSessionId;
+      if (!id) return null;
       var home = process.env.HOME || "";
       if (!home) return null;
       // Project dirs are the cwd with every "/" replaced by "-".
       var slug = String(process.cwd()).replace(/\//g, "-");
-      return home + "/.claude/projects/" + slug + "/" + claudeSessionId + ".jsonl";
+      return home + "/.claude/projects/" + slug + "/" + id + ".jsonl";
     } catch (e) {
       return null;
     }
   }
 
-  function readDisplayTitle() {
+  // Last value of `field` in the last record of `type` within the transcript's
+  // tail, or null. Records of both kinds used here are appended, and re-appended
+  // as the session goes on, so the newest one is always near the end.
+  function readTranscriptRecord(type, field, sessionId) {
     try {
       if (!fs) return null;
-      var path = transcriptPath();
+      var path = transcriptPath(sessionId);
       if (!path) return null;
 
       var st = fs.statSync(path);
@@ -274,16 +292,20 @@ var __claudiverse = (function() {
 
       // Last occurrence wins: the title is re-generated as the session evolves.
       var text = buf.toString("utf8");
-      var idx = text.lastIndexOf('"type":"ai-title"');
+      var idx = text.lastIndexOf('"type":"' + type + '"');
       if (idx === -1) return null;
-      var m = /"aiTitle":"((?:[^"\\]|\\.)*)"/.exec(text.slice(idx));
+      var m = new RegExp('"' + field + '":"((?:[^"\\\\]|\\\\.)*)"').exec(text.slice(idx));
       if (!m) return null;
       return JSON.parse('"' + m[1] + '"');
     } catch (e) {
-      // No transcript yet, mid-write, or a shape change upstream. A display
-      // name is a nicety; never let its absence disturb anything.
+      // No transcript yet, mid-write, or a shape change upstream. Never let
+      // the absence of a name disturb anything.
       return null;
     }
+  }
+
+  function readDisplayTitle() {
+    return readTranscriptRecord("ai-title", "aiTitle");
   }
 
   // --- who is asking -----------------------------------------------------
