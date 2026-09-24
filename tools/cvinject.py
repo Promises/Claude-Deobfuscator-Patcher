@@ -84,7 +84,7 @@ def find_module(g, token, label):
 def _trust(c, g=None):
     # Capture the config local rather than assume `e` — it is minified and
     # renames per release. Only `trustAccepted` is original-source.
-    mm = re.search(rb"if\((\w+)\.trustAccepted\)return!0;", c)
+    mm = re.search(rb"if\(([\w$]+)\.trustAccepted\)return!0;", c)
     if not mm:
         raise SystemExit("011: trust gate shape changed")
     return splice_paid(c, mm.start(),
@@ -92,7 +92,7 @@ def _trust(c, g=None):
 
 
 def _structio(c, g=None):
-    mm = re.search(rb"prependUserMessage\((\w+)\)\{", c)
+    mm = re.search(rb"prependUserMessage\(([\w$]+)\)\{", c)
     if not mm:
         raise SystemExit("002-io: prependUserMessage shape changed")
     return splice_paid(c, mm.end(), b"try{globalThis.__cvSetIO?.(this)}catch(e){}")
@@ -104,7 +104,7 @@ def _querytap(c, g=None):
     # The tap wraps the iterator so the runtime sees each yielded value; it
     # cannot be a bare call, hence replace rather than insert.
     mm = re.search(
-        rb"(\w+)=yield\*\s*(\w+\(\))\?(\w+)\((\w+),(\w+),(\w+)\):(\w+)\(\4,\5,\6\)", c)
+        rb"([\w$]+)=yield\*\s*([\w$]+\(\))\?([\w$]+)\(([\w$]+),([\w$]+),([\w$]+)\):([\w$]+)\(\4,\5,\6\)", c)
     if not mm:
         raise SystemExit("002-query: delegation shape changed")
     res, cond, tap, prm, uu, acc, loop = mm.groups()
@@ -130,7 +130,7 @@ def _bindhost(c, g=None):
     if k < 0:
         raise SystemExit("003: controller anchor absent")
     head = c.rfind(b"class ", 0, k)
-    mm = re.search(rb"constructor\((\w+)\)\{this\.#(\w+)=\1\}bindHost\((\w+)\)\{this\.#(\w+)=\3\}",
+    mm = re.search(rb"constructor\(([\w$]+)\)\{this\.#([\w$]+)=\1\}bindHost\(([\w$]+)\)\{this\.#([\w$]+)=\3\}",
                    c[head:k])
     if not mm:
         raise SystemExit("003: constructor/bindHost shape changed")
@@ -160,7 +160,7 @@ def _auth_cache_clear(g):
     testing for the CLAUDE_CODE_OAUTH_TOKEN env var by name, and an env var name
     survives minification. That site is unique across all modules.
     """
-    PAT = rb'includes\("CLAUDE_CODE_OAUTH_TOKEN"\)\)(\w+)\(\)'
+    PAT = rb'includes\("CLAUDE_CODE_OAUTH_TOKEN"\)\)([\w$]+)\(\)'
     hits = [(m.index, mm.group(1)) for m in g.modules
             for mm in re.finditer(PAT, m.contents)]
     names = {n for _, n in hits}
@@ -228,7 +228,7 @@ def _failover(c, g=None):
     # site reaches it through globalThis.
     _clear_name, _chunk = _auth_cache_clear(g)   # validates it is still findable
 
-    RF = rb"((\w+)=await \w+\(\),)\w+=\w+\(\)\?\w+\(\)\?\.accessToken:void 0"
+    RF = rb"(([\w$]+)=await [\w$]+\(\),)[\w$]+=[\w$]+\(\)\?[\w$]+\(\)\?\.accessToken:void 0"
 
     def locate_gate(buf):
         """(gate_offset, refetch_match) — the credential gate and its refetch."""
@@ -247,13 +247,13 @@ def _failover(c, g=None):
 
     # Both argument helpers are captured by BODY, never by name: the 2.1.263
     # names (Ako, Mot) are deobfuscator renames and do not exist in the binary.
-    mm = re.search(rb'function (\w+)\(\w+\)\{let \w+=\w+\.headers\?\.get\?\.'
+    mm = re.search(rb'function ([\w$]+)\([\w$]+\)\{let [\w$]+=[\w$]+\.headers\?\.get\?\.'
                    rb'\("anthropic-ratelimit-unified-reset"\);', c)
     if not mm:
         raise SystemExit("012: reset-delay helper shape changed")
     reset_delay = mm.group(1)
 
-    mm = re.search(rb'function (\w+)\(\w+\)\{return \w+\.includes\('
+    mm = re.search(rb'function ([\w$]+)\([\w$]+\)\{return [\w$]+\.includes\('
                    rb'"Extra usage is required for long context"\)', c)
     if not mm:
         raise SystemExit("012: extra-usage helper shape changed")
@@ -262,13 +262,13 @@ def _failover(c, g=None):
     # The API error class, read out of the gate's own 401 test. It is NOT the
     # catch binding: the gate tests a persisted last-error variable instead.
     k, _rf = locate_gate(c)
-    ec = re.search(rb"instanceof (\w+)&&\w+\.status===401", c[k:k + 500])
+    ec = re.search(rb"instanceof ([\w$]+)&&[\w$]+\.status===401", c[k:k + 500])
     if not ec:
         raise SystemExit("012: cannot bind the API error class from the gate")
     errclass = ec.group(1)
 
     # --- 1. the 429 -> failover decision, right after upstream's onError ---
-    oe = re.search(rb"let \w+=await (\w+)\.onError\?\.\((\w+)\);", c)
+    oe = re.search(rb"let [\w$]+=await ([\w$]+)\.onError\?\.\(([\w$]+)\);", c)
     if not oe:
         raise SystemExit("012: onError site shape changed")
     err = oe.group(2)
@@ -311,7 +311,7 @@ def _session(c, g=None):
     import() of the runtime, so getSessionId can fire before the runtime exists;
     the runtime reads __cvSid on load to cover that ordering.
     """
-    mm = re.search(rb"function \w+\(\)\{(?=return (\w+)\(\)\?\.sessionId\?\?(\w+)\(\)\.id\})", c)
+    mm = re.search(rb"function [\w$]+\(\)\{(?=return ([\w$]+)\(\)\?\.sessionId\?\?([\w$]+)\(\)\.id\})", c)
     if not mm:
         raise SystemExit("001: getSessionId shape changed")
     ov, root = mm.group(1), mm.group(2)
@@ -328,7 +328,7 @@ def _session(c, g=None):
     # registers from inside app startup for that reason. Here the runtime calls
     # it from the session-connect path instead, where the session provably
     # exists, and the policy stays in editable JS.
-    reg = re.search(rb"function (\w+)\((\w+)\)\{\w+\(\)\.host\.credentialSlots"
+    reg = re.search(rb"function ([\w$]+)\(([\w$]+)\)\{[\w$]+\(\)\.host\.credentialSlots"
                     rb"\.replaceSdkOAuthTokenRefreshCallback\(\2\)\}", out)
     if not reg:
         raise SystemExit("001/012: SDK OAuth refresh registrar shape changed")
@@ -349,7 +349,7 @@ def _compact(c, g=None):
     also emits. The watcher reads that as "the worker compacted" and holds a
     re-brief, which reject-busy gates anyway.
     """
-    pat = (rb"function \w+\([^)]*\)\{(?=let (\w+)=\w+\(\)\.requestJournal;"
+    pat = (rb"function [\w$]+\([^)]*\)\{(?=let ([\w$]+)=[\w$]+\(\)\.requestJournal;"
            rb"if\(\1\.replacePendingPostCompaction\(!0\))")
     hits = list(re.finditer(pat, c))
     if len(hits) != 1:
@@ -371,8 +371,8 @@ def _dialogstore(c, g=None):
     self-references the store) immediately before `return <store>`, which pins the
     insertion to the fully-built object.
     """
-    pat = (rb"dismissKind\((\w+)\)\{for\(let (\w+) of \w+\.getState\(\)\.open\)"
-           rb"if\(\2\.kind===\1\)(\w+)\.dismiss\(\2\.id\)\}\};(?=return \3\})")
+    pat = (rb"dismissKind\(([\w$]+)\)\{for\(let ([\w$]+) of [\w$]+\.getState\(\)\.open\)"
+           rb"if\(\2\.kind===\1\)([\w$]+)\.dismiss\(\2\.id\)\}\};(?=return \3\})")
     hits = list(re.finditer(pat, c))
     if len(hits) != 1:
         raise SystemExit(f"007: dialog store matched {len(hits)}x, need 1")
@@ -402,7 +402,7 @@ def _mainloop(c, g=None):
     Scoped by the _mount/_host shape in the lookahead: `bindHost(x){this.#y=x}` is
     a shape other classes in this module share (003 hooks one of them).
     """
-    pat = (rb"bindHost\((\w+)\)\{(?=let (\w+)=this\._host===null;"
+    pat = (rb"bindHost\(([\w$]+)\)\{(?=let ([\w$]+)=this\._host===null;"
            rb"if\(this\._host=\1,\2\)this\._mount\(\1\))")
     hits = list(re.finditer(pat, c))
     if len(hits) != 1:
@@ -421,7 +421,7 @@ def _commands(c, g=None):
     binds by the NAME builtinCommandTable, which the tool list does not share, and
     it is the same one-shot: the `??=` means the builder runs exactly once.
     """
-    mm = re.search(rb"(\w+)\.builtinCommandTable\?\?=(\w+)\(\)", c)
+    mm = re.search(rb"([\w$]+)\.builtinCommandTable\?\?=([\w$]+)\(\)", c)
     if not mm:
         raise SystemExit("005: builtin command table accessor shape changed")
     holder, builder = mm.group(1), mm.group(2)
