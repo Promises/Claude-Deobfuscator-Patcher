@@ -208,8 +208,16 @@ var __claudiverse = (function() {
     // Last resort, and a poor one: this COLLIDES for two seats started in the
     // same second, and the server resolves seats by title. Anything above is
     // better; watchTitle() replaces it as soon as a real name appears.
-    return "Claude " + new Date().toLocaleTimeString();
+    //
+    // 🔴 COMPUTED ONCE, NEVER AGAIN. Recomputing it made the title "change" on
+    // every 30s check, and checkTitle() re-POSTs on a change. With no
+    // claudeSessionId the server cannot match the POST to the existing row, so
+    // each push INSERTED A NEW SESSION. MEASURED 2026-09-23/24: three id-less
+    // processes produced ~6,400 rows titled "Claude <time>" overnight.
+    if (!fallbackTitle) fallbackTitle = "Claude " + new Date().toLocaleTimeString();
+    return fallbackTitle;
   }
+  var fallbackTitle = null;
 
   // --- the name a HUMAN recognises ------------------------------------------
   //

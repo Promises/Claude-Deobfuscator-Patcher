@@ -38,8 +38,25 @@ const log = (...a) => {
 // try/catch, so the failure is SILENT — `http` stays undefined and autoConnect
 // returns at `if (!TOKEN || !http ...)` having logged nothing. Measured as
 // imported: reaches "WS open" and joins a real session.
+// ⛔ NOT EVERY PROCESS FROM THIS BINARY IS A SEAT. From 2.1.280 an interactive
+// seat spawns Claude Code's background daemon (`<bin> daemon run`), which keeps a
+// pty host (`--bg-pty-host`) and a warm spare (`--bg-spare`) alive. They inherit
+// the seat's environment — and with the self-locating default they would find
+// this file anyway — so each one loaded the sidecar and registered a "session".
+// None has a Claude session id, so every title push INSERTED a new row: three
+// processes, one push every 30s, ~6,400 junk rows overnight (2026-09-23 20:31Z
+// onward, all type=sidecar mode=json, titled "Claude <time>"). Skip the sidecar
+// entirely in these processes; every hook then no-ops, as it would on stock.
+// Known cost: a spare that gets CLAIMED by `claude --bg` is not mirrored. The
+// fleet does not use --bg.
+const cvBackground =
+    process.argv.includes("--bg-spare") ||
+    process.argv.includes("--bg-pty-host") ||
+    (process.argv.includes("daemon") && process.argv.includes("run"));
+
 try {
-    await import("./SidecarClient.js");
+    if (cvBackground) log("background process, sidecar skipped:", process.argv.slice(1, 4).join(" "));
+    else await import("./SidecarClient.js");
 } catch (e) {
     try {
         process.stderr.write("cv: sidecar failed to load: " + e.message + "\n");
