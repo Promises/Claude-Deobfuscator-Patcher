@@ -203,8 +203,25 @@ var __claudiverse = (function() {
     // and the seat registered as "ps2-gc-re-f1", so every watcher subscribed by
     // name silently lost it. The custom title is a {"type":"custom-title"}
     // record in the transcript, re-appended as the session runs.
-    var custom = readTranscriptRecord("custom-title", "customTitle",
-                                      claudeSessionId || (reg && reg.sessionId));
+    //
+    // 🔴 LOOK IT UP BY THE REGISTRY'S SESSION ID FIRST. The 001 hook latches
+    // the FIRST getSessionId(), and on --resume 2.1.280+ starts with a
+    // placeholder id and switches to the resumed conversation moments later.
+    // MEASURED 2026-09-25: claudeSessionId was the placeholder 0b39a4fb, whose
+    // transcript does not exist, while the registry held the live 88c1861b —
+    // so the lookup found nothing and the seat registered as "ps2-gc-re-51".
+    // The registry follows the resume; claudeSessionId is the fallback.
+    //
+    // ⛔ ONLY THE LOOKUP USES IT — claudeSessionId itself is NOT replaced.
+    // The server revives the NEWEST row carrying a given claude_session_id
+    // (Sessions.find_reusable_session). This seat's row was created under the
+    // placeholder, and the resumed id already owns older, STOPPED rows. Report
+    // the resumed id and the next title push revives one of those old rows as
+    // a second "running" seat with no live connection, while this seat stays
+    // on its own row. Keeping the placeholder keeps every push on this row.
+    var custom = (reg && reg.sessionId &&
+                  readTranscriptRecord("custom-title", "customTitle", reg.sessionId)) ||
+                 readTranscriptRecord("custom-title", "customTitle", claudeSessionId);
     if (custom) return custom;
 
     if (reg && reg.name) return reg.name;
