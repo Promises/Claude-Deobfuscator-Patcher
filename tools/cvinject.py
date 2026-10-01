@@ -99,20 +99,26 @@ def _structio(c, g=None):
 
 
 def _querytap(c, g=None):
-    # `g=yield* COND ? tap(e,n,s) : loop(e,n,s)` — every identifier here is
-    # minified (MH/V_/Em/e/n/s/g on 2.1.280) so all of them are captured.
+    # `g=yield* COND ? tap(e,…) : loop(e,…)` — every identifier here is
+    # minified, so all of them are captured. Two shapes are live:
+    #   ≤2.1.282  d=yield*cVt()?mm(e,n,s):Gl(e,n,s)            (statement start)
+    #   2.1.286   u=yield*sYt()?lc(e,o,r,s):s.through(bl(e,o,r,s))
+    #             — one more argument, the loop wrapped by a `using` resource,
+    #             and the assignment sits INSIDE a comma expression
+    #             (`try{await vqe(…),u=yield*…}`).
     # The tap wraps the iterator so the runtime sees each yielded value; it
-    # cannot be a bare call, hence replace rather than insert.
-    mm = re.search(
-        rb"([\w$]+)=yield\*\s*([\w$]+\(\))\?([\w$]+)\(([\w$]+),([\w$]+),([\w$]+)\):([\w$]+)\(\4,\5,\6\)", c)
-    if not mm:
-        raise SystemExit("002-query: delegation shape changed")
-    res, cond, tap, prm, uu, acc, loop = mm.groups()
-    new = (b"let __cvI=" + cond + b"?" + tap + b"(" + prm + b"," + uu + b"," + acc
-           + b"):" + loop + b"(" + prm + b"," + uu + b"," + acc + b");"
-           + res + b"=yield*(globalThis.__cvTap?globalThis.__cvTap(__cvI," + prm
-           + b"):__cvI)")
-    return replace_paid(c, mm.group(0), new)
+    # cannot be a bare call, hence replace rather than insert. The replacement
+    # must be a pure EXPRESSION: a `let …;` prefix is a syntax error inside a
+    # comma expression, so the iterator is bound by an arrow parameter instead.
+    pat = (rb"([\w$]+)=yield\*\s*([\w$]+\(\))\?([\w$]+)\(([\w$]+)((?:,[\w$]+)*)\):"
+           rb"([\w$]+\(\4\5\)|[\w$]+\.[\w$]+\([\w$]+\(\4\5\)\))")
+    hits = list(re.finditer(pat, c))
+    if len(hits) != 1:
+        raise SystemExit(f"002-query: delegation shape changed ({len(hits)} matches, need 1)")
+    res, cond, tap, prm, rest, other = hits[0].groups()
+    new = (res + b"=yield*((__cvI)=>globalThis.__cvTap?globalThis.__cvTap(__cvI," + prm
+           + b"):__cvI)(" + cond + b"?" + tap + b"(" + prm + rest + b"):" + other + b")")
+    return replace_paid(c, hits[0].group(0), new)
 
 
 def _bindhost(c, g=None):
@@ -247,7 +253,10 @@ def _failover(c, g=None):
 
     # Both argument helpers are captured by BODY, never by name: the 2.1.263
     # names (Ako, Mot) are deobfuscator renames and do not exist in the binary.
-    mm = re.search(rb'function ([\w$]+)\([\w$]+\)\{let [\w$]+=[\w$]+\.headers\?\.get\?\.'
+    # 2.1.286 added a clock parameter — `hMo(e,n){…Math.round(s*1000-n.now())…}`
+    # where ≤2.1.282 had `NSo(e){…Date.now()…}` — so the call below always passes
+    # `Date` as the clock; an older one-parameter helper ignores it.
+    mm = re.search(rb'function ([\w$]+)\([\w$]+(?:,[\w$]+)?\)\{let [\w$]+=[\w$]+\.headers\?\.get\?\.'
                    rb'\("anthropic-ratelimit-unified-reset"\);', c)
     if not mm:
         raise SystemExit("012: reset-delay helper shape changed")
@@ -278,7 +287,7 @@ def _failover(c, g=None):
     # so a pool that keeps handing back usable-looking credentials cannot spin.
     code = (b"try{if(" + err + b" instanceof " + errclass + b"&&" + err
             + b".status===429){let __cvF=await globalThis.__claudiverse"
-            b"?.failoverAnthropicAccount?.(" + reset_delay + b"(" + err + b"),"
+            b"?.failoverAnthropicAccount?.(" + reset_delay + b"(" + err + b",Date),"
             + extra_usage + b"(" + err + b'.message??""));'
             b"if(__cvF&&(__cvF.switched||__cvF.retry)){globalThis.__cvStale=!0;"
             b"globalThis.__cvClearAuthCache?.();continue}}}catch(__e){}")
