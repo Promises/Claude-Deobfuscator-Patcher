@@ -29,9 +29,12 @@ BODY=$(mktemp)
 trap 'rm -f "$BODY"' EXIT
 
 while :; do
-    CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -m 3660 \
+    # 55 s, not longer: for a seat with no sidecar this poll is also its
+    # heartbeat — the server reads the seat as connected while one is open, and
+    # stops its session when none has been for about three minutes.
+    CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -m 70 \
         -H "Authorization: Bearer $CLAUDIVERSE_TOKEN" \
-        "$URL/api/seats/$SEAT/inbox?wait=3600&event=$EVENT" 2>/dev/null) || CODE=000
+        "$URL/api/seats/$SEAT/inbox?wait=55&event=$EVENT" 2>/dev/null) || CODE=000
     [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) poll event=$EVENT -> $CODE" >> "$CV_INBOX_LOG"
     case "$CODE" in
         200) cat "$BODY" >&2; exit 2 ;;       # a prompt: wake the seat with it
