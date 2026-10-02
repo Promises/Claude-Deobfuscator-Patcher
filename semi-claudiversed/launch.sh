@@ -58,6 +58,11 @@ if [ -z "${NO_PROXY_ROUTE:-}" ]; then
         "ANTHROPIC_BASE_URL=${CLAUDIVERSE_URL%/}/proxy/seat/$TITLE"
         "ANTHROPIC_CUSTOM_HEADERS=$HDRS"
         "CLAUDE_CODE_GATEWAY_HINT_HEADERS=1"
+        # A custom base URL turns off ToolSearch (every tool definition is sent
+        # on every request: 110 vs 19 measured on 2.1.286) and the 1M picker.
+        # This internal flag restores both. It does NOT restore Remote Control
+        # (the binary says so). Underscore-prefixed: may vanish in any release.
+        "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1"
         "CLAUDIVERSE_PROXY_PROVIDES=$PROVIDES"
     )
 elif [ -n "$PROVIDES" ]; then
