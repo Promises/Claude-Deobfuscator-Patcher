@@ -6,9 +6,17 @@
       "hooks": [
         "001-session"
       ],
+      "state": "replaced",
+      "replacement": "001-session-ref: cvinject publishes a reference to upstream's exported getSessionId (__cvSessionRef), splicing nothing; overlay/session-id-by-reference.patch calls it when 003 binds the REPL and connects the sidecar with it",
+      "note": "001's other job, the 012 OAuth refresh registrar, is dead on a pooled seat (the proxy renews credentials), so nothing is lost there. A non-pooled semi seat (NO_PROXY_ROUTE) relies on Claude Code's own refresh."
+    },
+    "001-session-ref": {
+      "hooks": [
+        "001-session-ref"
+      ],
       "state": "patch",
-      "replacement": "proxy (x-claude-code-session-id on every request) or SessionStart hook",
-      "note": "Also publishes upstream's OAuth refresh registrar, which 012's 401-renewal leg needs."
+      "replacement": "none: a reference, not a splice \u2014 what 001-session is replaced BY",
+      "note": "Needs 003 (its bind is the moment the id is read). Retire together with 003."
     },
     "002-mirroring": {
       "hooks": [

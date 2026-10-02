@@ -1,0 +1,53 @@
+--- a/cv-runtime.mjs	2026-10-02 22:46:14
++++ b/cv-runtime.mjs	2026-10-02 22:46:23
+@@ -150,7 +150,42 @@
+ }
+ globalThis.__cvSession = cvConnect;
+ if (globalThis.__cvSid) cvConnect(globalThis.__cvSid);
++
++// semi-claudiversed: 001 without a splice. cvinject publishes a reference to
++// upstream's exported getSessionId (__cvSessionRef); it is called once the REPL
++// controller binds (003, below), when the root session provably exists. 001
++// latched only the first id as well, so this is the same handoff.
++let getClaudeSessionId;
++try {
++    const [chunkPath, exportName] = globalThis.__cvSessionRef || [];
++    if (chunkPath) {
++        const chunk = await import(chunkPath);
++        if (typeof chunk[exportName] === "function") {
++            getClaudeSessionId = chunk[exportName];
++            log("getSessionId resolved from", chunkPath);
++        } else {
++            log("getSessionId MISSING export", exportName);
++        }
++    }
++} catch (e) {
++    log("getSessionId resolve failed:", e.message);
++}
+ 
++function connectFromSessionGetter() {
++    if (cvConnected || typeof getClaudeSessionId !== "function") return;
++    try {
++        const sid = getClaudeSessionId();
++        if (typeof sid === "string" && sid) {
++            globalThis.__cvSid = sid;
++            cvConnect(sid);
++        } else {
++            log("getSessionId returned no id yet");
++        }
++    } catch (e) {
++        log("getSessionId failed:", e.message);
++    }
++}
++
+ // --- 002-structio ----------------------------------------------------------
+ // The sidecar needs a handle on StructuredIO to inject prompts in stream-json
+ // mode. The hook hands it over the first time a prompt is prepended.
+@@ -230,6 +265,7 @@
+ // `deps` is handed across by the hook because it is a PRIVATE class field —
+ // the runtime cannot reach it from outside the class body.
+ globalThis.__cvBindHost = function (controller, deps) {
++    connectFromSessionGetter();
+     // The editor-helpers stub upstream passes to submit(). Supplying our own
+     // here retires a whole hunk the patch route needed: it used to alias the
+     // in-binary stub at its definition site because that identifier is renamed

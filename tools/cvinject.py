@@ -219,6 +219,39 @@ def _mode_setter(g):
     return mods[0].name.encode(), names[local]
 
 
+def _exported_as(contents, local):
+    """The name `local` is exported under from a chunk, or None."""
+    ex = re.search(rb'export\{([^}]*)\}', contents)
+    for part in (ex.group(1).split(b",") if ex else []):
+        bits = part.strip().split(b" as ")
+        if bits[0] == local:
+            return bits[-1]
+    return None
+
+
+def _session_getter(g):
+    """001-ref — (chunk path, export name) of upstream's getSessionId().
+
+    Replaces 001's splice where the only job left is handing the session id to
+    the sidecar (a pooled seat registers no refresh callback, so 001's 012 leg
+    is dead there). The runtime calls it once the REPL controller binds (003),
+    when the root session provably exists — 001 itself latched only the first
+    id too, so the behaviour is the same.
+
+    Bound by the getter's RETURN EXPRESSION, the same anchor 001 splices at;
+    exactly one module may carry it, and it must be exported.
+    """
+    PAT = rb"function ([\w$]+)\(\)\{return [\w$]+\(\)\?\.sessionId\?\?[\w$]+\(\)\.id\}"
+    hits = [(m, mm.group(1)) for m in g.modules for mm in re.finditer(PAT, m.contents)]
+    if len(hits) != 1:
+        raise SystemExit(f"001-ref: getSessionId resolved {len(hits)} times, need 1")
+    m, local = hits[0]
+    name = _exported_as(m.contents, local)
+    if name is None:
+        raise SystemExit(f"001-ref: getSessionId {local!r} is not exported")
+    return m.name.encode(), name
+
+
 def _failover(c, g=None):
     """012 — mid-session account failover on a 429.
 
@@ -558,6 +591,10 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
             mode_chunk, mode_name = _mode_setter(g)
             mode_ref = b'globalThis.__cvModeRef=["' + mode_chunk + b'","' + mode_name + b'"];'
             print(f"  013-permission-mode -> {mode_chunk.decode()} [{mode_name.decode()}]")
+        if names and "001-session-ref" in names:
+            sid_chunk, sid_name = _session_getter(g)
+            mode_ref += b'globalThis.__cvSessionRef=["' + sid_chunk + b'","' + sid_name + b'"];'
+            print(f"  001-session-ref -> {sid_chunk.decode()} [{sid_name.decode()}]")
         boot = (b'globalThis.__cvClearRef=["' + chunk + b'","' + clear_name + b'"];' + mode_ref +
                 b'try{let f=process.env.CLAUDIVERSE_RUNTIME,x=!f,p=process.execPath;'
                 b'if(x)f=p.slice(0,p.lastIndexOf("/"))+"/patches.d/modules/cv-runtime.mjs";'
