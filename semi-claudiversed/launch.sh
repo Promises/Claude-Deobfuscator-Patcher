@@ -116,11 +116,16 @@ fi
 #   003 -> a remote MCP server loaded as a CHANNEL (cv_send, permission prompts)
 #   007 -> an HTTP PreToolUse hook on AskUserQuestion, held until cv_answer
 state() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"][sys.argv[2]]["state"])' "$HERE/features.json" "$1"; }
+# How a replaced 003 delivers prompts: "inbox" (asyncRewake hook, works on a
+# pooled seat) or "channel" (MCP channel, needs the tengu_harbor flag).
+route003() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"]["003-inject"].get("route", "channel"))' "$HERE/features.json"; }
+INBOX=""
+[ "$(state 003-inject)" != patch ] && [ "$(route003)" = inbox ] && INBOX=1
 LINK_DIR="$HOME/claudiverse-semi/.config/$TITLE"
 mkdir -p "$LINK_DIR"
 CLAUDE_ARGS=()
 CHANNEL=""
-if [ "$(state 003-inject)" != patch ]; then
+if [ "$(state 003-inject)" != patch ] && [ "$(route003)" = channel ]; then
     python3 - "$LINK_DIR/mcp-channel.json" "${CLAUDIVERSE_URL%/}/api/mcp/seat/$TITLE" "$CLAUDIVERSE_TOKEN" <<'PY'
 import json, sys
 path, url, token = sys.argv[1:]
@@ -130,14 +135,33 @@ PY
     CLAUDE_ARGS+=(--mcp-config "$LINK_DIR/mcp-channel.json" --dangerously-load-development-channels server:claudiverse)
     CHANNEL=1
 fi
-if [ "$(state 007-remote-answer)" != patch ]; then
-    python3 - "$LINK_DIR/settings-hooks.json" "${CLAUDIVERSE_URL%/}/api/hooks/seat/$TITLE/pretooluse" <<'PY'
-import json, sys
-path, url = sys.argv[1:]
-json.dump({"hooks": {"PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{
-    "type": "http", "url": url, "timeout": 3600,
-    "headers": {"Authorization": "Bearer $CLAUDIVERSE_TOKEN"},
-    "allowedEnvVars": ["CLAUDIVERSE_TOKEN"]}]}]}}, open(path, "w"), indent=2)
+# SEMI_EXTRA_HOOKS=<file>: a {"hooks": {...}} object merged into the seat's
+# hook settings, for trying a hook before it becomes a feature.
+if [ "$(state 007-remote-answer)" != patch ] || [ -n "$INBOX" ] || [ -n "${SEMI_EXTRA_HOOKS:-}" ]; then
+    python3 - "$LINK_DIR/settings-hooks.json" "${CLAUDIVERSE_URL%/}/api/hooks/seat/$TITLE/pretooluse" \
+        "$(state 007-remote-answer)" "${SEMI_EXTRA_HOOKS:-}" "$INBOX" "$HERE/hooks/cv-inbox.sh" \
+        "${CLAUDIVERSE_URL%/}" "$TITLE" <<'PY'
+import json, shlex, sys
+path, url, state007, extra, inbox, inbox_sh, server, title = sys.argv[1:]
+hooks = {}
+if inbox:
+    # 003 replaced: the inbox poller, re-armed at every point the seat can go
+    # idle from. The server keeps only the newest poll, so overlap is harmless.
+    poller = {"type": "command", "asyncRewake": True, "timeout": 604800,
+              "command": " ".join(shlex.quote(a) for a in (inbox_sh, server, title)),
+              "rewakeMessage": "Message from the claudiverse orchestrator:",
+              "rewakeSummary": "claudiverse message"}
+    for event in ("SessionStart", "UserPromptSubmit", "Stop"):
+        hooks[event] = [{"hooks": [dict(poller)]}]
+if state007 != "patch":
+    hooks["PreToolUse"] = [{"matcher": "AskUserQuestion", "hooks": [{
+        "type": "http", "url": url, "timeout": 3600,
+        "headers": {"Authorization": "Bearer $CLAUDIVERSE_TOKEN"},
+        "allowedEnvVars": ["CLAUDIVERSE_TOKEN"]}]}]
+if extra:
+    for event, groups in json.load(open(extra))["hooks"].items():
+        hooks.setdefault(event, []).extend(groups)
+json.dump({"hooks": hooks}, open(path, "w"), indent=2)
 PY
     CLAUDE_ARGS+=(--settings "$LINK_DIR/settings-hooks.json")
 fi
@@ -159,6 +183,7 @@ if [ -n "$CHANNEL" ]; then
 fi
 [ -n "$CHANNEL" ] && echo "channel: $LINK_DIR/mcp-channel.json (cv_send + permission prompts; dev-channel prompt auto-confirmed)"
 [ -f "$LINK_DIR/settings-hooks.json" ] && [ "$(state 007-remote-answer)" != patch ] && echo "question hook: $LINK_DIR/settings-hooks.json"
+[ -n "$INBOX" ] && echo "inbox: asyncRewake poller on SessionStart/UserPromptSubmit/Stop (cv_send without 003's delivery)"
 [ -n "$PROVIDES" ] && echo "proxy provides: $PROVIDES (written into the seat's own row)"
 [ "$CLEAN" = True ] && echo "clean seat: config in $CONFIG_DIR (trust pre-written, no operator MCP/hooks/plugins)"
 [ "$POOLED" = True ] && echo "pooled seat: credentials come from the proxy (CLAUDE_CODE_OAUTH_TOKEN=cv-pool)"

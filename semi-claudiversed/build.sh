@@ -41,6 +41,9 @@ for name, f in cfg["features"].items():
         hooks += f["hooks"]
 if "006-canary" not in hooks:
     sys.exit("features.json: 006-canary must stay 'patch' — it is how a semi seat identifies itself")
+# Several features may need the same splice (013 and 001-session-ref ride on
+# 003's bind); apply each once.
+hooks = list(dict.fromkeys(hooks))
 print(base64.b64encode(cfg["suffix"].encode()).decode(), " ".join(hooks))
 PY
 )

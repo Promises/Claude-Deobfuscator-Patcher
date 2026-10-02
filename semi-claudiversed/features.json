@@ -12,6 +12,7 @@
     },
     "001-session-ref": {
       "hooks": [
+        "003-inject",
         "001-session-ref"
       ],
       "state": "patch",
@@ -31,9 +32,10 @@
       "hooks": [
         "003-inject"
       ],
-      "state": "patch",
-      "replacement": "server-hosted MCP channel (/api/mcp/seat/<title>, server fedc7f7): cv_send to an idle seat is a channel message; also relays permission prompts",
-      "note": "Channel route built (server fedc7f7) but channels are gated by a Claude Code feature flag that is off on a pooled (cv-pool) seat; on a seat with its own login it was on. Keep the patch while seats are pooled."
+      "state": "replaced",
+      "replacement": "inbox: an asyncRewake command hook (hooks/cv-inbox.sh) on SessionStart/UserPromptSubmit/Stop long-polls GET /api/seats/<title>/inbox; a prompt makes it exit 2, which wakes the seat with it (server SeatInbox). route=channel selects the MCP channel instead (needs tengu_harbor, off on pooled seats).",
+      "note": "The 003 SPLICE stays while 013 / 001-session-ref need its bind (they list it as a hook). Only its prompt delivery is replaced.",
+      "route": "inbox"
     },
     "005-commands": {
       "hooks": [
@@ -89,6 +91,7 @@
     },
     "013-permission-mode": {
       "hooks": [
+        "003-inject",
         "013-permission-mode"
       ],
       "state": "patch",
