@@ -52,8 +52,8 @@
       "hooks": [
         "008-010-mainloop"
       ],
-      "state": "patch",
-      "replacement": "proxy readiness (busy/tool/question/idle) + Stop/Notification hooks",
+      "state": "replaced",
+      "replacement": "proxy in primary mode (provides idle): main-thread request lifecycle + startup idle (server 160b95e); overlay/proxy-idle-no-sidecar-cvstate-fallback.patch keeps the sidecar's fallback heartbeat from overriding it",
       "provides": "idle"
     },
     "009-compact": {

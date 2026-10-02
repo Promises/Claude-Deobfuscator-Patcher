@@ -1,0 +1,14 @@
+--- a/SidecarClient.js	2026-10-02 15:59:42
++++ b/SidecarClient.js	2026-10-02 15:59:42
+@@ -1212,6 +1212,11 @@
+ 
+   function startCvstateFallback() {
+     if (cvstateTimer) return;
++    // semi-claudiversed: when the API proxy provides `idle`, readiness is the
++    // proxy's. This fallback only re-asserts what the sidecar last MIRRORED,
++    // and with 002/008/009 retired it mirrors nothing — so it would report
++    // busy every 3 s and override every idle the proxy sends.
++    if ((process.env.CLAUDIVERSE_PROXY_PROVIDES || "").split(",").includes("idle")) return;
+     cvstateTimer = setInterval(function () {
+       try {
+         // A real REPL heartbeat beats every ~3s; 10s of silence means none.
