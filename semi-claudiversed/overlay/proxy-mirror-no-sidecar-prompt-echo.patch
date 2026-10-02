@@ -1,0 +1,13 @@
+--- a/SidecarClient.js	2026-10-02 15:52:10
++++ b/SidecarClient.js	2026-10-02 15:52:10
+@@ -1246,6 +1246,10 @@
+     try {
+       if (typeof text !== "string" || !text.trim()) return;
+       lastUserPrompt = text;
++      // semi-claudiversed: when the API proxy provides `mirror`, it records
++      // every prompt from the request itself; mirroring it here too would
++      // store each prompt twice in the seat's row.
++      if ((process.env.CLAUDIVERSE_PROXY_PROVIDES || "").split(",").includes("mirror")) return;
+       mirrorMessage({ type: "user", message: { role: "user", content: text } });
+     } catch (e) {}
+   }

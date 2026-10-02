@@ -37,12 +37,23 @@ ENVV=(
     "CLAUDIVERSE_TITLE=$TITLE"
     "CLAUDIVERSE_SKIP_TRUST=1"
 )
+# Features handed to the proxy: every replaced feature with a `provides` name.
+# The proxy writes those into the seat's own row (primary mode); the runtime
+# reads the same list (CLAUDIVERSE_PROXY_PROVIDES) to stop duplicating them.
+PROVIDES=$(python3 -c 'import json,sys; f=json.load(open(sys.argv[1]))["features"].values(); print(",".join(x["provides"] for x in f if x["state"]=="replaced" and x.get("provides")))' "$HERE/features.json")
+
 if [ -z "${NO_PROXY_ROUTE:-}" ]; then
+    HDRS="X-Claudiverse-Token: $CLAUDIVERSE_TOKEN"
+    # One header per line: Claude Code splits ANTHROPIC_CUSTOM_HEADERS on newlines.
+    [ -n "$PROVIDES" ] && HDRS="$HDRS"$'\n'"X-Claudiverse-Provides: $PROVIDES"
     ENVV+=(
         "ANTHROPIC_BASE_URL=${CLAUDIVERSE_URL%/}/proxy/seat/$TITLE"
-        "ANTHROPIC_CUSTOM_HEADERS=X-Claudiverse-Token: $CLAUDIVERSE_TOKEN"
+        "ANTHROPIC_CUSTOM_HEADERS=$HDRS"
         "CLAUDE_CODE_GATEWAY_HINT_HEADERS=1"
+        "CLAUDIVERSE_PROXY_PROVIDES=$PROVIDES"
     )
+elif [ -n "$PROVIDES" ]; then
+    echo "launch: features replaced by the proxy ($PROVIDES) need the proxy route" >&2; exit 1
 fi
 
 # 012 replaced: a POOLED seat. It holds no Anthropic credential; the proxy
@@ -61,6 +72,7 @@ fi
 ARGS=()
 for kv in "${ENVV[@]}"; do ARGS+=(-e "$kv"); done
 tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi"
+[ -n "$PROVIDES" ] && echo "proxy provides: $PROVIDES (written into the seat's own row)"
 [ "$POOLED" = True ] && echo "pooled seat: credentials come from the proxy (CLAUDE_CODE_OAUTH_TOKEN=cv-pool)"
 echo "started $TITLE in $WORKDIR ($(head -1 "$HERE/BUILD.txt" 2>/dev/null || echo 'no BUILD.txt'))"
 echo "  attach: tmux attach -t $TITLE    stop: tmux kill-session -t $TITLE"

@@ -1,5 +1,5 @@
 {
-  "_doc": "Which claudiverse features this build still gets from a binary patch. state: patch = the hook is spliced in; replaced = a non-patch mechanism provides it and the hook is left out; off = neither. build.sh applies the hooks of every feature in state patch. Flip ONE feature at a time and test before the next.",
+  "_doc": "Which claudiverse features this build still gets from a binary patch. state: patch = the hook is spliced in; replaced = a non-patch mechanism provides it and the hook is left out; off = neither. build.sh applies the hooks of every feature in state patch. Flip ONE feature at a time and test before the next. A replaced feature with a `provides` name is handed to the API proxy by launch.sh (X-Claudiverse-Provides).",
   "suffix": " [semi-claudiversed]",
   "features": {
     "001-session": {
@@ -15,8 +15,9 @@
         "002-structio",
         "002-querytap"
       ],
-      "state": "patch",
-      "replacement": "proxy (/proxy: proxy:<seat> row)"
+      "state": "replaced",
+      "replacement": "proxy in primary mode (X-Claudiverse-Provides: mirror) writes the conversation into the seat's own row; overlay/proxy-mirror-no-sidecar-prompt-echo.patch stops the sidecar echoing typed prompts",
+      "provides": "mirror"
     },
     "003-inject": {
       "hooks": [
@@ -29,7 +30,7 @@
       "hooks": [
         "005-commands"
       ],
-      "state": "patch",
+      "state": "off",
       "replacement": "none needed: nothing registers commands since 004 was retired"
     },
     "006-canary": {
@@ -52,14 +53,16 @@
         "008-010-mainloop"
       ],
       "state": "patch",
-      "replacement": "proxy readiness (busy/tool/question/idle) + Stop/Notification hooks"
+      "replacement": "proxy readiness (busy/tool/question/idle) + Stop/Notification hooks",
+      "provides": "idle"
     },
     "009-compact": {
       "hooks": [
         "009-compact"
       ],
       "state": "patch",
-      "replacement": "proxy (compaction request class) or PreCompact/PostCompact hooks"
+      "replacement": "proxy (compaction request class) or PreCompact/PostCompact hooks",
+      "provides": "compact"
     },
     "011-trust": {
       "hooks": [
