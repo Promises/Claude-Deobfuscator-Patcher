@@ -11,7 +11,7 @@ in `../patches.d/modules`) is never touched by anything here.
 | `features.json` | Per feature: `patch`, `replaced` or `off`, and what replaces it. |
 | `build.sh [version]` | Builds `claude-semi` from `../versionref/<v>-bin` with only the hooks still in state `patch`. |
 | `launch.sh <title>` | Starts a test seat on `claude-semi` in tmux, routed through the proxy. |
-| `overlay/` | Runtime files that differ from production. Copied over `patches.d/modules/` at build. |
+| `overlay/` | How this runtime differs from production: `*.patch` (unified diffs, applied in name order; a hunk that no longer applies fails the build) or whole files. |
 | `patches.d/modules/` | Generated: this variant's own runtime. Not edited by hand. |
 | `BUILD.txt` | Generated: stock version, hooks, overlay and sha of the current build. |
 
@@ -36,3 +36,13 @@ One feature per step: if something breaks, the last flip is the cause.
   012's 401-renewal leg needs.
 - `003-inject` and `008-010-idle` hook the same module; each can still be
   dropped on its own.
+
+## Pooled seats (012 replaced)
+
+With `012-failover` replaced, `launch.sh` starts the seat with
+`CLAUDE_CODE_OAUTH_TOKEN=cv-pool`. The seat holds no Anthropic credential:
+the API proxy swaps the placeholder for the pool's current token on every
+request and handles 429/401 failover itself (server `11b85b5`).
+`overlay/pooled-seat-no-local-credentials.patch` stops the sidecar handing
+such a seat a real token through its lease, the switch-back push, or the
+401 refresh callback. A pooled seat only works through the proxy.

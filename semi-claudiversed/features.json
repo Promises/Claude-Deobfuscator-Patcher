@@ -72,8 +72,8 @@
       "hooks": [
         "012-failover"
       ],
-      "state": "patch",
-      "replacement": "proxy credential swap from the pool (not built yet)"
+      "state": "replaced",
+      "replacement": "proxy credential swap from the pool (server 11b85b5): pooled seat sends Bearer cv-pool; overlay/pooled-seat-no-local-credentials.patch keeps the sidecar from handing it a real token"
     }
   }
 }

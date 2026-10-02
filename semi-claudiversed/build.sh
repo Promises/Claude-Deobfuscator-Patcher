@@ -82,12 +82,28 @@ case "$VERSION_LINE" in
 esac
 
 # Runtime: production's modules, then this variant's overlay on top.
+#   overlay/*.patch  unified diffs against production's modules, applied in
+#                    name order. A hunk that no longer applies FAILS the build:
+#                    production changed under it, and that needs a look.
+#   overlay/<file>   anything else replaces the production file of that name.
 mkdir -p patches.d/modules overlay
 rsync -a --delete "$REF/patches.d/modules/" patches.d/modules/
-if [ -n "$(ls -A overlay)" ]; then
-    rsync -a overlay/ patches.d/modules/
-    echo "== overlay: $(ls overlay | tr '\n' ' ')"
-fi
+for f in overlay/*; do
+    [ -e "$f" ] || continue
+    case "$f" in
+        */.gitkeep) ;;
+        *.patch)
+            patch -d patches.d/modules -p1 --forward --batch -s < "$f" \
+                || { echo "build: overlay $f no longer applies to production's runtime" >&2; exit 1; }
+            echo "== overlay patch: $(basename "$f")" ;;
+        *)
+            cp "$f" patches.d/modules/
+            echo "== overlay file: $(basename "$f")" ;;
+    esac
+done
+for m in patches.d/modules/*.mjs patches.d/modules/*.js; do
+    node --check "$m" || { echo "build: runtime module $m does not parse" >&2; exit 1; }
+done
 
 [ -e claude-semi ] && mv -f claude-semi claude-semi.prev
 mv claude-semi.new claude-semi

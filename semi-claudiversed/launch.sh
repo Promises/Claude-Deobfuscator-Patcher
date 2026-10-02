@@ -45,8 +45,22 @@ if [ -z "${NO_PROXY_ROUTE:-}" ]; then
     )
 fi
 
+# 012 replaced: a POOLED seat. It holds no Anthropic credential; the proxy
+# swaps the placeholder for a pool token per request and fails over itself.
+# Scopes are the ones a leased token carries, or upstream treats the session as
+# inference-only. A pooled seat only works through the proxy.
+POOLED=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"]["012-failover"]["state"] != "patch")' "$HERE/features.json")
+if [ "$POOLED" = True ]; then
+    [ -z "${NO_PROXY_ROUTE:-}" ] || { echo "launch: 012 is replaced, so this seat needs the proxy route" >&2; exit 1; }
+    ENVV+=(
+        "CLAUDE_CODE_OAUTH_TOKEN=cv-pool"
+        "CLAUDE_CODE_OAUTH_SCOPES=user:file_upload user:inference user:mcp_servers user:profile user:sessions:claude_code"
+    )
+fi
+
 ARGS=()
 for kv in "${ENVV[@]}"; do ARGS+=(-e "$kv"); done
 tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi"
+[ "$POOLED" = True ] && echo "pooled seat: credentials come from the proxy (CLAUDE_CODE_OAUTH_TOKEN=cv-pool)"
 echo "started $TITLE in $WORKDIR ($(head -1 "$HERE/BUILD.txt" 2>/dev/null || echo 'no BUILD.txt'))"
 echo "  attach: tmux attach -t $TITLE    stop: tmux kill-session -t $TITLE"
