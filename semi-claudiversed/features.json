@@ -1,0 +1,79 @@
+{
+  "_doc": "Which claudiverse features this build still gets from a binary patch. state: patch = the hook is spliced in; replaced = a non-patch mechanism provides it and the hook is left out; off = neither. build.sh applies the hooks of every feature in state patch. Flip ONE feature at a time and test before the next.",
+  "suffix": " [semi-claudiversed]",
+  "features": {
+    "001-session": {
+      "hooks": [
+        "001-session"
+      ],
+      "state": "patch",
+      "replacement": "proxy (x-claude-code-session-id on every request) or SessionStart hook",
+      "note": "Also publishes upstream's OAuth refresh registrar, which 012's 401-renewal leg needs."
+    },
+    "002-mirroring": {
+      "hooks": [
+        "002-structio",
+        "002-querytap"
+      ],
+      "state": "patch",
+      "replacement": "proxy (/proxy: proxy:<seat> row)"
+    },
+    "003-inject": {
+      "hooks": [
+        "003-inject"
+      ],
+      "state": "patch",
+      "replacement": "MCP channel (notifications/claude/channel), verified on stock 2.1.286"
+    },
+    "005-commands": {
+      "hooks": [
+        "005-commands"
+      ],
+      "state": "patch",
+      "replacement": "none needed: nothing registers commands since 004 was retired"
+    },
+    "006-canary": {
+      "hooks": [
+        "006-canary"
+      ],
+      "state": "patch",
+      "replacement": "none: kept so a semi seat always identifies itself",
+      "note": "Never flip this one while the variant exists."
+    },
+    "007-remote-answer": {
+      "hooks": [
+        "007-remote-answer"
+      ],
+      "state": "patch",
+      "replacement": "PreToolUse hook returning updatedInput.answers, verified on stock"
+    },
+    "008-010-idle": {
+      "hooks": [
+        "008-010-mainloop"
+      ],
+      "state": "patch",
+      "replacement": "proxy readiness (busy/tool/question/idle) + Stop/Notification hooks"
+    },
+    "009-compact": {
+      "hooks": [
+        "009-compact"
+      ],
+      "state": "patch",
+      "replacement": "proxy (compaction request class) or PreCompact/PostCompact hooks"
+    },
+    "011-trust": {
+      "hooks": [
+        "011-spawn-trust"
+      ],
+      "state": "patch",
+      "replacement": "spawner pre-writes the folder's trust entry"
+    },
+    "012-failover": {
+      "hooks": [
+        "012-failover"
+      ],
+      "state": "patch",
+      "replacement": "proxy credential swap from the pool (not built yet)"
+    }
+  }
+}

@@ -455,8 +455,13 @@ def _canary(c, g=None):
     old = b'}.BUILD_REF_NAME){return""}'
     if c.count(old) != 1:
         raise SystemExit(f"006: version suffix occurs {c.count(old)}x, need 1")
-    return replace_paid(c, old, b'}.BUILD_REF_NAME){return" [claudiverse]"}')
+    return replace_paid(c, old, b'}.BUILD_REF_NAME){return"' + VERSION_SUFFIX + b'"}')
 
+
+# What 006 appends to every version readout. Overridable (--suffix) so a build
+# that carries only SOME hooks — the semi-claudiversed variant — can never be
+# mistaken for the full production build.
+VERSION_SUFFIX = b" [claudiverse]"
 
 HOOKS = [
     # The only hook needing no runtime at all — it reads the environment
@@ -550,5 +555,11 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
 
 
 if __name__ == "__main__":
-    apply_hooks(sys.argv[1], sys.argv[2],
-                names=sys.argv[3:] if len(sys.argv) > 3 else None)
+    args = sys.argv[1:]
+    if "--suffix" in args:
+        i = args.index("--suffix")
+        VERSION_SUFFIX = args[i + 1].encode()
+        if b'"' in VERSION_SUFFIX or b"\\" in VERSION_SUFFIX:
+            raise SystemExit("--suffix must not contain quotes or backslashes")
+        del args[i:i + 2]
+    apply_hooks(args[0], args[1], names=args[2:] or None)
