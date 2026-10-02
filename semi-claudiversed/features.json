@@ -78,6 +78,14 @@
       ],
       "state": "replaced",
       "replacement": "proxy credential swap from the pool (server 11b85b5): pooled seat sends Bearer cv-pool; overlay/pooled-seat-no-local-credentials.patch keeps the sidecar from handing it a real token"
+    },
+    "013-permission-mode": {
+      "hooks": [
+        "013-permission-mode"
+      ],
+      "state": "patch",
+      "replacement": "none: a NEW capability, not a retired patch. Splices nothing \u2014 cvinject publishes only a reference to upstream's own permission-mode setter (__cvModeRef) in the bootstrap; overlay/remote-permission-mode.patch adds the runtime hook + sidecar handler. Server: POST /api/sessions/:id/permission_mode (app token only).",
+      "note": "Remote mode changes reach only what Shift+Tab reaches: default/acceptEdits/plan/auto, auto only where the seat's own context marks it available."
     }
   }
 }

@@ -1,0 +1,143 @@
+--- a/cv-runtime.mjs	2026-10-02 22:33:59
++++ b/cv-runtime.mjs	2026-10-02 22:34:17
+@@ -93,6 +93,28 @@
+     log("authCacheClear resolve failed:", e.message);
+ }
+ 
++// --- 013-permission-mode ----------------------------------------------------
++// Upstream's own permission-mode setter: validates the mode, runs the full
++// transition (plan's prePlanMode, auto's side effects) and emits the
++// mode-change event that redraws the footer. cvinject publishes only its
++// reference (__cvModeRef), the same way 012's clear is reached. Resolved
++// eagerly so a remote request never races a dynamic import.
++let applyPermissionMode;
++try {
++    const [chunkPath, exportName] = globalThis.__cvModeRef || [];
++    if (chunkPath) {
++        const chunk = await import(chunkPath);
++        if (typeof chunk[exportName] === "function") {
++            applyPermissionMode = chunk[exportName];
++            log("permission-mode setter resolved from", chunkPath);
++        } else {
++            log("permission-mode setter MISSING export", exportName);
++        }
++    }
++} catch (e) {
++    log("permission-mode setter resolve failed:", e.message);
++}
++
+ // --- 001-session-hooks ------------------------------------------------------
+ // Hand Claude's OWN session UUID to the sidecar. The server matches on it and
+ // REUSES this session's row, so a reconnect no longer inserts a new one — that
+@@ -217,6 +239,42 @@
+         setCursorOffset() {},
+         clearBuffer() {},
+         resetHistory() {},
++    };
++
++    // 013: the seat's permission mode, read and set the way Shift+Tab does.
++    globalThis.__claudiverseGetPermissionMode = () => {
++        try {
++            return deps?.store?.getState?.()?.toolPermissionContext?.mode;
++        } catch (e) {
++            return undefined;
++        }
++    };
++
++    // Returns { ok: true, mode } or { ok: false, error, code }. Never throws:
++    // the sidecar reports whatever this returns, and a refusal must reach the
++    // operator as a refusal, not as silence.
++    globalThis.__claudiverseSetPermissionMode = (mode) => {
++        if (!["default", "acceptEdits", "plan", "auto"].includes(mode))
++            return { ok: false, error: "mode not allowed remotely", code: "mode_not_allowed" };
++        if (typeof applyPermissionMode !== "function")
++            return { ok: false, error: "permission-mode setter not resolved in this build", code: "setter_unresolved" };
++        if (!deps?.store || typeof deps.setAppState !== "function")
++            return { ok: false, error: "seat not ready", code: "not_ready" };
++        const ctx = deps.store.getState().toolPermissionContext;
++        // 🔴 Shift+Tab only OFFERS auto where the context says it is available;
++        // upstream's setter checks less. Remote must never reach a mode the
++        // seat's own UI would not.
++        if (mode === "auto" && !ctx?.isAutoModeAvailable)
++            return { ok: false, error: "auto mode is not available on this seat", code: "auto_mode_unavailable" };
++        try {
++            const r = applyPermissionMode(mode, ctx, (update) =>
++                deps.setAppState((s) => ({ ...s, toolPermissionContext: update(s.toolPermissionContext) })));
++            return r && r.ok
++                ? { ok: true, mode: r.mode }
++                : { ok: false, error: (r && (r.error || r.message)) || "refused by Claude Code", code: r && r.code };
++        } catch (e) {
++            return { ok: false, error: e.message, code: "transition_failed" };
++        }
+     };
+ 
+     globalThis.__claudiverseSubmit = (text) => {
+--- a/SidecarClient.js	2026-10-02 22:33:59
++++ b/SidecarClient.js	2026-10-02 22:34:38
+@@ -909,6 +909,34 @@
+       req.write(body);
+       req.end();
+     } catch (e) {}
++  }
++
++  // --- 013: report the permission mode --------------------------------------
++  // The app shows what the seat is RUNNING, not what was last tapped, and the
++  // operator can also change it locally with Shift+Tab. So the mode is read
++  // from the seat and pushed on join and whenever it changes.
++  var lastReportedMode = null;
++  var permissionModeTimer = null;
++
++  function reportPermissionMode(force) {
++    var mode;
++    try {
++      mode = (typeof globalThis.__claudiverseGetPermissionMode === "function")
++        ? globalThis.__claudiverseGetPermissionMode() : undefined;
++    } catch (e) {}
++    if (typeof mode !== "string") return;
++    if (!force && mode === lastReportedMode) return;
++    lastReportedMode = mode;
++    pushChannel("permission_mode", { mode: mode });
++  }
++
++  function startPermissionModeWatch() {
++    if (permissionModeTimer) return;
++    permissionModeTimer = setInterval(function () { reportPermissionMode(false); }, 2000);
++    // Must never hold the process open.
++    if (permissionModeTimer && typeof permissionModeTimer.unref === "function") {
++      permissionModeTimer.unref();
++    }
+   }
+ 
+   function startHeartbeat() {
+@@ -1044,6 +1072,9 @@
+               connected = true;
+               connecting = false;
+               log("Joined! Flushing", messageQueue.length, "messages");
++              // A fresh Room knows no mode until told.
++              reportPermissionMode(true);
++              startPermissionModeWatch();
+               if (messageQueue.length > 0) {
+                 pushChannel("mirror_messages", { messages: messageQueue });
+                 messageQueue = [];
+@@ -1053,6 +1084,21 @@
+ 
+           // Handle remote commands
+           if (topic === sessionTopic && channelJoined) {
++            // 013: the operator's app sets this seat's permission mode. The
++            // seat's own answer goes back, so a refusal is reported as one.
++            if (event === "remote_set_mode" && payload && payload.request_id) {
++              var modeResult;
++              try {
++                modeResult = (typeof globalThis.__claudiverseSetPermissionMode === "function")
++                  ? globalThis.__claudiverseSetPermissionMode(payload.mode)
++                  : { ok: false, error: "this seat has no permission-mode hook", code: "no_hook" };
++              } catch (e) {
++                modeResult = { ok: false, error: e.message, code: "hook_threw" };
++              }
++              log("set_permission_mode", payload.mode, "->", JSON.stringify(modeResult));
++              pushChannel("permission_mode_result", Object.assign({ request_id: payload.request_id }, modeResult));
++              reportPermissionMode(true);
++            }
+             if (event === "anthropic_auth_upgrade") {
+               log("server signalled a preferred account is available");
+               upgradeAnthropicAccount();

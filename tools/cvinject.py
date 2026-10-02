@@ -180,6 +180,45 @@ def _auth_cache_clear(g):
     return name, im.group(1)
 
 
+def _mode_setter(g):
+    """013 — (chunk path, export name) of upstream's permission-mode setter.
+
+    The setter is what the interactive REPL's own `set_permission_mode` handler
+    and the headless bridge apply a mode through: it validates the mode, runs
+    the full transition (plan's prePlanMode save/restore, auto's side effects)
+    and emits the mode-change event. Writing toolPermissionContext.mode
+    directly would skip all three.
+
+    Nothing is spliced. Like 012's auth-cache clear, the binary only carries the
+    REFERENCE and the runtime imports the chunk by its virtual path.
+
+    Bound by an OBSERVABLE: the setter's module is the one carrying the refusal
+    text for a mode the session was not launched with, and the setter is the
+    4-argument function whose first statement validates `(mode, context)` and
+    which returns `{ok:!0,mode:...}`. Exactly one such function must exist.
+    """
+    ANCHOR = b"because the session was not launched with --dangerously-skip-permissions"
+    mods = [m for m in g.modules if ANCHOR in m.contents]
+    if len(mods) != 1:
+        raise SystemExit(f"013: mode-setter anchor in {len(mods)} modules, need 1")
+    c = mods[0].contents
+    PAT = (rb'function ([\w$]+)\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\)'
+           rb'\{let ([\w$]+)=[\w$]+\(\2,\3\);if\(!\6\.ok\)return \6;')
+    fns = [mm.group(1) for mm in re.finditer(PAT, c)
+           if b"{ok:!0,mode:" in c[mm.end():mm.end() + 400]]
+    if len(fns) != 1:
+        raise SystemExit(f"013: mode setter resolved to {fns}, need 1")
+    local = fns[0]
+    ex = re.search(rb'export\{([^}]*)\}', c)
+    names = {}
+    for part in (ex.group(1).split(b",") if ex else []):
+        bits = part.strip().split(b" as ")
+        names[bits[0]] = bits[-1]
+    if local not in names:
+        raise SystemExit(f"013: mode setter {local!r} is not exported")
+    return mods[0].name.encode(), names[local]
+
+
 def _failover(c, g=None):
     """012 — mid-session account failover on a 429.
 
@@ -512,7 +551,14 @@ def apply_hooks(binary, out_path, names=None, bootstrap=True):
         # An explicit $CLAUDIVERSE_RUNTIME still wins. A binary copied somewhere
         # with no runtime beside it fails the import SILENTLY and runs as stock —
         # the load error is only printed when the variable was set on purpose.
-        boot = (b'globalThis.__cvClearRef=["' + chunk + b'","' + clear_name + b'"];'
+        # 013 is opt-in by name: it is no HOOKS entry (it edits no module) and
+        # an unnamed build — production — does not publish it.
+        mode_ref = b""
+        if names and "013-permission-mode" in names:
+            mode_chunk, mode_name = _mode_setter(g)
+            mode_ref = b'globalThis.__cvModeRef=["' + mode_chunk + b'","' + mode_name + b'"];'
+            print(f"  013-permission-mode -> {mode_chunk.decode()} [{mode_name.decode()}]")
+        boot = (b'globalThis.__cvClearRef=["' + chunk + b'","' + clear_name + b'"];' + mode_ref +
                 b'try{let f=process.env.CLAUDIVERSE_RUNTIME,x=!f,p=process.execPath;'
                 b'if(x)f=p.slice(0,p.lastIndexOf("/"))+"/patches.d/modules/cv-runtime.mjs";'
                 b'import(f).catch(e=>{if(!x)try{process.stderr.write("cv-load-failed "+e.message+"\\n")}catch(_){}'
