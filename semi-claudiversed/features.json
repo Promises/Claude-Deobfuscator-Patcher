@@ -24,7 +24,8 @@
         "003-inject"
       ],
       "state": "patch",
-      "replacement": "MCP channel (notifications/claude/channel), verified on stock 2.1.286"
+      "replacement": "server-hosted MCP channel (/api/mcp/seat/<title>, server fedc7f7): cv_send to an idle seat is a channel message; also relays permission prompts",
+      "note": "Channel route built (server fedc7f7) but channels are gated by a Claude Code feature flag that is off on a pooled (cv-pool) seat; on a seat with its own login it was on. Keep the patch while seats are pooled."
     },
     "005-commands": {
       "hooks": [
@@ -45,8 +46,8 @@
       "hooks": [
         "007-remote-answer"
       ],
-      "state": "patch",
-      "replacement": "PreToolUse hook returning updatedInput.answers, verified on stock"
+      "state": "replaced",
+      "replacement": "HTTP PreToolUse hook on AskUserQuestion (/api/hooks/seat/<title>/pretooluse, server fedc7f7), held until cv_answer"
     },
     "008-010-idle": {
       "hooks": [

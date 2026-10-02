@@ -111,9 +111,54 @@ else
     ENVV+=("CLAUDIVERSE_SKIP_TRUST=1")
 fi
 
+# 003 / 007 replaced: the seat reaches the server through Claude Code's own
+# extension points (server fedc7f7), written per seat beside its config:
+#   003 -> a remote MCP server loaded as a CHANNEL (cv_send, permission prompts)
+#   007 -> an HTTP PreToolUse hook on AskUserQuestion, held until cv_answer
+state() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["features"][sys.argv[2]]["state"])' "$HERE/features.json" "$1"; }
+LINK_DIR="$HOME/claudiverse-semi/.config/$TITLE"
+mkdir -p "$LINK_DIR"
+CLAUDE_ARGS=()
+CHANNEL=""
+if [ "$(state 003-inject)" != patch ]; then
+    python3 - "$LINK_DIR/mcp-channel.json" "${CLAUDIVERSE_URL%/}/api/mcp/seat/$TITLE" "$CLAUDIVERSE_TOKEN" <<'PY'
+import json, sys
+path, url, token = sys.argv[1:]
+json.dump({"mcpServers": {"claudiverse": {"type": "http", "url": url,
+           "headers": {"Authorization": "Bearer " + token}}}}, open(path, "w"), indent=2)
+PY
+    CLAUDE_ARGS+=(--mcp-config "$LINK_DIR/mcp-channel.json" --dangerously-load-development-channels server:claudiverse)
+    CHANNEL=1
+fi
+if [ "$(state 007-remote-answer)" != patch ]; then
+    python3 - "$LINK_DIR/settings-hooks.json" "${CLAUDIVERSE_URL%/}/api/hooks/seat/$TITLE/pretooluse" <<'PY'
+import json, sys
+path, url = sys.argv[1:]
+json.dump({"hooks": {"PreToolUse": [{"matcher": "AskUserQuestion", "hooks": [{
+    "type": "http", "url": url, "timeout": 3600,
+    "headers": {"Authorization": "Bearer $CLAUDIVERSE_TOKEN"},
+    "allowedEnvVars": ["CLAUDIVERSE_TOKEN"]}]}]}}, open(path, "w"), indent=2)
+PY
+    CLAUDE_ARGS+=(--settings "$LINK_DIR/settings-hooks.json")
+fi
+
 ARGS=()
 for kv in "${ENVV[@]}"; do ARGS+=(-e "$kv"); done
-tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi"
+tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi" "${CLAUDE_ARGS[@]}"
+
+# A development channel asks for confirmation at every start. Confirm it once
+# the dialog is on screen (Enter selects "I am using this for local
+# development"); give up quietly after 60 s.
+if [ -n "$CHANNEL" ]; then
+    ( for _ in $(seq 1 60); do
+          if tmux capture-pane -t "=$TITLE" -p 2>/dev/null | /usr/bin/grep -q "Loading development channels"; then
+              sleep 1; tmux send-keys -t "=$TITLE" Enter; exit 0
+          fi
+          sleep 1
+      done ) >/dev/null 2>&1 &
+fi
+[ -n "$CHANNEL" ] && echo "channel: $LINK_DIR/mcp-channel.json (cv_send + permission prompts; dev-channel prompt auto-confirmed)"
+[ -f "$LINK_DIR/settings-hooks.json" ] && [ "$(state 007-remote-answer)" != patch ] && echo "question hook: $LINK_DIR/settings-hooks.json"
 [ -n "$PROVIDES" ] && echo "proxy provides: $PROVIDES (written into the seat's own row)"
 [ "$CLEAN" = True ] && echo "clean seat: config in $CONFIG_DIR (trust pre-written, no operator MCP/hooks/plugins)"
 [ "$POOLED" = True ] && echo "pooled seat: credentials come from the proxy (CLAUDE_CODE_OAUTH_TOKEN=cv-pool)"
