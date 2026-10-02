@@ -867,11 +867,31 @@ var __claudiverse = (function() {
       } catch (e) {}
   }
 
+  // Where this seat runs and how it was started, for the app's machine
+  // picker, fleet grouping and runner filter (server: sessions.host/fleet/
+  // origin). Launchers set the env: cv-spawn exports origin=spawn, cv-runner
+  // origin=runner, both with the fleet. A hand-started seat is "manual".
+  function seatPlacement() {
+    var host = process.env.CLAUDIVERSE_HOST;
+    if (!host) {
+      try { host = require("os").hostname(); } catch (e) {}
+    }
+    return {
+      host: host || undefined,
+      fleet: process.env.CLAUDIVERSE_FLEET || undefined,
+      origin: process.env.CLAUDIVERSE_ORIGIN || "manual"
+    };
+  }
+
   function pushTitle(title) {
+    var placement = seatPlacement();
     var body = JSON.stringify({
       title: title,
       claude_session_id: claudeSessionId || undefined,
-      display_title: displayTitleCache || undefined
+      display_title: displayTitleCache || undefined,
+      host: placement.host,
+      fleet: placement.fleet,
+      origin: placement.origin
     });
     try {
       var url = new URL(BASE_URL + "/api/sessions");
@@ -940,6 +960,10 @@ var __claudiverse = (function() {
       displayTitleCache = disp;
     }
     if (claudeSessionId) postBody.claude_session_id = claudeSessionId;
+    var placement = seatPlacement();
+    if (placement.host) postBody.host = placement.host;
+    if (placement.fleet) postBody.fleet = placement.fleet;
+    postBody.origin = placement.origin;
     var postData = JSON.stringify(postBody);
     var parsed = new URL(BASE_URL + "/api/sessions");
     var mod = parsed.protocol === "https:" ? https : http;

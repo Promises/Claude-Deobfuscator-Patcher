@@ -25,6 +25,14 @@ SEAT=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1
 [ -n "$URL" ] && [ -n "$SEAT" ] && [ -n "$CLAUDIVERSE_TOKEN" ] || exit 0
 [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) start event=$EVENT" >> "$CV_INBOX_LOG"
 
+# Where this seat runs and how it was started (the app's machine picker,
+# fleet grouping and runner filter) — a seat with no sidecar reports it here.
+PLACE=$(python3 -c 'import os, socket, urllib.parse
+q = {"host": os.environ.get("CLAUDIVERSE_HOST") or socket.gethostname(),
+     "fleet": os.environ.get("CLAUDIVERSE_FLEET", ""),
+     "origin": os.environ.get("CLAUDIVERSE_ORIGIN", "manual")}
+print(urllib.parse.urlencode({k: v for k, v in q.items() if v}))' 2>/dev/null)
+
 BODY=$(mktemp)
 trap 'rm -f "$BODY"' EXIT
 
@@ -34,7 +42,7 @@ while :; do
     # stops its session when none has been for about three minutes.
     CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -m 70 \
         -H "Authorization: Bearer $CLAUDIVERSE_TOKEN" \
-        "$URL/api/seats/$SEAT/inbox?wait=55&event=$EVENT" 2>/dev/null) || CODE=000
+        "$URL/api/seats/$SEAT/inbox?wait=55&event=$EVENT&$PLACE" 2>/dev/null) || CODE=000
     [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) poll event=$EVENT -> $CODE" >> "$CV_INBOX_LOG"
     case "$CODE" in
         200) cat "$BODY" >&2; exit 2 ;;       # a prompt: wake the seat with it
