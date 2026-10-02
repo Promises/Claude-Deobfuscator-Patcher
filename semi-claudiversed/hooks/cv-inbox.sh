@@ -20,6 +20,7 @@ try: print(json.load(sys.stdin).get("hook_event_name", ""))
 except Exception: print("")' 2>/dev/null)
 
 URL=${1%/}
+TITLE=$2
 SEAT=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$2")
 [ -n "$URL" ] && [ -n "$SEAT" ] && [ -n "$CLAUDIVERSE_TOKEN" ] || exit 0
 [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) start event=$EVENT" >> "$CV_INBOX_LOG"
@@ -35,6 +36,11 @@ while :; do
     case "$CODE" in
         200) cat "$BODY" >&2; exit 2 ;;       # a prompt: wake the seat with it
         204) ;;                                # nothing yet: poll again
+        205) # interrupt: press Escape in this seat's own pane, like the
+             # operator would. TMUX_PANE is inherited from Claude Code's pane;
+             # launch.sh names the tmux session after the seat as a fallback.
+             tmux send-keys -t "${TMUX_PANE:-=$TITLE}" Escape 2>/dev/null
+             [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) interrupt -> Escape to ${TMUX_PANE:-=$TITLE}" >> "$CV_INBOX_LOG" ;;
         409) exit 0 ;;                         # a newer poll took over
         401|403|404) exit 0 ;;                 # misconfigured: stop, don't hammer
         *) sleep 5 ;;                          # server unreachable (e.g. a swap)

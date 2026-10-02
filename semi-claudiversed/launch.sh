@@ -30,7 +30,11 @@ WORKDIR="${2:-/Users/Shared/claudiverse-semi/$TITLE}"
 : "${CLAUDIVERSE_URL:?CLAUDIVERSE_URL must be set}"
 : "${CLAUDIVERSE_TOKEN:?CLAUDIVERSE_TOKEN must be set}"
 
-[ -x "$HERE/claude-semi" ] || { echo "launch: no claude-semi — run ./build.sh first" >&2; exit 1; }
+# SEMI_BINARY=<path>: run another binary with this seat wiring — e.g. the
+# untouched stock one (../versionref/<v>-bin), to see what works with no
+# runtime loaded at all.
+BIN="${SEMI_BINARY:-$HERE/claude-semi}"
+[ -x "$BIN" ] || { echo "launch: no binary at $BIN — run ./build.sh first" >&2; exit 1; }
 if tmux has-session -t "=$TITLE" 2>/dev/null; then
     echo "launch: a tmux session named $TITLE already exists" >&2; exit 1
 fi
@@ -97,7 +101,7 @@ if [ "$CLEAN" = True ]; then
     esac
     CONFIG_DIR="$HOME/claudiverse-semi/.config/$TITLE"
     mkdir -p "$CONFIG_DIR"
-    python3 - "$CONFIG_DIR/.claude.json" "$(cd "$WORKDIR" && pwd -P)" "$("$HERE/claude-semi" --version 2>/dev/null | awk '{print $1}')" <<'PY'
+    python3 - "$CONFIG_DIR/.claude.json" "$(cd "$WORKDIR" && pwd -P)" "$("$BIN" --version 2>/dev/null | awk '{print $1}')" <<'PY'
 import json, os, sys
 path, workdir, version = sys.argv[1:]
 cfg = json.load(open(path)) if os.path.exists(path) else {}
@@ -141,7 +145,7 @@ if [ "$(state 007-remote-answer)" != patch ] || [ -n "$INBOX" ] || [ -n "${SEMI_
     python3 - "$LINK_DIR/settings-hooks.json" "${CLAUDIVERSE_URL%/}/api/hooks/seat/$TITLE/pretooluse" \
         "$(state 007-remote-answer)" "${SEMI_EXTRA_HOOKS:-}" "$INBOX" "$HERE/hooks/cv-inbox.sh" \
         "${CLAUDIVERSE_URL%/}" "$TITLE" <<'PY'
-import json, shlex, sys
+import json, shlex, sys, urllib.parse
 path, url, state007, extra, inbox, inbox_sh, server, title = sys.argv[1:]
 hooks = {}
 if inbox:
@@ -156,6 +160,14 @@ if inbox:
               "rewakeSummary": "claudiverse message"}
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
         hooks[event] = [{"hooks": [dict(poller)]}]
+    # Permission prompts, answerable from the panel/app: the server holds the
+    # hook until an answer (the terminal dialog stays live meanwhile — it races
+    # the hook), withdrawing it from the panel if the operator answers here.
+    hooks["PermissionRequest"] = [{"hooks": [{
+        "type": "http", "timeout": 3600,
+        "url": server + "/api/hooks/seat/" + urllib.parse.quote(title, safe="") + "/permissionrequest",
+        "headers": {"Authorization": "Bearer $CLAUDIVERSE_TOKEN"},
+        "allowedEnvVars": ["CLAUDIVERSE_TOKEN"]}]}]
 if state007 != "patch":
     hooks["PreToolUse"] = [{"matcher": "AskUserQuestion", "hooks": [{
         "type": "http", "url": url, "timeout": 3600,
@@ -175,7 +187,7 @@ fi
 
 ARGS=()
 for kv in "${ENVV[@]}"; do ARGS+=(-e "$kv"); done
-tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi" "${CLAUDE_ARGS[@]}"
+tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$BIN" "${CLAUDE_ARGS[@]}"
 
 # A development channel asks for confirmation at every start. Confirm it once
 # the dialog is on screen (Enter selects "I am using this for local
@@ -194,5 +206,6 @@ fi
 [ -n "$PROVIDES" ] && echo "proxy provides: $PROVIDES (written into the seat's own row)"
 [ "$CLEAN" = True ] && echo "clean seat: config in $CONFIG_DIR (trust pre-written, no operator MCP/hooks/plugins)"
 [ "$POOLED" = True ] && echo "pooled seat: credentials come from the proxy (CLAUDE_CODE_OAUTH_TOKEN=cv-pool)"
+[ -n "${SEMI_BINARY:-}" ] && echo "binary: $BIN ($("$BIN" --version 2>/dev/null | head -1))"
 echo "started $TITLE in $WORKDIR ($(head -1 "$HERE/BUILD.txt" 2>/dev/null || echo 'no BUILD.txt'))"
 echo "  attach: tmux attach -t $TITLE    stop: tmux kill-session -t $TITLE"
