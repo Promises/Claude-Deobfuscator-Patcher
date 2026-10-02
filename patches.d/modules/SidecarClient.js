@@ -879,7 +879,10 @@ var __claudiverse = (function() {
     return {
       host: host || undefined,
       fleet: process.env.CLAUDIVERSE_FLEET || undefined,
-      origin: process.env.CLAUDIVERSE_ORIGIN || "manual"
+      origin: process.env.CLAUDIVERSE_ORIGIN || "manual",
+      // May this seat ask for the operator (cv_request_human)? Sent as "1" or
+      // "0" every time, so a seat relaunched without the opt-in loses it.
+      notify: process.env.CLAUDIVERSE_NOTIFY === "1" ? "1" : "0"
     };
   }
 
@@ -891,7 +894,8 @@ var __claudiverse = (function() {
       display_title: displayTitleCache || undefined,
       host: placement.host,
       fleet: placement.fleet,
-      origin: placement.origin
+      origin: placement.origin,
+      notify: placement.notify
     });
     try {
       var url = new URL(BASE_URL + "/api/sessions");
@@ -964,6 +968,7 @@ var __claudiverse = (function() {
     if (placement.host) postBody.host = placement.host;
     if (placement.fleet) postBody.fleet = placement.fleet;
     postBody.origin = placement.origin;
+    postBody.notify = placement.notify;
     var postData = JSON.stringify(postBody);
     var parsed = new URL(BASE_URL + "/api/sessions");
     var mod = parsed.protocol === "https:" ? https : http;

@@ -30,7 +30,8 @@ SEAT=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1
 PLACE=$(python3 -c 'import os, socket, urllib.parse
 q = {"host": os.environ.get("CLAUDIVERSE_HOST") or socket.gethostname(),
      "fleet": os.environ.get("CLAUDIVERSE_FLEET", ""),
-     "origin": os.environ.get("CLAUDIVERSE_ORIGIN", "manual")}
+     "origin": os.environ.get("CLAUDIVERSE_ORIGIN", "manual"),
+     "notify": "1" if os.environ.get("CLAUDIVERSE_NOTIFY") == "1" else "0"}
 print(urllib.parse.urlencode({k: v for k, v in q.items() if v}))' 2>/dev/null)
 
 BODY=$(mktemp)
