@@ -46,3 +46,16 @@ request and handles 429/401 failover itself (server `11b85b5`).
 `overlay/pooled-seat-no-local-credentials.patch` stops the sidecar handing
 such a seat a real token through its lease, the switch-back push, or the
 401 refresh callback. A pooled seat only works through the proxy.
+
+## Clean seats (011 replaced)
+
+With `011-trust` replaced (which requires 012 replaced: a clean config has no
+login), `launch.sh` gives each seat its own `CLAUDE_CONFIG_DIR` under
+`~/claudiverse-semi/.config/<title>` — none of the operator's MCP servers,
+hooks, plugins or global CLAUDE.md — and pre-writes only onboarding-done and
+the work dir's trust. That entry is what replaces patch 011; without it the
+trust dialog appears (the control run). Work dirs default to
+`/Users/Shared/claudiverse-semi/<title>`: Claude Code reads `.claude/CLAUDE.md`
+in every ancestor of the work dir, so a seat under `$HOME` still inherits
+`~/.claude/CLAUDE.md`. `DISABLE_AUTOUPDATER=1` is always set — the binary is
+pinned, and the updater otherwise takes it for the user's install.

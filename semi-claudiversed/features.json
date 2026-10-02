@@ -68,8 +68,8 @@
       "hooks": [
         "011-spawn-trust"
       ],
-      "state": "patch",
-      "replacement": "spawner pre-writes the folder's trust entry"
+      "state": "replaced",
+      "replacement": "launch.sh gives each seat its own CLAUDE_CONFIG_DIR and pre-writes the work dir's hasTrustDialogAccepted there"
     },
     "012-failover": {
       "hooks": [
