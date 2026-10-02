@@ -160,6 +160,10 @@ if inbox:
               "rewakeSummary": "claudiverse message"}
     for event in ("SessionStart", "UserPromptSubmit", "Stop"):
         hooks[event] = [{"hooks": [dict(poller)]}]
+    # A turn that ends without a Stop hook (an interrupt fires none) would
+    # leave the busy UserPromptSubmit poller as the newest; Claude Code's
+    # idle_prompt notification (about a minute at the prompt) re-arms it idle.
+    hooks["Notification"] = [{"matcher": "idle_prompt", "hooks": [dict(poller)]}]
     # Permission prompts, answerable from the panel/app: the server holds the
     # hook until an answer (the terminal dialog stays live meanwhile — it races
     # the hook), withdrawing it from the panel if the operator answers here.

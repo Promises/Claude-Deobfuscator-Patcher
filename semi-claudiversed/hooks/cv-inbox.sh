@@ -43,6 +43,10 @@ while :; do
              # operator would. TMUX_PANE is inherited from Claude Code's pane;
              # launch.sh names the tmux session after the seat as a fallback.
              tmux send-keys -t "${TMUX_PANE:-=$TITLE}" Escape 2>/dev/null
+             # An interrupted turn fires no Stop hook, so this poller stays
+             # the newest one: it must now say "idle", not the busy event it
+             # was started with, or a server restart reads the seat as busy.
+             EVENT=Stop
              [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) interrupt -> Escape to ${TMUX_PANE:-=$TITLE}" >> "$CV_INBOX_LOG" ;;
         409) exit 0 ;;                         # a newer poll took over
         401|403|404) exit 0 ;;                 # misconfigured: stop, don't hammer
