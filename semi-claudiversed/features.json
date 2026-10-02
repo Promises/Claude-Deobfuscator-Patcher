@@ -60,8 +60,8 @@
       "hooks": [
         "009-compact"
       ],
-      "state": "patch",
-      "replacement": "proxy (compaction request class) or PreCompact/PostCompact hooks",
+      "state": "replaced",
+      "replacement": "proxy in primary mode (provides compact): the compaction request class, labelled by Claude Code itself",
       "provides": "compact"
     },
     "011-trust": {
