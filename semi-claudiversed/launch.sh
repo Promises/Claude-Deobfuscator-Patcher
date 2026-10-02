@@ -147,6 +147,9 @@ hooks = {}
 if inbox:
     # 003 replaced: the inbox poller, re-armed at every point the seat can go
     # idle from. The server keeps only the newest poll, so overlap is harmless.
+    # 🔴 rewakeMessage is a CONTRACT: the server's proxy observer finds inbox
+    # prompts in the request by this exact prefix and mirrors them as user
+    # prompts (Proxy.Observer @inbox_marker). Change both or neither.
     poller = {"type": "command", "asyncRewake": True, "timeout": 604800,
               "command": " ".join(shlex.quote(a) for a in (inbox_sh, server, title)),
               "rewakeMessage": "Message from the claudiverse orchestrator:",
