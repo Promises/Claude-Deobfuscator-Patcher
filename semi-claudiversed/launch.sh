@@ -169,6 +169,10 @@ PY
     CLAUDE_ARGS+=(--settings "$LINK_DIR/settings-hooks.json")
 fi
 
+# The inbox poller's own log: one line per poller start (with the hook event
+# that started it) and per poll result.
+[ -n "$INBOX" ] && ENVV+=("CV_INBOX_LOG=$LINK_DIR/inbox.log")
+
 ARGS=()
 for kv in "${ENVV[@]}"; do ARGS+=(-e "$kv"); done
 tmux new-session -d -s "$TITLE" -x 200 -y 50 -c "$WORKDIR" "${ARGS[@]}" "$HERE/claude-semi" "${CLAUDE_ARGS[@]}"

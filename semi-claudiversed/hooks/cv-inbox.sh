@@ -11,11 +11,18 @@
 #
 # Needs CLAUDIVERSE_TOKEN in the environment (launch.sh sets it).
 
-cat >/dev/null 2>&1    # the hook's JSON input; nothing in it is needed here
+# The hook's JSON input names the event that started this poller. The live
+# poller is always the newest, so its event is the seat's latest transition:
+# SessionStart/Stop = it just went idle, UserPromptSubmit = it just went busy.
+# The server uses that to recover readiness after a restart wipes it.
+EVENT=$(python3 -c 'import json, sys
+try: print(json.load(sys.stdin).get("hook_event_name", ""))
+except Exception: print("")' 2>/dev/null)
 
 URL=${1%/}
 SEAT=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$2")
 [ -n "$URL" ] && [ -n "$SEAT" ] && [ -n "$CLAUDIVERSE_TOKEN" ] || exit 0
+[ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) start event=$EVENT" >> "$CV_INBOX_LOG"
 
 BODY=$(mktemp)
 trap 'rm -f "$BODY"' EXIT
@@ -23,7 +30,8 @@ trap 'rm -f "$BODY"' EXIT
 while :; do
     CODE=$(curl -sS -o "$BODY" -w '%{http_code}' -m 3660 \
         -H "Authorization: Bearer $CLAUDIVERSE_TOKEN" \
-        "$URL/api/seats/$SEAT/inbox?wait=3600" 2>/dev/null) || CODE=000
+        "$URL/api/seats/$SEAT/inbox?wait=3600&event=$EVENT" 2>/dev/null) || CODE=000
+    [ -n "${CV_INBOX_LOG:-}" ] && echo "$(date -u +%H:%M:%S) poll event=$EVENT -> $CODE" >> "$CV_INBOX_LOG"
     case "$CODE" in
         200) cat "$BODY" >&2; exit 2 ;;       # a prompt: wake the seat with it
         204) ;;                                # nothing yet: poll again
