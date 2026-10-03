@@ -15,9 +15,14 @@
 # poller is always the newest, so its event is the seat's latest transition:
 # SessionStart/Stop = it just went idle, UserPromptSubmit = it just went busy.
 # The server uses that to recover readiness after a restart wipes it.
-EVENT=$(python3 -c 'import json, sys
-try: print(json.load(sys.stdin).get("hook_event_name", ""))
-except Exception: print("")' 2>/dev/null)
+HOOK_INPUT=$(cat 2>/dev/null)
+hook_field() { printf '%s' "$HOOK_INPUT" | python3 -c 'import json, sys
+try: print(json.load(sys.stdin).get(sys.argv[1], ""))
+except Exception: print("")' "$1" 2>/dev/null; }
+EVENT=$(hook_field hook_event_name)
+# The seat's working directory, for the app's session info (a seat with no
+# sidecar reports it here; the hook input carries Claude Code's own cwd).
+export CV_SEAT_CWD="$(hook_field cwd)"
 
 URL=${1%/}
 TITLE=$2
@@ -31,7 +36,8 @@ PLACE=$(python3 -c 'import os, socket, urllib.parse
 q = {"host": os.environ.get("CLAUDIVERSE_HOST") or socket.gethostname(),
      "fleet": os.environ.get("CLAUDIVERSE_FLEET", ""),
      "origin": os.environ.get("CLAUDIVERSE_ORIGIN", "manual"),
-     "notify": "1" if os.environ.get("CLAUDIVERSE_NOTIFY") == "1" else "0"}
+     "notify": "1" if os.environ.get("CLAUDIVERSE_NOTIFY") == "1" else "0",
+     "working_directory": os.environ.get("CV_SEAT_CWD", "")}
 print(urllib.parse.urlencode({k: v for k, v in q.items() if v}))' 2>/dev/null)
 
 BODY=$(mktemp)

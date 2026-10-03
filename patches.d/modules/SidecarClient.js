@@ -871,6 +871,28 @@ var __claudiverse = (function() {
   // picker, fleet grouping and runner filter (server: sessions.host/fleet/
   // origin). Launchers set the env: cv-spawn exports origin=spawn, cv-runner
   // origin=runner, both with the fleet. A hand-started seat is "manual".
+  // Claude Code's own version line ("2.1.286 (Claude Code) [claudiverse]"),
+  // for the app's session-info sheet; the suffix tells the builds apart.
+  // Read ONCE, in the background, by running this binary with --version.
+  // ⛔ THE CHILD MUST NOT LOAD THIS RUNTIME. It would (the bootstrap finds it
+  // beside the binary): with a token it leases and registers as a seat of its
+  // own, and even without one its handles kept it alive — measured 15 s for a
+  // --version. CLAUDIVERSE_RUNTIME pointing at nothing makes the bootstrap skip
+  // it (one "cv-load-failed" line on the child's stderr): measured 0.06 s.
+  var clientVersion = null;
+  try {
+    require("child_process").execFile(process.execPath, ["--version"],
+      { env: { HOME: process.env.HOME || "", PATH: process.env.PATH || "",
+               CLAUDIVERSE_RUNTIME: "/nonexistent/cv-runtime.mjs" }, timeout: 15000 },
+      function (err, stdout) {
+        var line = String(stdout || "").split("\n")[0].trim();
+        if (!line) return;
+        clientVersion = line;
+        // Already registered without it: re-POST so the row gets it now.
+        try { if (claudeSessionId) pushTitle(serverTitle || resolveTitle()); } catch (e) {}
+      });
+  } catch (e) {}
+
   function seatPlacement() {
     var host = process.env.CLAUDIVERSE_HOST;
     if (!host) {
@@ -882,7 +904,9 @@ var __claudiverse = (function() {
       origin: process.env.CLAUDIVERSE_ORIGIN || "manual",
       // May this seat ask for the operator (cv_request_human)? Sent as "1" or
       // "0" every time, so a seat relaunched without the opt-in loses it.
-      notify: process.env.CLAUDIVERSE_NOTIFY === "1" ? "1" : "0"
+      notify: process.env.CLAUDIVERSE_NOTIFY === "1" ? "1" : "0",
+      working_directory: (function () { try { return process.cwd(); } catch (e) { return undefined; } })(),
+      client_version: clientVersion || undefined
     };
   }
 
@@ -895,7 +919,9 @@ var __claudiverse = (function() {
       host: placement.host,
       fleet: placement.fleet,
       origin: placement.origin,
-      notify: placement.notify
+      notify: placement.notify,
+      working_directory: placement.working_directory,
+      client_version: placement.client_version
     });
     try {
       var url = new URL(BASE_URL + "/api/sessions");
@@ -969,6 +995,8 @@ var __claudiverse = (function() {
     if (placement.fleet) postBody.fleet = placement.fleet;
     postBody.origin = placement.origin;
     postBody.notify = placement.notify;
+    if (placement.working_directory) postBody.working_directory = placement.working_directory;
+    if (placement.client_version) postBody.client_version = placement.client_version;
     var postData = JSON.stringify(postBody);
     var parsed = new URL(BASE_URL + "/api/sessions");
     var mod = parsed.protocol === "https:" ? https : http;
