@@ -14,6 +14,11 @@
 // the binary by the injected call sites; renaming one silently disables that
 // hook rather than breaking a build. Keep them in step with tools/cvinject.py.
 
+// This seat is a claudiverse seat through the PATCHED runtime: the
+// claudiverse-seat mod (mods/claudiverse-seat) reads this and stays inert, so
+// a patched seat with the mod installed never registers or mirrors twice.
+process.env.CLAUDIVERSE_PATCHED_RUNTIME = "1";
+
 const log = (...a) => {
     if (!process.env.CLAUDIVERSE_DEBUG) return;
     try {
